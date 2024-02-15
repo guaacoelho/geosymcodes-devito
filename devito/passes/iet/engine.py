@@ -69,7 +69,7 @@ class Graph(object):
                 compiler.add_library_dirs(as_tuple(metadata.get('lib_dirs')))
             except KeyError:
                 pass
-
+            
             if efunc is self.efuncs[i]:
                 continue
 

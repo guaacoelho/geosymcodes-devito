@@ -1,14 +1,15 @@
-from ctypes import c_double, c_void_p, c_int, Structure
+from ctypes import c_double, c_void_p, c_int, Structure, c_longlong, c_int64
 
 import numpy as np
 from sympy.core.core import ordering_of_classes
+from sympy.codegen.ast import SignedIntType
 
 from devito.types import CompositeObject, Indexed, Symbol
 from devito.types.basic import IndexedData
 from devito.tools import Pickable, as_tuple
 
 __all__ = ['Timer', 'Pointer', 'VolatileInt', 'FIndexed', 'Wildcard',
-           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE']
+           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 'off_t']
 
 
 class Timer(CompositeObject):
@@ -199,3 +200,13 @@ class FILE(Structure):
     Class representing the FILE structure type in C/C++.
     """
     _fields_ = [("FILE", c_int)]
+    
+    
+class off_t(c_int64):
+    
+    """
+    Class representing the off_t type in C/C++
+    """
+
+    pass
+    

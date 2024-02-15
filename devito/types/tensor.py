@@ -79,6 +79,7 @@ class TensorFunction(AbstractTensor):
         inds, _ = Function.__indices_setup__(grid=grid,
                                              dimensions=dimensions)
         self._space_dimensions = inds
+        self.ignoreDefinition = self.__ignoreDefinition_setup__(**kwargs)
 
     @classmethod
     def __subfunc_setup__(cls, *args, **kwargs):

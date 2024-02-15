@@ -176,8 +176,8 @@ class LocalObject(AbstractObject):
     __rkwargs__ = ('cargs', 'liveness')
 
     def __init__(self, name, cargs=None, **kwargs):
-        self.name = name
         self.cargs = as_tuple(cargs)
+        super(LocalObject, self).__init__(name, **kwargs)
 
         self._liveness = kwargs.get('liveness', 'lazy')
         assert self._liveness in ['eager', 'lazy']

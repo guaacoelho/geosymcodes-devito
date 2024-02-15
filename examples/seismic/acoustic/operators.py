@@ -135,9 +135,11 @@ def ForwardOperator(model, geometry, space_order=4,
     rec_term = rec.interpolate(expr=u)
 
     # Substitute spacing terms to reduce flops
-    return Operator(eqn + src_term + rec_term, subs=model.spacing_map,
+    #kwargs.pop("opt")
+    #kwargs.update({"opt": ('advanced', {'out-of-core': (u, "forward")})})
+    op = Operator(eqn + src_term + rec_term, subs=model.spacing_map,
                     name='Forward', **kwargs)
-
+    return op
 
 def AdjointOperator(model, geometry, space_order=4,
                     kernel='OT2', **kwargs):
@@ -220,8 +222,12 @@ def GradientOperator(model, geometry, space_order=4, save=True,
     receivers = rec.inject(field=v.backward, expr=rec * s**2 / m)
 
     # Substitute spacing terms to reduce flops
-    return Operator(eqn + receivers + [gradient_update], subs=model.spacing_map,
+    kwargs.pop("opt")
+    kwargs.update({"opt": ('advanced', {'out-of-core': (u, "gradient")})})
+    op = Operator(eqn + receivers + [gradient_update], subs=model.spacing_map,
                     name='Gradient', **kwargs)
+    #import pdb; pdb.set_trace()
+    return op
 
 
 def BornOperator(model, geometry, space_order=4,

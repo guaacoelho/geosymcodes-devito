@@ -1,23 +1,22 @@
 import numpy as np
-
 import ctypes as ct
-
 import cgen
 
+from pdb import set_trace
 from sympy import Mod
-
 from functools import reduce
-
 from collections import OrderedDict
+from sympy.codegen.ast import SignedIntType
 
-from devito.ir.iet import (Expression, Increment, Iteration, List, Conditional, SyncSpot,
-                           Section, HaloSpot, ExpressionBundle, Call, Conditional, CallableBody, Callable, Return, FindSymbols)
-from devito.ir.equations import IREq, ClusterizedEq
-from devito.symbolics.extended_sympy import FieldFromPointer
 from devito.tools import timed_pass
 from devito.symbolics import (CondEq, CondNe, Macro, String)
-from devito.types import CustomDimension, Array, PointerArray, Symbol, IndexedData, Pointer, FILE, Timer, NThreads
-from devito.ir.support import (Interval, IntervalGroup, IterationSpace)
+# from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
+from devito.types import (CustomDimension, Array, Symbol, TimeDimension, SpaceDimension, off_t)
+from devito.ir.iet import (Expression, Increment, Iteration, List, Conditional, SyncSpot,
+                           Section, HaloSpot, ExpressionBundle, Call, Conditional, CallableBody, 
+                           Callable, FindSymbols, FindNodes, Transformer, Return)
+from devito.ir.equations import IREq, ClusterizedEq
+from devito.ir.support import (Interval, IntervalGroup, IterationSpace, Backward, PARALLEL, AFFINE)
 
 __all__ = ['iet_build']
 
@@ -28,15 +27,17 @@ def iet_build(stree, **kwargs):
     Construct an Iteration/Expression tree(IET) from a ScheduleTree.
     """
 
-    out_of_core = kwargs['options']['out-of-core']
+    ooc = kwargs['options']['out-of-core']
+    is_mpi = kwargs['options']['mpi']
+    
     nsections = 0
     queues = OrderedDict()
     for i in stree.visit():
         if i == stree:
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
-            if(out_of_core):
-                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'])
+            if(ooc):
+                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'], ooc.function, ooc.mode, is_mpi)
                 return List(body=iet_body)
             else:                
                 return List(body=iet_body)
@@ -54,7 +55,13 @@ def iet_build(stree, **kwargs):
             body = Conditional(i.guard, queues.pop(i))
 
         elif i.is_Iteration:
-            body = Iteration(queues.pop(i), i.dim, i.limits, direction=i.direction,
+            iteration_nodes = queues.pop(i)
+            if isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'forward':
+                iteration_nodes.append(Section("write_temp"))
+            elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'gradient':
+                iteration_nodes.insert(-1, Section("read_temp"))
+
+            body = Iteration(iteration_nodes, i.dim, i.limits, direction=i.direction,
                              properties=i.properties, uindices=i.sub_iterators)
 
         elif i.is_Section:
@@ -73,89 +80,131 @@ def iet_build(stree, **kwargs):
 
 
 @timed_pass(name='ooc_build')
-def _ooc_build(iet_body, nt, profiler):
-    # Creates nthreads parameter representation.
-    # It needs to be created once again in order to enable the ignoreDefinition flag,
-    # avoinding multi definition of nthreads variable.
-    nthreads = NThreads(ignoreDefinition=True)
+def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi):
+    """
+    This private method builds a iet_body (list) with out-of-core nodes.
 
-    # Build files array
-    cdim = [CustomDimension(name="nthreads", symbolic_size=nthreads)]
-    filesArray = Array(name='files', dimensions=cdim, dtype=np.int32)
+    Args:
+        iet_body (List): a list of nodes
+        nthreads (NThreads): an object of devito threads
+        profiler (Profiler): a devito profiler
+        func (Function): the function
+        out_of_core (string): 'forward' or 'gradient'
+        is_mpi (bool): flag of MPI execution
 
-    # Test files array 
-    pstring = String("'Error to alloc'")
-    printfCall = Call(name="printf", arguments=pstring)
-    exitCall = Call(name="exit", arguments=1)
-    arrCond = Conditional(CondEq(filesArray, Macro('NULL')), [printfCall, exitCall])
+    Returns:
+        List : iet_body is a list of nodes
+    """
+    
+    # Creates nthreads once again in order to enable the ignoreDefinition flag
+    #nthreads = NThreads(ignoreDefinition=True)
+    
+    is_forward = out_of_core == 'forward'
 
-    #Call open_thread_files
-    open_thread_call = Call(name='open_thread_files', arguments=[filesArray, nthreads])
-
-    # Build open section
-    sec = Section("open", [arrCond, open_thread_call])
-
-    # Close files array
+    ######## Dimension and symbol for iteration spaces ########
+    nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads)    
     iSymbol = Symbol(name="i", dtype=np.int32)
-    closeCall = Call(name="close", arguments=filesArray[iSymbol])
-    iDim = CustomDimension(name="i", symbolic_size=nthreads)
-    closeFilesIteration = Iteration(closeCall, iDim, nthreads - 1)
-    closeSec = Section("close", closeFilesIteration)
-
-    # Build write_size var
-    write_size = Symbol(name="write_size", dtype=np.int64)
-    time_M = Symbol(name="time_M", dtype=np.int32)
-    time_m = Symbol(name="time_m", dtype=np.int32)
-    u_vecSize1 = FieldFromPointer("size[1]", "u_vec")
-    u_size = Symbol(name="u_size", dtype=np.int32)
-    writeEq = IREq(write_size, ((time_M - time_m+1) * u_vecSize1 * u_size))
-    cWriteEq = ClusterizedEq(writeEq, ispace=None)
-    writeExp = Expression(cWriteEq, None, True)
     
-    timerProfiler = Timer(profiler.name, [], ignoreDefinition=True)
-    saveCall = Call(name='save', arguments=[nthreads, timerProfiler, write_size]) #save(nthreads, timers, write_size);
+    # testScalar = Scalar(name="testScalar", ignoreDefinition=True)
 
-    symbs = FindSymbols("symbolics").visit(iet_body)
+
+    ######## Build files and counters arrays ########
+    filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32)
+    countersArray = Array(name='counters', dimensions=[nthreadsDim], dtype=np.int32)
+
+
+    ######## Build open section ########
+    openSection = open_build(filesArray, countersArray, nthreadsDim, nthreads, is_forward, iSymbol)
+
+    ######## Build func_size var ########
+    func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
+    funcSizeExp, floatSizeInit = func_size_build(func, func_size)
+
+    ######## Build write/read section ########
     dims = FindSymbols("dimensions").visit(iet_body)
-    basics = FindSymbols("basics").visit(iet_body)
-    bases = FindSymbols("indexedbases").visit(iet_body)
-    defs = FindSymbols("defines").visit(iet_body)
-    globals = FindSymbols("globals").visit(iet_body)
-
-    uStencil = next((symb for symb in symbs if symb.name == "u"), None)
     t0 = next((dim for dim in dims if dim.name == "t0"), None)
+    write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, t0, countersArray, is_mpi)
     
-    floatSize = Symbol(name="float_size", dtype=np.uint64)
-    floatString = String(r"float")
-    floatSizeInit = Call(name="sizeof", arguments=[floatString], retobj=floatSize)
-    sizes = uStencil.symbolic_shape[2:]
 
-    u_size = Symbol(name="u_size", dtype=np.uint64)
-    UEq = IREq(u_size, (reduce(lambda x, y: x * y, sizes) * floatSize))
-    cUEq = ClusterizedEq(UEq, ispace=None)
-    UExp = Expression(cUEq, None, True)
-
-    writeSection = write_build(nthreads, filesArray, iSymbol, u_size, uStencil, t0, uStencil.symbolic_shape[1])
+    ######## Build close section ########
+    closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)
     
-    saveCallable = save_build(nthreads, timerProfiler, write_size)
+
+    ######## Build write_size var ########
+    size_name = 'write_size' if is_forward else 'read_size'
+    ioSize = Symbol(name=size_name, dtype=np.int64)
+    ioSizeExp = io_size_build(ioSize, func_size, func)
     
-    openThreadsCallable = open_threads_build(nthreads, filesArray, iSymbol, iDim)
 
-    #import pdb; pdb.set_trace()
-
-    iet_body.insert(0, UExp)
+    ######## Build save call ########
+    # timerProfiler = Timer(profiler.name, [], ignoreDefinition=True)
+    # saveCall = Call(name='save_temp', arguments=[nthreads, timerProfiler, ioSize])
+    
+    #TODO: Generate blank lines between sections
+    iet_body.insert(0, funcSizeExp)
     iet_body.insert(0, floatSizeInit)
-    iet_body.insert(0, sec)
-    iet_body.append(closeSec)
-    iet_body.append(writeSection)
-    iet_body.append(writeExp)
-    iet_body.append(saveCall)
+    iet_body.insert(0, openSection)
+    iet_body.append(closeSection)
+    iet_body.append(ioSizeExp)
+    # iet_body.append(saveCall)
 
     return iet_body
 
-def write_build(nthreads, filesArray, iSymbol, u_size, uStencil, t0, uVecSize1):
-    iDim = CustomDimension(name="i", symbolic_size=uVecSize1)
-    interval = Interval(iDim, 0, uVecSize1)
+def open_build(filesArray, countersArray, nthreadsDim, nthreads, is_forward, iSymbol):
+    """
+    This method inteds to code open section for both Forward and Gradient operators.
+    
+    Args:
+        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        countersArray (counters): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        nthreadsDim (CustomDimension): dimension from 0 to nthreads 
+        nthreads (NThreads): number of threads
+        is_forward (bool): True for the Forward operator; False for the Gradient operator
+
+    Returns:
+        Section: open section
+    """
+    
+    # Test files array and exit if get wrong
+    filesArrCond = array_alloc_check(filesArray) #  Forward
+    
+    #Call open_thread_files
+    open_thread_call = Call(name='open_thread_files_temp', arguments=[filesArray, nthreads])
+
+    # Open section body
+    body = [filesArrCond, open_thread_call]
+    
+    if not is_forward:
+        countersArrCond = array_alloc_check(countersArray) # gradient
+        body.append(countersArrCond)
+        
+        intervalGroup = IntervalGroup((Interval(nthreadsDim, 0, nthreads)))
+        cNewCountersEq = ClusterizedEq(IREq(countersArray[iSymbol], 1), ispace=IterationSpace(intervalGroup))
+        openIterationGrad = Iteration(Expression(cNewCountersEq, None, False), nthreadsDim, nthreads-1)
+        body.append(openIterationGrad)
+        
+    return Section("open", body)
+
+def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecSize1, is_mpi):
+    """
+    This method inteds to code gradient.c write section.
+    Obs: maybe the desciption of the variables should be better    
+
+    Args:
+        nthreads (NThreads): symbol of number of threads
+        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        iSymbol (Symbol): symbol of the iterator index i
+        func_size (Symbol): the funcStencil size
+        funcStencil (u): a stencil we call u
+        t0 (ModuloDimension): time t0
+        uVecSize1 (FieldFromPointer): size of a vector u
+
+    Returns:
+        Section: complete wrie section
+    """
+    
+    uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
+    interval = Interval(uSizeDim, 0, uVecSize1)
     intervalGroup = IntervalGroup((interval))
     ispace = IterationSpace(intervalGroup)
     itNodes = []
@@ -166,122 +215,241 @@ def write_build(nthreads, filesArray, iSymbol, u_size, uStencil, t0, uVecSize1):
     itNodes.append(Expression(cTidEq, None, True))
     
     ret = Symbol(name="ret", dtype=np.int32)
-    writeCall = Call(name="write", arguments=[filesArray[tid], uStencil[t0, iSymbol], u_size], retobj=ret)
+    writeCall = Call(name="write", arguments=[filesArray[tid], funcStencil[t0, iSymbol], func_size], retobj=ret)
     itNodes.append(writeCall)
+    
+    pstring = String("\"Write size mismatch with function slice size\"")
 
-    pstring = String("'Cannot open output file'")
     condNodes = [Call(name="perror", arguments=pstring)]
     condNodes.append(Call(name="exit", arguments=1))
-    cond = Conditional(CondNe(ret, u_size), condNodes)
+    cond = Conditional(CondNe(ret, func_size), condNodes)
     itNodes.append(cond)
 
-    iDim = CustomDimension(name="i", symbolic_size=uVecSize1)
-    pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
-    writeIteration = Iteration(itNodes, iDim, uVecSize1-1, pragmas=[pragma])
+    # TODO: Pragmas should depend on the user's selected optimization options and be generated by the compiler
+    if is_mpi:
+        pragma = cgen.Pragma("omp parallel for schedule(static,1)")
+    else:
+        pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
+    writeIteration = Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])
 
     return Section("write", writeIteration)
 
+def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecSize1, counters):
+    """
+    This method inteds to code gradient.c read section.
+    Obs: maybe the desciption of the variables should be better    
+
+    Args:
+        nthreads (NThreads): symbol of number of threads
+        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        iSymbol (Symbol): symbol of the iterator index i
+        func_size (Symbol): the funcStencil size
+        funcStencil (u): a stencil we call u
+        t0 (ModuloDimension): time t0
+        uVecSize1 (FieldFromPointer): size of a vector u
+        counters (array): pointer of allocated memory of nthreads dimension. Each place has a size of int
+
+    Returns:
+        section (Section): complete read section
+    """
+    
+    #  pragma omp parallel for schedule(static,1) num_threads(nthreads)
+    #  0 <= i <= u_vec->size[1]-1
+    #  TODO: Pragmas should depend on user's selected optimization options and generated by the compiler
+    pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
+    iDim = CustomDimension(name="i", symbolic_size=uVecSize1)
+    interval = Interval(iDim, 0, uVecSize1)
+    intervalGroup = IntervalGroup((interval))
+    ispace = IterationSpace(intervalGroup)
+    itNodes = []
+
+    # int tid = i%nthreads;
+    tid = Symbol(name="tid", dtype=np.int32)
+    tidEq = IREq(tid, Mod(iSymbol, nthreads))
+    cTidEq = ClusterizedEq(tidEq, ispace=ispace)
+    itNodes.append(Expression(cTidEq, None, True))
+    
+    # off_t offset = counters[tid] * func_size;
+    # lseek(files[tid], -1 * offset, SEEK_END);
+    # TODO: make offset be a off_t
+    offset = Symbol(name="offset", dtype=off_t)
+    offsetEq = IREq(offset, (-1)*counters[tid]*func_size)
+    cOffsetEq = ClusterizedEq(offsetEq, ispace=ispace)
+    itNodes.append(Expression(cOffsetEq, None, True))    
+    itNodes.append(Call(name="lseek", arguments=[filesArray[tid], offset, Macro("SEEK_END")]))
+
+    # int ret = read(files[tid], u[t0][i], func_size);
+    ret = Symbol(name="ret", dtype=np.int32)
+    readCall = Call(name="read", arguments=[filesArray[tid], funcStencil[t0, iSymbol], func_size], retobj=ret)
+    itNodes.append(readCall)
+
+    # printf("%d", ret);
+    # perror("Cannot open output file");
+    # exit(1);
+    pret = String("'%d', ret")
+    pstring = String("\"Cannot open output file\"")
+    condNodes = [
+        Call(name="printf", arguments=pret),
+        Call(name="perror", arguments=pstring), 
+        Call(name="exit", arguments=1)
+    ]
+    cond = Conditional(CondNe(ret, func_size), condNodes) # if (ret != func_size)
+    itNodes.append(cond)
+    
+    # counters[tid] = counters[tid] + 1
+    newCountersEq = IREq(counters[tid], 1)
+    cNewCountersEq = ClusterizedEq(newCountersEq, ispace=ispace)
+    itNodes.append(Increment(cNewCountersEq))
+        
+    readIteration = Iteration(itNodes, iDim, uVecSize1-1, direction=Backward, pragmas=[pragma])
+    
+    section = Section("read", readIteration)
+
+    return section
+
+def close_build(nthreads, filesArray, iSymbol, nthreadsDim):
+    """
+    This method inteds to code gradient.c close section.
+    Obs: maybe the desciption of the variables should be better
+
+    Args:
+        nthreads (NThreads): symbol of number of threads
+        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        iSymbol (Symbol): symbol of the iterator index i
+        nthreadsDim (CustomDimension): dimension from 0 to nthreads
+
+    Returns:
+        section (Section): complete close section
+    """
+
+    # close(files[i]);
+    itNode = Call(name="close", arguments=[filesArray[iSymbol]])    
+    
+    # for(int i=0; i < nthreads; i++) --> for(int i=0; i <= nthreads-1; i+=1)
+    closeIteration = Iteration(itNode, nthreadsDim, nthreads-1)
+    
+    section = Section("close", closeIteration)
+    
+    return section
+
+def array_alloc_check(array):
+    """
+    Checks wether malloc worked for array allocation.
+
+    Args:
+        array (Array): array (files or counters)
+
+    Returns:
+        Conditional: condition to handle allocated array
+    """
+    
+    pstring = String("\"Error to alloc\"")
+    printfCall = Call(name="printf", arguments=pstring)
+    exitCall = Call(name="exit", arguments=1)
+    return Conditional(CondEq(array, Macro('NULL')), [printfCall, exitCall])
     
 
-def open_threads_build(nthreads, filesArray, iSymbol, iDim):
-    nvme_id = Symbol(name="nvme_id", dtype=np.int32)
-    ndisks = Symbol(name="NDISKS", dtype=np.int32)
-    nvmeIdEq = IREq(nvme_id, Mod(iSymbol, ndisks))
-    cNvmeIdEq = ClusterizedEq(nvmeIdEq, ispace=None) # ispace
+def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray, is_mpi):
+    """
+    Builds the read or write section of the operator, depending on the out_of_core mode.
+    Replaces the temporary section at the end of the time iteration by the read or write section.   
 
-    itNodes=[]
-    itNodes.append(Expression(cNvmeIdEq, None, True))
+    Args:
+        iet_body (List): list of IET nodes 
+        is_forward (bool): True for the Forward operator; False for the Gradient operator
+        nthreads (NThreads): symbol of number of threads
+        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        iSymbol (Symbol): symbol of the iterator index i
+        func_size (Symbol): the funcStencil size
+        funcStencil (u): a stencil we call u
+        t0 (ModuloDimension): time t0
+        countersArray (array): pointer of allocated memory of nthreads dimension. Each place has a size of int
 
-    nameDim = [CustomDimension(name="nameDim", symbolic_size=100)]
-    nameArray = Array(name='name', dimensions=nameDim, dtype=np.byte)
-
-    pstring = String(r"'data/nvme%d/thread_%d.data'")
-    itNodes.append(Call(name="sprintf", arguments=[nameArray, pstring, nvme_id, iSymbol]))
-
-    pstring = String(r"'Creating file %s\n'")
-    itNodes.append(Call(name="printf", arguments=[pstring, nameArray]))
-
-    ifNodes=[]
-    pstring = String(r"'Cannot open output file\n'")
-    ifNodes.append(Call(name="perror", arguments=pstring))
-
-    ifNodes.append(Call(name="exit", arguments=1))
-
-    opFlagsStr = String("OPEN_FLAGS")
-    flagsStr = String("S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH")
-    openCall = Call(name="open", arguments=[nameArray, opFlagsStr, flagsStr], retobj=filesArray[iSymbol])
-    itNodes.append(openCall)
-
-    openCond = Conditional(CondEq(filesArray[iSymbol], -1), ifNodes)
+    """
     
-    itNodes.append(openCond)
+    if is_forward:
+        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, funcStencil.symbolic_shape[1], is_mpi)
+        temp_name = 'write_temp'
+    else: # gradient
+        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, funcStencil.symbolic_shape[1], countersArray)
+        temp_name = 'read_temp'  
 
-    openIteration = Iteration(itNodes, iDim, nthreads-1)
+    sections = FindNodes(Section).visit(iet_body)
+    temp_sec = next((section for section in sections if section.name == temp_name), None)
+    mapper={temp_sec: ooc_section}
+
+    timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
+    transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
+    iet_body[timeIndex] = transformedIet
+
+
+def func_size_build(funcStencil, func_size):
+    """
+    Generates float_size init call and the init function size expression.
+
+    Args:
+        funcStencil (AbstractFunction): I/O function
+        func_size (Symbol): Symbol representing the I/O function size
+
+    Returns:
+        funcSizeExp: Expression initializing the function size
+        floatSizeInit: Call initializing float_size
+    """
+
+    floatSize = Symbol(name="float_size", dtype=np.uint64)
+    floatString = String(r"float")
+    floatSizeInit = Call(name="sizeof", arguments=[floatString], retobj=floatSize)
     
-    body = CallableBody(openIteration)
-    callable = Callable("open_thread_files", body, "void", [filesArray, nthreads])
+    # TODO: Function name must come from user?
+    sizes = funcStencil.symbolic_shape[2:]
+    funcEq = IREq(func_size, (reduce(lambda x, y: x * y, sizes) * floatSize))
+    funcSizeExp = Expression(ClusterizedEq(funcEq, ispace=None), None, True)
 
-    return callable
+    return funcSizeExp, floatSizeInit
 
+def io_size_build(ioSize, func_size, funcStencil):
+    """
+    Generates init expression calculating io_size.
 
-def save_build(nthreads, timerProfiler, write_size):
-    printfNodes = []
-    pstring = String("'>>>>>>>>>>>>>> FORWARD <<<<<<<<<<<<<<<<<\n'")
-    printfNodes.append(Call(name="printf", arguments=[pstring]))
+    Args:
+        ioSize (Symbol): Symbol representing the total amount of I/O data
+        func_size (Symbol): Symbol representing the I/O function size
+        funcStencil (Function): function signature (Ex.: func(t, x, y, z))
 
-    pstring = String(r"'Threads %d\n'")
-    printfNodes.append(Call(name="printf", arguments=[pstring, nthreads]))
+    Returns:
+        funcSizeExp: Expression initializing ioSize
+    """
 
-    pstring = String(r"'Disks %d\n'")
-    ndisksStr = String("NDISKS")
-    printfNodes.append(Call(name="printf", arguments=[pstring, ndisksStr]))
-
-    # Must retrieve section names from somewhere
-    tSec0 = FieldFromPointer("section0", timerProfiler)
-    tSec1 = FieldFromPointer("section1", timerProfiler)
-    tSec2 = FieldFromPointer("section2", timerProfiler)
-    tOpen = FieldFromPointer("open", timerProfiler)
-    tWrite = FieldFromPointer("write", timerProfiler)
-    tClose = FieldFromPointer("close", timerProfiler)
-
-    pstring = String(r"'[FWD] Section0 %.2lf s\n'")
-    printfNodes.append(Call(name="printf", arguments=[pstring, tSec0]))
-
-    pstring = String(r"'[FWD] Section1 %.2lf s\n'")
-    printfNodes.append(Call(name="printf", arguments=[pstring, tSec1]))
-
-    pstring = String(r"'[FWD] Section2 %.2lf s\n'")
-    printfNodes.append(Call(name="printf", arguments=[pstring, tSec2])) 
-
-    pstring = String(r"'[IO] Open %.2lf s\n'")
-    printfNodes.append(Call(name="printf", arguments=[pstring, tOpen]))
-
-    pstring = String(r"'[IO] Write %.2lf s\n'")
-    printfNodes.append(Call(name="printf", arguments=[pstring, tWrite]))
-
-    pstring = String(r"'[IO] Close %.2lf s\n'")
-    printfNodes.append(Call(name="printf", arguments=[pstring, tClose]))
+    time_M = funcStencil.time_dim.symbolic_max
+    time_m = funcStencil.time_dim.symbolic_min
     
-    nameDim = [CustomDimension(name="nameDim", symbolic_size=100)]
-    nameArray = Array(name='name', dimensions=nameDim, dtype=np.byte)
-
-    fileOpenNodes = []
-    pstring = String(r"'fwd_disks_%d_threads_%d.csv'")
-    fileOpenNodes.append(Call(name="sprintf", arguments=[nameArray, pstring, ndisksStr, nthreads]))
-
-    pstring = String(r"'w'")
-    filePointer = Pointer(name="ftp", dtype=FILE)
-    fileOpenNodes.append(Call(name="fopen", arguments=[nameArray, pstring], retobj=filePointer))
-
-    filePrintNodes = []
-    pstring = String(r"'Disks, Threads, Bytes, [FWD] Section0, [FWD] Section1, [FWD] Section2, [IO] Open, [IO] Write, [IO] Close\n'")
-    filePrintNodes.append(Call(name="fprintf", arguments=[filePointer, pstring]))
+    first_space_dim_index = _get_first_space_dim_index(funcStencil.dimensions)
     
-    pstring = String(r"'%d, %d, %ld, %.2lf, %.2lf, %.2lf, %.2lf, %.2lf, %.2lf\n'")
-    filePrintNodes.append(Call(name="fprintf", arguments=[filePointer, pstring, ndisksStr, nthreads, write_size,
-                                                          tSec0, tSec1, tSec2, tOpen, tWrite, tClose]))
+    #TODO: Field and pointer must be retrieved from somewhere
+    # funcSize1 = FieldFromPointer(f"size[{first_space_dim_index}]", funcStencil._C_name)
+    funcSize1 = funcStencil.symbolic_shape[first_space_dim_index]
+    
+    ioSizeEq = IREq(ioSize, ((time_M - time_m+1) * funcSize1 * func_size))
 
-    saveCallBody = CallableBody(printfNodes+fileOpenNodes+filePrintNodes)
-    saveCallable = Callable("save", saveCallBody, "void", [nthreads, timerProfiler, write_size])
+    return Expression(ClusterizedEq(ioSizeEq, ispace=None), None, True)
 
-    return saveCallable
+
+def _get_first_space_dim_index(dimensions):
+    """
+    This method returns the index of the first space dimension of the Function.
+
+    Args:
+        dimensions (tuple): dimensions
+
+    Returns:
+        int: index
+    """
+    
+    first_space_dim_index = 0
+    for dim in dimensions:
+        if isinstance(dim, SpaceDimension):
+            break
+        else:
+            first_space_dim_index += 1
+    
+    return first_space_dim_index

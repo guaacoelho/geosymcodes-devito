@@ -7,11 +7,11 @@ from devito.mpi.routines import mpi_registry
 from devito.parameters import configuration
 from devito.operator import Operator
 from devito.tools import as_tuple, is_integer, timed_pass
-from devito.types import NThreads
+from devito.types import NThreads, AbstractFunction
 
 __all__ = ['CoreOperator', 'CustomOperator',
            # Optimization options
-           'ParTile']
+           'ParTile', 'OutOfCoreTuple']
 
 
 class BasicOperator(Operator):
@@ -389,4 +389,26 @@ class ParTile(tuple, OptOption):
         obj = super().__new__(cls, items)
         obj.default = as_tuple(default)
 
+        return obj
+
+
+class OutOfCoreTuple(OptOption):
+    def __new__(cls, items):
+        if not items:
+            return None
+        elif isinstance(items, (list, tuple)):
+            if len(items) != 2:
+                raise ValueError("Out of core options must be a two elements tuple: (function, mode)")
+            #TODO: All AbstractFunctions?
+            if not isinstance(items[0], AbstractFunction):
+                raise ValueError("First element of out of core options must be a AbstractFunction, got %s"
+                                  % type(items[0]))
+            if str(items[1]) != "forward" and str(items[1]) != "gradient":
+                raise ValueError("Second element of out of core options must be forward or gradient")
+        else:
+            raise ValueError("Wrong type for out of core options")
+        
+        obj = super().__new__(cls)
+        obj.function = items[0]
+        obj.mode = items[1]
         return obj

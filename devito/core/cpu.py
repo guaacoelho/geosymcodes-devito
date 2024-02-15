@@ -1,6 +1,6 @@
 from functools import partial
 
-from devito.core.operator import CoreOperator, CustomOperator, ParTile
+from devito.core.operator import CoreOperator, CustomOperator, ParTile, OutOfCoreTuple
 from devito.exceptions import InvalidOperator
 from devito.passes.equations import collect_derivatives
 from devito.passes.clusters import (Lift, blocking, buffering, cire, cse,
@@ -27,7 +27,7 @@ class Cpu64OperatorMixin(object):
         o['mpi'] = oo.pop('mpi')
         o['parallel'] = o['openmp']  # Backwards compatibility
 
-        o['out-of-core'] = oo.pop('out-of-core', False)
+        o['out-of-core'] = OutOfCoreTuple(oo.pop('out-of-core', None))
 
         # Buffering
         o['buf-async-degree'] = oo.pop('buf-async-degree', None)
@@ -103,8 +103,6 @@ class Cpu64NoopOperator(Cpu64OperatorMixin, CoreOperator):
         # Distributed-memory parallelism
         mpiize(graph, **kwargs)
         
-        #ooc_efuncs(graph, **kwargs)
-        
         # Shared-memory parallelism
         if options['openmp']:
             parizer = cls._Target.Parizer(sregistry, options, platform, compiler)
@@ -174,6 +172,9 @@ class Cpu64AdvOperator(Cpu64OperatorMixin, CoreOperator):
 
         # Distributed-memory parallelism
         mpiize(graph, **kwargs)
+
+        # Out of Core
+        if kwargs['options']['out-of-core']: ooc_efuncs(graph, **kwargs)
 
         # Lower BlockDimensions so that blocks of arbitrary shape may be used
         relax_incr_dimensions(graph, **kwargs)

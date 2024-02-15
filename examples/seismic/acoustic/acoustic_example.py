@@ -39,6 +39,10 @@ def run(shape=(50, 50, 50), spacing=(20.0, 20.0, 20.0), tn=1000.0,
     # Define receiver geometry (spread across x, just below surface)
     rec, u, summary = solver.forward(save=save, autotune=autotune)
 
+    uDataMean = np.mean(u.data)
+    print("\n\n-->Forward u data mean:\n\n")
+    print(uDataMean)
+
     if preset == 'constant-isotropic':
         # With a new m as Constant
         v0 = Constant(name="v", value=2.0, dtype=np.float32)
@@ -59,7 +63,11 @@ def run(shape=(50, 50, 50), spacing=(20.0, 20.0, 20.0), tn=1000.0,
     info("Applying Born")
     solver.jacobian(dm, autotune=autotune)
     info("Applying Gradient")
-    solver.jacobian_adjoint(rec, u, autotune=autotune, checkpointing=checkpointing)
+    grad, _ = solver.jacobian_adjoint(rec, u, autotune=autotune, checkpointing=checkpointing)
+
+    gDataMean = np.mean(grad.data)
+    print("\n\n-->Gradient grad data mean:\n\n")
+    print(gDataMean)
     return summary.gflopss, summary.oi, summary.timings, [rec, u.data]
 
 

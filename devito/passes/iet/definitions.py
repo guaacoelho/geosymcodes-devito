@@ -318,11 +318,7 @@ class DataManager(object):
 
         # Process inline definitions
         for k, v in MapExprStmts().visit(iet).items():
-            #print("\n\nk and v:")
-            #print(k)
-            #print(v)
             if k.is_Expression and k.is_initializable:
-                #print("k is exp and is initializable")
                 self._alloc_scalar_on_low_lat_mem((iet,) + v, k, storage)
 
         iet, _ = self._inject_definitions(iet, storage)
