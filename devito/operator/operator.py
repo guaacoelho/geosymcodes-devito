@@ -144,7 +144,11 @@ class Operator(Callable):
     _out_of_core_headers_gradient=[("_GNU_SOURCE", ""),
                                    (("ifndef", "NDISKS"), ("NDISKS", "8")), #Find a way to replace 8 by a parameter
                                    (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_RDONLY"), ("else", ), ("OPEN_FLAGS", "O_DIRECT | O_RDONLY"))]
+    _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", "8")),
+                              (("ifndef", "RATE"), ("RATE", "16"))]
     _out_of_core_includes = ["fcntl.h"]
+    _out_of_core_mpi_includes = ["mpi.h"]
+    _out_of_core_compression_includes = ["zfp.h"]
 
     def __new__(cls, expressions, **kwargs):
         if expressions is None:
@@ -187,6 +191,7 @@ class Operator(Callable):
 
         out_of_core = kwargs['options']['out-of-core']
         is_mpi = kwargs['options']['mpi']
+        is_compression = True
 
         # Lower the input expressions into an IET
         irs, byproduct = cls._lower(expressions, profiler=profiler, **kwargs)
@@ -195,10 +200,12 @@ class Operator(Callable):
         op = Callable.__new__(cls, **irs.iet.args)
         Callable.__init__(op, **op.args)
 
-        # Header files, etc.
+        # Headers
         op._headers = OrderedSet(*cls._default_headers)
         op._headers.update(byproduct.headers)
-        if out_of_core: 
+        if out_of_core and is_compression:
+            op._headers.update(cls._out_of_core_compression_headers)
+        elif out_of_core and not is_compression: 
             if out_of_core.mode == "forward":
                 if is_mpi:
                     cls._out_of_core_headers_forward[1] = (("ifndef", "NDISKS"), ("NDISKS", "4"))
@@ -207,12 +214,18 @@ class Operator(Callable):
                 op._headers.update(cls._out_of_core_headers_gradient)
         if is_mpi: 
             op._headers.update(cls._out_of_core_mpi_headers)
+            
+        # Globals
         op._globals = OrderedSet(*cls._default_globals)
         op._globals.update(byproduct.globals)
+        
+        #Includes
         op._includes = OrderedSet(*cls._default_includes)
         op._includes.update(profiler._default_includes)
         op._includes.update(byproduct.includes)
         if out_of_core: op._includes.update(cls._out_of_core_includes)
+        if is_mpi: op._includes.update(cls._out_of_core_mpi_includes)
+        if is_compression: op._includes.update(cls._out_of_core_compression_includes)
 
         # Required for the jit-compilation
         op._compiler = kwargs['compiler']
