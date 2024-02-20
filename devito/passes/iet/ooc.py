@@ -115,17 +115,19 @@ def save_build(nthreads, timerProfiler, io_size, nameArray, is_forward, is_mpi):
     return saveCallable
 
 
-def open_threads_build(nthreads, filesArray, iSymbol, nthreadsDim, nameArray, is_forward, is_mpi):
+def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, nameArray, is_forward, is_mpi, is_compression):
     """
     This method generates the function open_thread_files according to the operator used.
 
     Args:
         nthreads (NThreads): number of threads
         filesArray (Array): array of files
+        metasArray (Array): some array
         iSymbol (Symbol): symbol of the iterator index i 
         nthreadsDim (CustomDimension): dimension i from 0 to nthreads
         is_forward (bool): True for the Forward operator; False for the Gradient operator
         is_mpi (bool): True for the use of MPI; False otherwise.
+        is_compression (bool): True for the use of compression; False otherwise.
 
     Returns:
         Callable: the callable function open_thread_files
@@ -136,12 +138,11 @@ def open_threads_build(nthreads, filesArray, iSymbol, nthreadsDim, nameArray, is
     
     # TODO: initialize char name[100]
     nvme_id = Symbol(name="nvme_id", dtype=np.int32)
-    ndisks = Symbol(name="NDISKS", dtype=np.int32, ignoreDefinition=True)
-
-    opFlagsStr = String("OPEN_FLAGS")
-    flagsStr = String("S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH")
-    openCall = Call(name="open", arguments=[nameArray, opFlagsStr, flagsStr], retobj=filesArray[iSymbol])
+    ndisks = Symbol(name="NDISKS", dtype=np.int32, ignoreDefinition=True)        
     
+    ifNodes.append(Call(name="perror", arguments=String("\"Cannot open output file\\n\"")))
+    ifNodes.append(Call(name="exit", arguments=1))
+       
     if is_mpi:
         # TODO: initialize int myrank
         # TODO: initialize char error[140]
@@ -164,38 +165,56 @@ def open_threads_build(nthreads, filesArray, iSymbol, nthreadsDim, nameArray, is
         itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/socket_%d_thread_%d.data\""), nvme_id, myrank, iSymbol]))
     else:
         nvmeIdEq = IREq(nvme_id, Mod(iSymbol, ndisks))
-        cNvmeIdEq = ClusterizedEq(nvmeIdEq, ispace=None)
-        
+        cNvmeIdEq = ClusterizedEq(nvmeIdEq, ispace=None)        
         itNodes.append(Expression(cNvmeIdEq, None, True))   
-        itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/thread_%d.data\""), nvme_id, iSymbol]))
-        
+        itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/thread_%d.data\""), nvme_id, iSymbol]))        
     
-    if is_forward:
+    opFlagsStr = String("OPEN_FLAGS")
+    opFlagsStrCompFwd = String("O_WRONLY | O_CREAT | O_TRUNC")
+    opFlagsStrCompGrd = String("O_RDONLY")
+    flagsStr = String("S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH")        
+    
+    if is_forward and is_compression:
         itNodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), nameArray]))
-    else:
+        itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStrCompFwd, flagsStr], retobj=filesArray[iSymbol]))
+        itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStrCompFwd, flagsStr], retobj=metasArray[iSymbol]))
+    elif is_forward and not is_compression:
+        itNodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), nameArray]))
+        itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStr, flagsStr], retobj=filesArray[iSymbol]))
+    elif not is_forward and is_compression:
         itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
-
-
-    ifNodes.append(Call(name="perror", arguments=String("\"Cannot open output file\\n\"")))
-    ifNodes.append(Call(name="exit", arguments=1))
-    openCond = Conditional(CondEq(filesArray[iSymbol], -1), ifNodes) 
+        itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStrCompGrd, flagsStr], retobj=filesArray[iSymbol]))
+        itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStrCompGrd, flagsStr], retobj=metasArray[iSymbol]))
+    elif not is_forward and not is_compression:
+        itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
+        itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStr, flagsStr], retobj=filesArray[iSymbol]))   
     
-    itNodes.append(openCall)   
+    itNodes.append(Conditional(CondEq(filesArray[iSymbol], -1), ifNodes))
+    funcArgs = [filesArray, nthreads]
+    if is_compression:
+        itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/thread_%d.data\""), nvme_id, iSymbol]))
+        if is_forward:
+            itNodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), nameArray]))
+        else:
+            itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
+        itNodes.append(Conditional(CondEq(metasArray[iSymbol], -1), ifNodes))
+        funcArgs = [filesArray, metasArray, nthreads]
     
-    itNodes.append(openCond)
-
     openIteration = Iteration(itNodes, nthreadsDim, nthreads-1)
     
     body = CallableBody(openIteration)
-    callable = Callable("open_thread_files", body, "void", [filesArray, nthreads])
+    callable = Callable("open_thread_files", body, "void", funcArgs)
 
     return callable
 
+# def get_slices_build():
+    
 
 @iet_pass
 def ooc_efuncs(iet, **kwargs):
     is_forward = kwargs['options']['out-of-core'].mode == 'forward'
     is_mpi = kwargs['options']['mpi']
+    is_compression = True
     profiler_name = kwargs['profiler'].name
 
     nthreads = NThreads(ignoreDefinition=True)
@@ -210,10 +229,16 @@ def ooc_efuncs(iet, **kwargs):
 
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads) 
     filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
+    if is_compression:
+        metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
+    else:
+        metasArray=None
     iSymbol = Symbol(name="i", dtype=np.int32)
 
     new_open_thread_call = Call(name='open_thread_files', arguments=[filesArray, nthreads])
-    openThreadsCallable = open_threads_build(nthreads, filesArray, iSymbol, nthreadsDim, nameArray, is_forward, is_mpi)
+    openThreadsCallable = open_threads_build(nthreads, filesArray, metasArray, iSymbol, 
+                                             nthreadsDim, nameArray, is_forward, 
+                                             is_mpi, is_compression)
 
     calls = FindNodes(Call).visit(iet)
     # save_call = next((call for call in calls if call.name == 'save_temp'), None)

@@ -29,6 +29,7 @@ def iet_build(stree, **kwargs):
 
     ooc = kwargs['options']['out-of-core']
     is_mpi = kwargs['options']['mpi']
+    is_compression = True
     
     nsections = 0
     queues = OrderedDict()
@@ -37,7 +38,7 @@ def iet_build(stree, **kwargs):
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
             if(ooc):
-                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'], ooc.function, ooc.mode, is_mpi)
+                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'], ooc.function, ooc.mode, is_mpi, is_compression)
                 return List(body=iet_body)
             else:                
                 return List(body=iet_body)
@@ -80,7 +81,7 @@ def iet_build(stree, **kwargs):
 
 
 @timed_pass(name='ooc_build')
-def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi):
+def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi, is_compression):
     """
     This private method builds a iet_body (list) with out-of-core nodes.
 
@@ -111,10 +112,12 @@ def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi):
     ######## Build files and counters arrays ########
     filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32)
     countersArray = Array(name='counters', dimensions=[nthreadsDim], dtype=np.int32)
+    metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
 
 
     ######## Build open section ########
-    openSection = open_build(filesArray, countersArray, nthreadsDim, nthreads, is_forward, iSymbol)
+    # TODO: why metas doesn't appear as input when we print the hole operator?
+    openSection = open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression)
 
     ######## Build func_size var ########
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
@@ -150,16 +153,18 @@ def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi):
 
     return iet_body
 
-def open_build(filesArray, countersArray, nthreadsDim, nthreads, is_forward, iSymbol):
+def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression):
     """
     This method inteds to code open section for both Forward and Gradient operators.
     
     Args:
         filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
         countersArray (counters): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        metasArray (Array): some array
         nthreadsDim (CustomDimension): dimension from 0 to nthreads 
         nthreads (NThreads): number of threads
         is_forward (bool): True for the Forward operator; False for the Gradient operator
+        is_compression (bool): True for the use of compression; False otherwise
 
     Returns:
         Section: open section
@@ -169,12 +174,16 @@ def open_build(filesArray, countersArray, nthreadsDim, nthreads, is_forward, iSy
     filesArrCond = array_alloc_check(filesArray) #  Forward
     
     #Call open_thread_files
-    open_thread_call = Call(name='open_thread_files_temp', arguments=[filesArray, nthreads])
+    funcArgs = [filesArray, nthreads]
+    if is_compression:
+        funcArgs = [filesArray, metasArray, nthreads]
+    import pdb; pdb.set_trace()
+    open_thread_call = Call(name='open_thread_files_temp', arguments=funcArgs)
 
     # Open section body
     body = [filesArrCond, open_thread_call]
     
-    if not is_forward:
+    if not is_forward and not is_compression:
         countersArrCond = array_alloc_check(countersArray) # gradient
         body.append(countersArrCond)
         
