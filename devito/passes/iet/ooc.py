@@ -2,9 +2,9 @@ import numpy as np
 from sympy import Mod
 
 from devito.passes.iet.engine import iet_pass
-from devito.symbolics import (CondEq, CondNe, Macro, String)
+from devito.symbolics import (CondEq, CondNe, Macro, String, cast_mapper, SizeOf)
 from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
-from devito.types import CustomDimension, Array, Symbol, Pointer, FILE, Timer, NThreads
+from devito.types import CustomDimension, Array, Symbol, Pointer, FILE, Timer, NThreads, off_t, size_t, PointerArray
 from devito.ir.iet import (Expression, Iteration, Conditional, Call, Conditional, CallableBody, Callable,
                             FindNodes, Transformer, Return)
 from devito.ir.equations import IREq, ClusterizedEq
@@ -115,7 +115,7 @@ def save_build(nthreads, timerProfiler, io_size, nameArray, is_forward, is_mpi):
     return saveCallable
 
 
-def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, nameArray, is_forward, is_mpi, is_compression):
+def open_threads_build(nthreads, filesArray, metasArray, nthreadsDim, nameArray, is_forward, is_mpi, is_compression):
     """
     This method generates the function open_thread_files according to the operator used.
 
@@ -123,7 +123,6 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
         nthreads (NThreads): number of threads
         filesArray (Array): array of files
         metasArray (Array): some array
-        iSymbol (Symbol): symbol of the iterator index i 
         nthreadsDim (CustomDimension): dimension i from 0 to nthreads
         is_forward (bool): True for the Forward operator; False for the Gradient operator
         is_mpi (bool): True for the use of MPI; False otherwise.
@@ -137,6 +136,7 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
     ifNodes=[]
     
     # TODO: initialize char name[100]
+    iSymbol = Symbol(name="i", dtype=np.int32)
     nvme_id = Symbol(name="nvme_id", dtype=np.int32)
     ndisks = Symbol(name="NDISKS", dtype=np.int32, ignoreDefinition=True)        
     
@@ -200,22 +200,73 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
         itNodes.append(Conditional(CondEq(metasArray[iSymbol], -1), ifNodes))
         funcArgs = [filesArray, metasArray, nthreads]
     
-    openIteration = Iteration(itNodes, nthreadsDim, nthreads-1)
+    openIteration = Iteration(itNodes, nthreadsDim, nthreads)
     
     body = CallableBody(openIteration)
     callable = Callable("open_thread_files", body, "void", funcArgs)
 
     return callable
 
-# def get_slices_build():
+def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim):
+    
+    funcArgs=[]
+    itNodes=[]
+    ifNodes=[]
+    funcBody=[]
+    nthreadsDim.name='tid'
+    
+    slicesSize = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
+    funcBody.append(slicesSize)
+    
+    # Get size of the file
+    tid = Symbol(name="tid", dtype=np.int32)
+    fSize = Symbol(name='fsize', dtype=off_t)
+    lseekCall = Call(name="lseek", arguments=[metasArray[tid], 0, Macro("SEEK_END")], retobj=fSize)
+    itNodes.append(lseekCall)
+    
+    # Get number of slices per thread file
+    sizeTStr = String(r"size_t")
+    sizeOfCall = Call(name="sizeof", arguments=[sizeTStr])
+    sptEq = IREq(sptArray[tid], cast_mapper[int](fSize) /  -1)
+    cSptEq = ClusterizedEq(sptEq, ispace=None)
+    itNodes.append(Expression(cSptEq, None, False))
+    
+    # Allocate
+    slicesSizeTidEq = IREq(slicesSize[tid], Call(name='malloc', arguments=[fSize]))
+    cSlicesSizeTidEq = ClusterizedEq(slicesSizeTidEq, ispace=None)
+    itNodes.append(Expression(cSlicesSizeTidEq, None, False))
+    
+    ifNodes.append(Call(name="perror", arguments=String("\"Error to allocate slices\\n\"")))
+    ifNodes.append(Call(name="exit", arguments=1))
+    itNodes.append(Conditional(CondEq(slicesSize, Macro("NULL")), ifNodes))
+    
+    # Return to begin of the file
+    itNodes.append(Call(name="lseek", arguments=[metasArray[tid], 0, Macro("SEEK_SET")]))
+    
+    # Read to slices_size buffer
+    itNodes.append(Call(name="read", arguments=[metasArray[tid], Byref(slicesSize[tid, 0]), fSize]))
+    
+    getSlicesIteration = Iteration(itNodes, nthreadsDim, nthreads)
+    funcBody.append(getSlicesIteration)
+    
+    funcBody.append(Return(slicesSize))
+    
+    getSliceSizeBody = CallableBody(funcBody)
+    callable = Callable("get_slices_size", getSliceSizeBody, "size_t**", funcArgs)
+    import pdb; pdb.set_trace()
+    return callable    
     
 
 @iet_pass
-def ooc_efuncs(iet, **kwargs):
+def ooc_efuncs(iet, **kwargs):    
+        
     is_forward = kwargs['options']['out-of-core'].mode == 'forward'
     is_mpi = kwargs['options']['mpi']
     is_compression = True
     profiler_name = kwargs['profiler'].name
+    efuncs = []
+    mapper={}
+    calls = FindNodes(Call).visit(iet)
 
     nthreads = NThreads(ignoreDefinition=True)
     timerProfiler = Timer(profiler_name, [], ignoreDefinition=True)
@@ -226,29 +277,33 @@ def ooc_efuncs(iet, **kwargs):
 
     # new_save_call = Call(name="save", arguments=[nthreads, timerProfiler, io_size])
     # saveCallable = save_build(nthreads, timerProfiler, io_size, nameArray, is_forward, is_mpi)
+    # efuncs.append(saveCallable)
+    # save_call = next((call for call in calls if call.name == 'save_temp'), None)
+    # mapper[save_call] = new_save_call
 
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads) 
     filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
     if is_compression:
         metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
+        if not is_forward:
+            sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
+            new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads])
+            slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim)
+            efuncs.append(slicesSizeCallable)
+            get_slices_call = next((call for call in calls if call.name == 'get_slices_size'), None)
+            mapper[get_slices_call] = new_get_slices_call
+            
     else:
         metasArray=None
-    iSymbol = Symbol(name="i", dtype=np.int32)
-
+        
     new_open_thread_call = Call(name='open_thread_files', arguments=[filesArray, nthreads])
-    openThreadsCallable = open_threads_build(nthreads, filesArray, metasArray, iSymbol, 
+    openThreadsCallable = open_threads_build(nthreads, filesArray, metasArray, 
                                              nthreadsDim, nameArray, is_forward, 
                                              is_mpi, is_compression)
-
-    calls = FindNodes(Call).visit(iet)
-    # save_call = next((call for call in calls if call.name == 'save_temp'), None)
-    open_threads_call = next((call for call in calls if call.name == 'open_thread_files_temp'), None)
-
-    mapper={
-        # save_call: new_save_call,
-        open_threads_call: new_open_thread_call}
-    iet = Transformer(mapper).visit(iet)
-    efuncs=[
-        # saveCallable, 
-        openThreadsCallable]
+    efuncs.append(openThreadsCallable)   
+    open_threads_call = next((call for call in calls if call.name == 'open_thread_files'), None)
+    mapper[open_threads_call] = new_open_thread_call
+    
+    iet = Transformer(mapper).visit(iet)   
+    
     return iet, {'efuncs': efuncs}
