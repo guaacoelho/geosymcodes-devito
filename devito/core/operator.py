@@ -397,8 +397,9 @@ class OutOfCoreTuple(OptOption):
         if not items:
             return None
         elif isinstance(items, (list, tuple)):
-            if len(items) != 2:
-                raise ValueError("Out of core options must be a two elements tuple: (function, mode)")
+            n = len(items)
+            if n != 2 and n != 3:
+                raise ValueError("Out of core options must be a two or three elements tuple: (function, mode, compression)")
             #TODO: All AbstractFunctions?
             if not isinstance(items[0], AbstractFunction):
                 raise ValueError("First element of out of core options must be a AbstractFunction, got %s"
@@ -411,4 +412,5 @@ class OutOfCoreTuple(OptOption):
         obj = super().__new__(cls)
         obj.function = items[0]
         obj.mode = items[1]
+        obj.compression = False if n < 3 else bool(items[2])
         return obj
