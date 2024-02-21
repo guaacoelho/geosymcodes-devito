@@ -30,6 +30,7 @@ def iet_build(stree, **kwargs):
     ooc = kwargs['options']['out-of-core']
     is_mpi = kwargs['options']['mpi']
     is_compression = True
+    time_iterator = None
     
     nsections = 0
     queues = OrderedDict()
@@ -38,7 +39,7 @@ def iet_build(stree, **kwargs):
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
             if(ooc):
-                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'], ooc.function, ooc.mode, is_mpi, is_compression)
+                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'], ooc.function, ooc.mode, is_mpi, is_compression, time_iterator)
                 return List(body=iet_body)
             else:                
                 return List(body=iet_body)
@@ -59,8 +60,10 @@ def iet_build(stree, **kwargs):
             iteration_nodes = queues.pop(i)
             if isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'forward':
                 iteration_nodes.append(Section("write_temp"))
+                time_iterator=i.sub_iterators[0] if i.sub_iterators else i.dim
             elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'gradient':
                 iteration_nodes.insert(-1, Section("read_temp"))
+                time_iterator = i.dim
 
             body = Iteration(iteration_nodes, i.dim, i.limits, direction=i.direction,
                              properties=i.properties, uindices=i.sub_iterators)
@@ -81,7 +84,7 @@ def iet_build(stree, **kwargs):
 
 
 @timed_pass(name='ooc_build')
-def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi, is_compression):
+def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi, is_compression, time_iterator):
     """
     This private method builds a iet_body (list) with out-of-core nodes.
 
@@ -124,9 +127,7 @@ def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi, is_compr
     funcSizeExp, floatSizeInit = func_size_build(func, func_size)
 
     ######## Build write/read section ########
-    dims = FindSymbols("dimensions").visit(iet_body)
-    t0 = next((dim for dim in dims if dim.name == "t0"), None)
-    write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, t0, countersArray, is_mpi)
+    write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
     
 
     ######## Build close section ########
