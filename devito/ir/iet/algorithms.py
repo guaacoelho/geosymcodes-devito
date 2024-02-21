@@ -29,7 +29,6 @@ def iet_build(stree, **kwargs):
 
     ooc = kwargs['options']['out-of-core']
     is_mpi = kwargs['options']['mpi']
-    is_compression = True
     time_iterator = None
     
     nsections = 0
@@ -39,7 +38,7 @@ def iet_build(stree, **kwargs):
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
             if(ooc):
-                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'], ooc.function, ooc.mode, is_mpi, is_compression, time_iterator)
+                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'], ooc.function, ooc.mode, is_mpi, ooc.compression, time_iterator)
                 return List(body=iet_body)
             else:                
                 return List(body=iet_body)
@@ -62,7 +61,7 @@ def iet_build(stree, **kwargs):
                 iteration_nodes.append(Section("write_temp"))
                 time_iterator=i.sub_iterators[0] if i.sub_iterators else i.dim
             elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'gradient':
-                iteration_nodes.insert(-1, Section("read_temp"))
+                iteration_nodes.insert(0, Section("read_temp"))
                 time_iterator = i.dim
 
             body = Iteration(iteration_nodes, i.dim, i.limits, direction=i.direction,
