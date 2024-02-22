@@ -1,12 +1,13 @@
 import numpy as np
 from sympy import Mod
+from pdb import set_trace
 
 from devito.passes.iet.engine import iet_pass
 from devito.symbolics import (CondEq, CondNe, Macro, String, cast_mapper, SizeOf)
 from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
 from devito.types import CustomDimension, Array, Symbol, Pointer, FILE, Timer, NThreads, off_t, size_t, PointerArray
 from devito.ir.iet import (Expression, Iteration, Conditional, Call, Conditional, CallableBody, Callable,
-                            FindNodes, Transformer, Return)
+                            FindNodes, Transformer, Return, Definition)
 from devito.ir.equations import IREq, ClusterizedEq
 
 __all__ = ['ooc_efuncs']
@@ -208,33 +209,45 @@ def open_threads_build(nthreads, filesArray, metasArray, nthreadsDim, nameArray,
     return callable
 
 def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim):
+    """_summary_
+
+    Args:
+        sptArray (_type_): _description_
+        nthreads (_type_): _description_
+        metasArray (_type_): _description_
+        nthreadsDim (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
     
-    funcArgs=[]
     itNodes=[]
     ifNodes=[]
     funcBody=[]
     nthreadsDim.name='tid'
     
     slicesSize = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
-    funcBody.append(slicesSize)
+    mAllocCall = Call(name="(size_t**) malloc", arguments=[nthreads*SizeOf(Pointer(name='size_t *', dtype=size_t))], retobj=slicesSize)
+    funcBody.append(mAllocCall)
     
     # Get size of the file
     tid = Symbol(name="tid", dtype=np.int32)
     fSize = Symbol(name='fsize', dtype=off_t)
-    lseekCall = Call(name="lseek", arguments=[metasArray[tid], 0, Macro("SEEK_END")], retobj=fSize)
+    lseekCall = Call(name="lseek", arguments=[metasArray[tid], cast_mapper[size_t](0), Macro("SEEK_END")], retobj=fSize)
     itNodes.append(lseekCall)
     
     # Get number of slices per thread file
-    sizeTStr = String(r"size_t")
-    sizeOfCall = Call(name="sizeof", arguments=[sizeTStr])
-    sptEq = IREq(sptArray[tid], cast_mapper[int](fSize) /  -1)
+    sptEq = IREq(sptArray[tid], cast_mapper[int](fSize) / SizeOf(Symbol(name='size_t', dtype=size_t)) -1)
     cSptEq = ClusterizedEq(sptEq, ispace=None)
     itNodes.append(Expression(cSptEq, None, False))
     
     # Allocate
-    slicesSizeTidEq = IREq(slicesSize[tid], Call(name='malloc', arguments=[fSize]))
-    cSlicesSizeTidEq = ClusterizedEq(slicesSizeTidEq, ispace=None)
-    itNodes.append(Expression(cSlicesSizeTidEq, None, False))
+    slicesSizeTidMallocCall = Call(name='malloc', arguments=[fSize], retobj=slicesSize[tid])
+    slicesSizeTidCast = cast_mapper[(size_t, '*')](slicesSize[tid])
+    slicesSizeTidCastEq = IREq(slicesSize[tid], slicesSizeTidCast)
+    cSlicesSizeTidCastEq = ClusterizedEq(slicesSizeTidCastEq, ispace=None)
+    itNodes.append(slicesSizeTidMallocCall)
+    itNodes.append(Expression(cSlicesSizeTidCastEq, None, False))
     
     ifNodes.append(Call(name="perror", arguments=String("\"Error to allocate slices\\n\"")))
     ifNodes.append(Call(name="exit", arguments=1))
@@ -246,20 +259,27 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim):
     # Read to slices_size buffer
     itNodes.append(Call(name="read", arguments=[metasArray[tid], Byref(slicesSize[tid, 0]), fSize]))
     
-    getSlicesIteration = Iteration(itNodes, nthreadsDim, nthreads)
+    getSlicesIteration = Iteration(itNodes, nthreadsDim, nthreads-1)
     funcBody.append(getSlicesIteration)
-    
-    funcBody.append(Return(slicesSize))
-    
+    funcBody.append(Return(String(r"slices_size")))
+        
     getSliceSizeBody = CallableBody(funcBody)
-    callable = Callable("get_slices_size", getSliceSizeBody, "size_t**", funcArgs)
-    import pdb; pdb.set_trace()
+    callable = Callable("get_slices_size", getSliceSizeBody, "size_t**", [metasArray, sptArray, nthreads])
+    set_trace()
     return callable    
     
 
 @iet_pass
-def ooc_efuncs(iet, **kwargs):    
-        
+def ooc_efuncs(iet, **kwargs):
+    """_summary_
+
+    Args:
+        iet (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
+            
     is_forward = kwargs['options']['out-of-core'].mode == 'forward'
     is_mpi = kwargs['options']['mpi']
     is_compression = True
