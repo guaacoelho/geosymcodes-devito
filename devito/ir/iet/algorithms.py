@@ -28,6 +28,7 @@ def iet_build(stree, **kwargs):
     """
 
     ooc = kwargs['options']['out-of-core']
+    if ooc.function.save: raise ValueError("Out of core incompatible with TimeFunction save functionality")
     is_mpi = kwargs['options']['mpi']
     time_iterator = None
     
@@ -38,7 +39,7 @@ def iet_build(stree, **kwargs):
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
             if(ooc):
-                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, kwargs['profiler'], ooc.function, ooc.mode, is_mpi, ooc.compression, time_iterator)
+                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, ooc, is_mpi, time_iterator)
                 return List(body=iet_body)
             else:                
                 return List(body=iet_body)
@@ -59,10 +60,10 @@ def iet_build(stree, **kwargs):
             iteration_nodes = queues.pop(i)
             if isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'forward':
                 iteration_nodes.append(Section("write_temp"))
-                time_iterator=i.sub_iterators[0] if i.sub_iterators else i.dim
+                time_iterator = i.sub_iterators[0]
             elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'gradient':
                 iteration_nodes.insert(0, Section("read_temp"))
-                time_iterator = i.dim
+                time_iterator = i.sub_iterators[0]
 
             body = Iteration(iteration_nodes, i.dim, i.limits, direction=i.direction,
                              properties=i.properties, uindices=i.sub_iterators)
@@ -83,26 +84,28 @@ def iet_build(stree, **kwargs):
 
 
 @timed_pass(name='ooc_build')
-def _ooc_build(iet_body, nthreads, profiler, func, out_of_core, is_mpi, is_compression, time_iterator):
+def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     """
     This private method builds a iet_body (list) with out-of-core nodes.
 
     Args:
         iet_body (List): a list of nodes
-        nthreads (NThreads): an object of devito threads
-        profiler (Profiler): a devito profiler
-        func (Function): the function
+        nthreads (NThreads): symbol representing nthreads parameter of OpenMP
+        func (Function): I/O TimeFunction
         out_of_core (string): 'forward' or 'gradient'
-        is_mpi (bool): flag of MPI execution
+        is_mpi (bool): MPI execution flag
 
     Returns:
         List : iet_body is a list of nodes
     """
-    
+    func = ooc.function
+    out_of_core = ooc.mode
+    is_compression = ooc.compression
+
+    is_forward = out_of_core == 'forward'
+
     # Creates nthreads once again in order to enable the ignoreDefinition flag
     #nthreads = NThreads(ignoreDefinition=True)
-    
-    is_forward = out_of_core == 'forward'
 
     ######## Dimension and symbol for iteration spaces ########
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads)    
@@ -177,7 +180,6 @@ def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_
     funcArgs = [filesArray, nthreads]
     if is_compression:
         funcArgs = [filesArray, metasArray, nthreads]
-    import pdb; pdb.set_trace()
     open_thread_call = Call(name='open_thread_files_temp', arguments=funcArgs)
 
     # Open section body
