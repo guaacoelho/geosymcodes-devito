@@ -4,7 +4,7 @@ from devito.tools import filter_ordered
 from devito.types import Global
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias']
+           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index']
 
 
 class IterationTree(tuple):
@@ -155,3 +155,39 @@ def maybe_alias(obj, candidate):
         # the __rkwargs__ except for e.g. the name
 
     return False
+
+def array_alloc_check(array):
+    """
+    Checks wether malloc worked for array allocation.
+
+    Args:
+        array (Array): array (files or counters)
+
+    Returns:
+        Conditional: condition to handle allocated array
+    """
+    
+    pstring = String("\"Error to alloc\"")
+    printfCall = Call(name="printf", arguments=pstring)
+    exitCall = Call(name="exit", arguments=1)
+    return Conditional(CondEq(array, Macro('NULL')), [printfCall, exitCall])
+
+def get_first_space_dim_index(dimensions):
+    """
+    This method returns the index of the first space dimension of the Function.
+
+    Args:
+        dimensions (tuple): dimensions
+
+    Returns:
+        int: index
+    """
+    
+    first_space_dim_index = 0
+    for dim in dimensions:
+        if isinstance(dim, SpaceDimension):
+            break
+        else:
+            first_space_dim_index += 1
+    
+    return first_space_dim_index

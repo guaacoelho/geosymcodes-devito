@@ -8,6 +8,7 @@ from functools import reduce
 from collections import OrderedDict
 from sympy.codegen.ast import SignedIntType
 
+from devito.ir.iet.utils import array_alloc_check, get_first_space_dim_index
 from devito.tools import timed_pass
 from devito.symbolics import (CondEq, CondNe, Macro, String)
 # from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
@@ -101,7 +102,6 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     func = ooc.function
     out_of_core = ooc.mode
     is_compression = ooc.compression
-
     is_forward = out_of_core == 'forward'
 
     # Creates nthreads once again in order to enable the ignoreDefinition flag
@@ -132,6 +132,9 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     ######## Build write/read section ########
     write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
     
+    ######## Build compress/decompress section ########
+    if is_compression:
+        compress_or_decompress_build(iet_body, is_forward)    
 
     ######## Build close section ########
     closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)
@@ -146,6 +149,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     ######## Build save call ########
     # timerProfiler = Timer(profiler.name, [], ignoreDefinition=True)
     # saveCall = Call(name='save_temp', arguments=[nthreads, timerProfiler, ioSize])
+        
     
     #TODO: Generate blank lines between sections
     iet_body.insert(0, funcSizeExp)
@@ -157,45 +161,51 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
 
     return iet_body
 
-def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression):
-    """
-    This method inteds to code open section for both Forward and Gradient operators.
+def compress_or_decompress_build(iet_body, is_forward):
     
+    if is_forward:
+        compressSection = compress_build(iet_body)
+    else:
+        decompressSection = decompress_build(iet_body)
+
+def compress_build():
+    pass
+
+def decompress_build():
+    pass
+
+def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray, is_mpi):
+    """
+    Builds the read or write section of the operator, depending on the out_of_core mode.
+    Replaces the temporary section at the end of the time iteration by the read or write section.   
+
     Args:
-        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
-        countersArray (counters): pointer of allocated memory of nthreads dimension. Each place has a size of int
-        metasArray (Array): some array
-        nthreadsDim (CustomDimension): dimension from 0 to nthreads 
-        nthreads (NThreads): number of threads
+        iet_body (List): list of IET nodes 
         is_forward (bool): True for the Forward operator; False for the Gradient operator
-        is_compression (bool): True for the use of compression; False otherwise
+        nthreads (NThreads): symbol of number of threads
+        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        iSymbol (Symbol): symbol of the iterator index i
+        func_size (Symbol): the funcStencil size
+        funcStencil (u): a stencil we call u
+        t0 (ModuloDimension): time t0
+        countersArray (array): pointer of allocated memory of nthreads dimension. Each place has a size of int
 
-    Returns:
-        Section: open section
     """
     
-    # Test files array and exit if get wrong
-    filesArrCond = array_alloc_check(filesArray) #  Forward
-    
-    #Call open_thread_files
-    funcArgs = [filesArray, nthreads]
-    if is_compression:
-        funcArgs = [filesArray, metasArray, nthreads]
-    open_thread_call = Call(name='open_thread_files', arguments=funcArgs)
+    if is_forward:
+        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, funcStencil.symbolic_shape[1], is_mpi)
+        temp_name = 'write_temp'
+    else: # gradient
+        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, funcStencil.symbolic_shape[1], countersArray)
+        temp_name = 'read_temp'  
 
-    # Open section body
-    body = [filesArrCond, open_thread_call]
-    
-    if not is_forward and not is_compression:
-        countersArrCond = array_alloc_check(countersArray) # gradient
-        body.append(countersArrCond)
-        
-        intervalGroup = IntervalGroup((Interval(nthreadsDim, 0, nthreads)))
-        cNewCountersEq = ClusterizedEq(IREq(countersArray[iSymbol], 1), ispace=IterationSpace(intervalGroup))
-        openIterationGrad = Iteration(Expression(cNewCountersEq, None, False), nthreadsDim, nthreads-1)
-        body.append(openIterationGrad)
-        
-    return Section("open", body)
+    sections = FindNodes(Section).visit(iet_body)
+    temp_sec = next((section for section in sections if section.name == temp_name), None)
+    mapper={temp_sec: ooc_section}
+
+    timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
+    transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
+    iet_body[timeIndex] = transformedIet
 
 def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecSize1, is_mpi):
     """
@@ -319,6 +329,46 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecSi
 
     return section
 
+def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression):
+    """
+    This method inteds to code open section for both Forward and Gradient operators.
+    
+    Args:
+        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        countersArray (counters): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        metasArray (Array): some array
+        nthreadsDim (CustomDimension): dimension from 0 to nthreads 
+        nthreads (NThreads): number of threads
+        is_forward (bool): True for the Forward operator; False for the Gradient operator
+        is_compression (bool): True for the use of compression; False otherwise
+
+    Returns:
+        Section: open section
+    """
+    
+    # Test files array and exit if get wrong
+    filesArrCond = array_alloc_check(filesArray) #  Forward
+    
+    #Call open_thread_files
+    funcArgs = [filesArray, nthreads]
+    if is_compression:
+        funcArgs = [filesArray, metasArray, nthreads]
+    open_thread_call = Call(name='open_thread_files', arguments=funcArgs)
+
+    # Open section body
+    body = [filesArrCond, open_thread_call]
+    
+    if not is_forward and not is_compression:
+        countersArrCond = array_alloc_check(countersArray) # gradient
+        body.append(countersArrCond)
+        
+        intervalGroup = IntervalGroup((Interval(nthreadsDim, 0, nthreads)))
+        cNewCountersEq = ClusterizedEq(IREq(countersArray[iSymbol], 1), ispace=IterationSpace(intervalGroup))
+        openIterationGrad = Iteration(Expression(cNewCountersEq, None, False), nthreadsDim, nthreads-1)
+        body.append(openIterationGrad)
+        
+    return Section("open", body)
+
 def close_build(nthreads, filesArray, iSymbol, nthreadsDim):
     """
     This method inteds to code gradient.c close section.
@@ -343,57 +393,6 @@ def close_build(nthreads, filesArray, iSymbol, nthreadsDim):
     section = Section("close", closeIteration)
     
     return section
-
-def array_alloc_check(array):
-    """
-    Checks wether malloc worked for array allocation.
-
-    Args:
-        array (Array): array (files or counters)
-
-    Returns:
-        Conditional: condition to handle allocated array
-    """
-    
-    pstring = String("\"Error to alloc\"")
-    printfCall = Call(name="printf", arguments=pstring)
-    exitCall = Call(name="exit", arguments=1)
-    return Conditional(CondEq(array, Macro('NULL')), [printfCall, exitCall])
-    
-
-def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray, is_mpi):
-    """
-    Builds the read or write section of the operator, depending on the out_of_core mode.
-    Replaces the temporary section at the end of the time iteration by the read or write section.   
-
-    Args:
-        iet_body (List): list of IET nodes 
-        is_forward (bool): True for the Forward operator; False for the Gradient operator
-        nthreads (NThreads): symbol of number of threads
-        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
-        iSymbol (Symbol): symbol of the iterator index i
-        func_size (Symbol): the funcStencil size
-        funcStencil (u): a stencil we call u
-        t0 (ModuloDimension): time t0
-        countersArray (array): pointer of allocated memory of nthreads dimension. Each place has a size of int
-
-    """
-    
-    if is_forward:
-        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, funcStencil.symbolic_shape[1], is_mpi)
-        temp_name = 'write_temp'
-    else: # gradient
-        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, funcStencil.symbolic_shape[1], countersArray)
-        temp_name = 'read_temp'  
-
-    sections = FindNodes(Section).visit(iet_body)
-    temp_sec = next((section for section in sections if section.name == temp_name), None)
-    mapper={temp_sec: ooc_section}
-
-    timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
-    transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
-    iet_body[timeIndex] = transformedIet
-
 
 def func_size_build(funcStencil, func_size):
     """
@@ -435,7 +434,7 @@ def io_size_build(ioSize, func_size, funcStencil):
     time_M = funcStencil.time_dim.symbolic_max
     time_m = funcStencil.time_dim.symbolic_min
     
-    first_space_dim_index = _get_first_space_dim_index(funcStencil.dimensions)
+    first_space_dim_index = get_first_space_dim_index(funcStencil.dimensions)
     
     #TODO: Field and pointer must be retrieved from somewhere
     # funcSize1 = FieldFromPointer(f"size[{first_space_dim_index}]", funcStencil._C_name)
@@ -444,24 +443,3 @@ def io_size_build(ioSize, func_size, funcStencil):
     ioSizeEq = IREq(ioSize, ((time_M - time_m+1) * funcSize1 * func_size))
 
     return Expression(ClusterizedEq(ioSizeEq, ispace=None), None, True)
-
-
-def _get_first_space_dim_index(dimensions):
-    """
-    This method returns the index of the first space dimension of the Function.
-
-    Args:
-        dimensions (tuple): dimensions
-
-    Returns:
-        int: index
-    """
-    
-    first_space_dim_index = 0
-    for dim in dimensions:
-        if isinstance(dim, SpaceDimension):
-            break
-        else:
-            first_space_dim_index += 1
-    
-    return first_space_dim_index

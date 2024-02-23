@@ -282,7 +282,7 @@ def ooc_efuncs(iet, **kwargs):
             
     is_forward = kwargs['options']['out-of-core'].mode == 'forward'
     is_mpi = kwargs['options']['mpi']
-    is_compression = True
+    is_compression = kwargs['options']['out-of-core'].compression
     profiler_name = kwargs['profiler'].name
     efuncs = []
     mapper={}
