@@ -214,7 +214,7 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
 def ooc_efuncs(iet, **kwargs):
     is_forward = kwargs['options']['out-of-core'].mode == 'forward'
     is_mpi = kwargs['options']['mpi']
-    is_compression = True
+    is_compression = kwargs['options']['out-of-core'].compression
     profiler_name = kwargs['profiler'].name
 
     nthreads = NThreads(ignoreDefinition=True)
@@ -229,13 +229,12 @@ def ooc_efuncs(iet, **kwargs):
 
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads) 
     filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
-    if is_compression:
-        metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
-    else:
-        metasArray=None
+    metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=(not is_forward))
     iSymbol = Symbol(name="i", dtype=np.int32)
 
-    new_open_thread_call = Call(name='open_thread_files', arguments=[filesArray, nthreads])
+    funcArgs = [filesArray, nthreads]
+    if is_compression: funcArgs.insert(1, metasArray)
+    new_open_thread_call = Call(name='open_thread_files', arguments=funcArgs)
     openThreadsCallable = open_threads_build(nthreads, filesArray, metasArray, iSymbol, 
                                              nthreadsDim, nameArray, is_forward, 
                                              is_mpi, is_compression)
