@@ -3,7 +3,7 @@ import ctypes as ct
 import cgen
 
 from pdb import set_trace
-from sympy import Mod
+from sympy import Mod, Or
 from functools import reduce
 from collections import OrderedDict
 from sympy.codegen.ast import SignedIntType
@@ -11,7 +11,7 @@ from sympy.codegen.ast import SignedIntType
 from devito.tools import timed_pass
 from devito.symbolics import (CondEq, CondNe, Macro, String)
 # from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
-from devito.types import (CustomDimension, Array, Symbol, TimeDimension, SpaceDimension, off_t)
+from devito.types import (CustomDimension, Array, PointerArray, Symbol, TimeDimension, SpaceDimension, off_t, size_t)
 from devito.ir.iet import (Expression, Increment, Iteration, List, Conditional, SyncSpot,
                            Section, HaloSpot, ExpressionBundle, Call, Conditional, CallableBody, 
                            Callable, FindSymbols, FindNodes, Transformer, Return)
@@ -111,19 +111,21 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads)    
     iSymbol = Symbol(name="i", dtype=np.int32)
     
-    # testScalar = Scalar(name="testScalar", ignoreDefinition=True)
-
 
     ######## Build files and counters arrays ########
+    # TODO: Encapsulate the arrays within an object for ease of reading
     filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32)
     countersArray = Array(name='counters', dimensions=[nthreadsDim], dtype=np.int32)
     metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
     sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
+    offsetArray = Array(name='offset', dimensions=[nthreadsDim], dtype=off_t)
 
 
     ######## Build open section ########
-    # TODO: why metas doesn't appear as input when we print the hole operator?
-    openSection = open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression)
+    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
+                                array=Array(name='slices_size', dimensions=[nthreadsDim],
+                                             dtype=size_t))
+    openSection = open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size)
 
     ######## Build func_size var ########
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
@@ -157,7 +159,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
 
     return iet_body
 
-def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression):
+def open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size):
     """
     This method inteds to code open section for both Forward and Gradient operators.
     
@@ -174,25 +176,41 @@ def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_
         Section: open section
     """
     
-    # Test files array and exit if get wrong
-    filesArrCond = array_alloc_check(filesArray) #  Forward
+    # Build conditional
+    # Regular Forward or Gradient
+    arrays = [filesArray] 
+    if not is_compression and not is_forward: arrays.append(countersArray)
+    # Compression Forward or Gradient
+    if is_compression: arrays.append(metasArray)
+    if is_compression and not is_forward: arrays.extend([sptArray, offsetArray]) 
+
+    arrays_cond = array_alloc_check(arrays) 
     
     #Call open_thread_files
     funcArgs = [filesArray, nthreads]
-    if is_compression:
-        funcArgs = [filesArray, metasArray, nthreads]
-    open_thread_call = Call(name='open_thread_files', arguments=funcArgs)
+    if is_compression: funcArgs.insert(1, metasArray)
+    open_thread_call = Call(name='open_thread_files_temp', arguments=funcArgs)
 
     # Open section body
-    body = [filesArrCond, open_thread_call]
+    body = [arrays_cond, open_thread_call]
     
+    # Additional initialization for Gradient operators
     if not is_forward and not is_compression:
-        countersArrCond = array_alloc_check(countersArray) # gradient
-        body.append(countersArrCond)
-        
+        # Regular        
         intervalGroup = IntervalGroup((Interval(nthreadsDim, 0, nthreads)))
         cNewCountersEq = ClusterizedEq(IREq(countersArray[iSymbol], 1), ispace=IterationSpace(intervalGroup))
         openIterationGrad = Iteration(Expression(cNewCountersEq, None, False), nthreadsDim, nthreads-1)
+        body.append(openIterationGrad)
+    elif not is_forward and is_compression:
+        # Compression
+        get_slices_size = Call(name="get_slices_size_temp", arguments=[metasArray, sptArray], retobj=slices_size)
+        body.append(get_slices_size)
+
+        intervalGroup = IntervalGroup((Interval(nthreadsDim, 0, nthreads)))
+        c_offset_init_Eq = ClusterizedEq(IREq(offsetArray[iSymbol], 0), ispace=IterationSpace(intervalGroup))
+        offset_init_eq = Expression(c_offset_init_Eq, None, False)
+        closeCall = Call(name="close", arguments=[metasArray[iSymbol]])
+        openIterationGrad = Iteration([offset_init_eq, closeCall], nthreadsDim, nthreads-1)
         body.append(openIterationGrad)
         
     return Section("open", body)
@@ -344,21 +362,26 @@ def close_build(nthreads, filesArray, iSymbol, nthreadsDim):
     
     return section
 
-def array_alloc_check(array):
+def array_alloc_check(arrays):
     """
-    Checks wether malloc worked for array allocation.
+    Checks wether malloc worked for array allocations.
 
     Args:
-        array (Array): array (files or counters)
+        arrays (list): list of Arrays
 
     Returns:
-        Conditional: condition to handle allocated array
+        Conditional: Or(||) condition to handle allocated arrays
     """
+    eqs = []
+    for arr in arrays:
+        eqs.append(CondEq(arr, Macro('NULL')))
+    
+    ors = Or(*eqs)
     
     pstring = String("\"Error to alloc\"")
     printfCall = Call(name="printf", arguments=pstring)
     exitCall = Call(name="exit", arguments=1)
-    return Conditional(CondEq(array, Macro('NULL')), [printfCall, exitCall])
+    return Conditional(ors, [printfCall, exitCall])
     
 
 def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray, is_mpi):
