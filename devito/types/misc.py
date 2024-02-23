@@ -1,4 +1,4 @@
-from ctypes import c_double, c_void_p, c_int, Structure, c_longlong, c_int64
+from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64
 
 import numpy as np
 from sympy.core.core import ordering_of_classes
@@ -9,7 +9,7 @@ from devito.types.basic import IndexedData
 from devito.tools import Pickable, as_tuple
 
 __all__ = ['Timer', 'Pointer', 'VolatileInt', 'FIndexed', 'Wildcard',
-           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 'off_t']
+           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 'off_t', 'size_t']
 
 
 class Timer(CompositeObject):
@@ -209,4 +209,11 @@ class off_t(c_int64):
     """
 
     pass
+
+class size_t(c_uint64):
     
+    """
+    Class representing the size_t type in C/C++
+    """
+
+    pass

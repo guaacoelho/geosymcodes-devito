@@ -118,6 +118,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32)
     countersArray = Array(name='counters', dimensions=[nthreadsDim], dtype=np.int32)
     metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
+    sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
 
 
     ######## Build open section ########
@@ -180,7 +181,7 @@ def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_
     funcArgs = [filesArray, nthreads]
     if is_compression:
         funcArgs = [filesArray, metasArray, nthreads]
-    open_thread_call = Call(name='open_thread_files_temp', arguments=funcArgs)
+    open_thread_call = Call(name='open_thread_files', arguments=funcArgs)
 
     # Open section body
     body = [filesArrCond, open_thread_call]
