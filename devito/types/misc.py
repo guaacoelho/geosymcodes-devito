@@ -1,4 +1,4 @@
-from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64
+from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64, c_int32, c_float
 
 import numpy as np
 from sympy.core.core import ordering_of_classes
@@ -9,7 +9,7 @@ from devito.types.basic import IndexedData
 from devito.tools import Pickable, as_tuple
 
 __all__ = ['Timer', 'Pointer', 'VolatileInt', 'FIndexed', 'Wildcard',
-           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 'off_t', 'size_t']
+           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 'off_t', 'size_t', 'zfp_type']
 
 
 class Timer(CompositeObject):
@@ -217,3 +217,29 @@ class size_t(c_uint64):
     """
 
     pass
+
+### Compression specific classes ###
+class zfp_type(Structure):
+    
+    """
+    Class representing:
+    
+    typedef enum {
+        zfp_type_none   = 0, // unspecified type
+        zfp_type_int32  = 1, // 32-bit signed integer
+        zfp_type_int64  = 2, // 64-bit signed integer
+        zfp_type_float  = 3, // single precision floating point
+        zfp_type_double = 4  // double precision floating point
+    } zfp_type;
+    """
+    
+    # NOTE: I don't know how to specify an unspecified type
+    
+    _fields_ = [
+        ("zfp_type_int32", c_int32),
+        ("zfp_type_int64", c_int64),
+        ("zfp_type_float", c_float),
+        ("zfp_type_float", c_double)
+    ]
+    
+

@@ -6,16 +6,15 @@ from pdb import set_trace
 from sympy import Mod
 from functools import reduce
 from collections import OrderedDict
-from sympy.codegen.ast import SignedIntType
 
 from devito.ir.iet.utils import array_alloc_check, get_first_space_dim_index
 from devito.tools import timed_pass
-from devito.symbolics import (CondEq, CondNe, Macro, String)
-# from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
-from devito.types import (CustomDimension, Array, Symbol, TimeDimension, SpaceDimension, off_t)
+from devito.symbolics import (CondNe, Macro, String)
+
+from devito.types import (CustomDimension, Array, Symbol, TimeDimension, off_t, zfp_type)
 from devito.ir.iet import (Expression, Increment, Iteration, List, Conditional, SyncSpot,
-                           Section, HaloSpot, ExpressionBundle, Call, Conditional, CallableBody, 
-                           Callable, FindSymbols, FindNodes, Transformer, Return)
+                           Section, HaloSpot, ExpressionBundle, Call, Conditional, 
+                           FindNodes, Transformer)
 from devito.ir.equations import IREq, ClusterizedEq
 from devito.ir.support import (Interval, IntervalGroup, IterationSpace, Backward, PARALLEL, AFFINE)
 
@@ -129,27 +128,24 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
     funcSizeExp, floatSizeInit = func_size_build(func, func_size)
 
-    ######## Build write/read section ########
-    write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
+    if is_compression: 
+        ######## Build compress/decompress section ########
+        compress_or_decompress_build(iet_body, iSymbol, is_forward, func, nthreads) 
+    else:
+        ######## Build write/read section ########    
+        write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
+        
+        ######## Build write_size var ########
+        size_name = 'write_size' if is_forward else 'read_size'
+        ioSize = Symbol(name=size_name, dtype=np.int64)
+        ioSizeExp = io_size_build(ioSize, func_size, func)
     
-    ######## Build compress/decompress section ########
-    if is_compression:
-        compress_or_decompress_build(iet_body, is_forward)    
-
     ######## Build close section ########
-    closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)
-    
-
-    ######## Build write_size var ########
-    size_name = 'write_size' if is_forward else 'read_size'
-    ioSize = Symbol(name=size_name, dtype=np.int64)
-    ioSizeExp = io_size_build(ioSize, func_size, func)
-    
+    closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)    
 
     ######## Build save call ########
     # timerProfiler = Timer(profiler.name, [], ignoreDefinition=True)
-    # saveCall = Call(name='save_temp', arguments=[nthreads, timerProfiler, ioSize])
-        
+    # saveCall = Call(name='save_temp', arguments=[nthreads, timerProfiler, ioSize])        
     
     #TODO: Generate blank lines between sections
     iet_body.insert(0, funcSizeExp)
@@ -161,18 +157,52 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
 
     return iet_body
 
-def compress_or_decompress_build(iet_body, is_forward):
+
+def compress_or_decompress_build(iet_body, iSymbol, is_forward, funcStencil, nthreads):
+    
+    uVecSize1 = funcStencil.symbolic_shape[1]
+    uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
+    interval = Interval(uSizeDim, 0, uVecSize1)
+    intervalGroup = IntervalGroup((interval))
+    ispace = IterationSpace(intervalGroup)    
+    pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
+    
+    tid = Symbol(name="tid", dtype=np.int32)
+    tidEq = IREq(tid, Mod(iSymbol, nthreads))
+    cTidEq = ClusterizedEq(tidEq, ispace=ispace)
     
     if is_forward:
-        compressSection = compress_build(iet_body)
+        section = compress_build(funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace)
     else:
-        decompressSection = decompress_build(iet_body)
+        section = decompress_build(funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace)
+    
 
-def compress_build():
-    pass
+def compress_build(funcStencil, iSymbol,pragma, uSizeDim, tid, cTidEq, ispace):
+    
+    uVecSize1 = funcStencil.symbolic_shape[1]    
+    itNodes=[]
+    
+    field = Symbol(name='field', dtype=zfp_type)
 
-def decompress_build():
-    pass
+    itNodes.append(Expression(cTidEq, None, True))
+    
+    compressIteration = Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])
+    
+    return Section("compress", compressIteration)
+
+def decompress_build(funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace):
+    
+    uVecSize1 = funcStencil.symbolic_shape[1]    
+    itNodes=[]
+    
+    itNodes.append(Expression(cTidEq, None, True))
+    
+    decompressIteration = Iteration(itNodes, uSizeDim, uVecSize1-1, direction=Backward, pragmas=[pragma])
+    
+    return Section("decompress", decompressIteration)
+
+
+
 
 def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray, is_mpi):
     """
@@ -192,11 +222,12 @@ def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, fun
 
     """
     
+    uVecSize1 = funcStencil.symbolic_shape[1]
     if is_forward:
-        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, funcStencil.symbolic_shape[1], is_mpi)
+        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, is_mpi)
         temp_name = 'write_temp'
     else: # gradient
-        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, funcStencil.symbolic_shape[1], countersArray)
+        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, countersArray)
         temp_name = 'read_temp'  
 
     sections = FindNodes(Section).visit(iet_body)
@@ -207,7 +238,7 @@ def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, fun
     transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
     iet_body[timeIndex] = transformedIet
 
-def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecSize1, is_mpi):
+def write_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, is_mpi):
     """
     This method inteds to code gradient.c write section.
     Obs: maybe the desciption of the variables should be better    
@@ -224,6 +255,7 @@ def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecS
     Returns:
         Section: complete wrie section
     """
+    
     
     uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
     interval = Interval(uSizeDim, 0, uVecSize1)
@@ -256,7 +288,7 @@ def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecS
 
     return Section("write", writeIteration)
 
-def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecSize1, counters):
+def read_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, counters):
     """
     This method inteds to code gradient.c read section.
     Obs: maybe the desciption of the variables should be better    
@@ -278,6 +310,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, uVecSi
     #  pragma omp parallel for schedule(static,1) num_threads(nthreads)
     #  0 <= i <= u_vec->size[1]-1
     #  TODO: Pragmas should depend on user's selected optimization options and generated by the compiler
+    uVecSize1 = funcStencil.symbolic_shape[1]
     pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
     iDim = CustomDimension(name="i", symbolic_size=uVecSize1)
     interval = Interval(iDim, 0, uVecSize1)

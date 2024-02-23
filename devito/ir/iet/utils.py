@@ -1,7 +1,7 @@
-from devito.ir.iet import FindSections, FindSymbols
-from devito.symbolics import Keyword, Macro
+from devito.ir.iet import FindSections, FindSymbols, Call, Conditional
+from devito.symbolics import Keyword, Macro, CondEq, String
 from devito.tools import filter_ordered
-from devito.types import Global
+from devito.types import Global, SpaceDimension
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
            'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index']

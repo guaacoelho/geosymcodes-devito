@@ -237,7 +237,7 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim):
     itNodes.append(lseekCall)
     
     # Get number of slices per thread file
-    sptEq = IREq(sptArray[tid], cast_mapper[int](fSize) / SizeOf(Symbol(name='size_t', dtype=size_t)) -1)
+    sptEq = IREq(sptArray[tid], cast_mapper[int](fSize) / SizeOf(String(r"size_t")) -1)
     cSptEq = ClusterizedEq(sptEq, ispace=None)
     itNodes.append(Expression(cSptEq, None, False))
     
