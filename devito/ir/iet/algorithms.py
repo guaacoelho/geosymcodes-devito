@@ -91,9 +91,9 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     Args:
         iet_body (List): a list of nodes
         nthreads (NThreads): symbol representing nthreads parameter of OpenMP
-        func (Function): I/O TimeFunction
-        out_of_core (string): 'forward' or 'gradient'
+        ooc (Object): out of core parameters
         is_mpi (bool): MPI execution flag
+        time_iterator(Dimension): iterator used as index in each timestep
 
     Returns:
         List : iet_body is a list of nodes
@@ -127,6 +127,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
                                              dtype=size_t))
     openSection = open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size)
 
+
     ######## Build func_size var ########
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
     funcSizeExp, floatSizeInit = func_size_build(func, func_size)
@@ -138,26 +139,14 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     ######## Build close section ########
     closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)
     
-
-    ######## Build write_size var ########
-    size_name = 'write_size' if is_forward else 'read_size'
-    ioSize = Symbol(name=size_name, dtype=np.int64)
-    ioSizeExp = io_size_build(ioSize, func_size, func)
-    
-
-    ######## Build save call ########
-    # timerProfiler = Timer(profiler.name, [], ignoreDefinition=True)
-    # saveCall = Call(name='save_temp', arguments=[nthreads, timerProfiler, ioSize])
-    
     #TODO: Generate blank lines between sections
     iet_body.insert(0, funcSizeExp)
     iet_body.insert(0, floatSizeInit)
     iet_body.insert(0, openSection)
     iet_body.append(closeSection)
-    iet_body.append(ioSizeExp)
-    # iet_body.append(saveCall)
 
     return iet_body
+
 
 def open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size):
     """
@@ -441,50 +430,3 @@ def func_size_build(funcStencil, func_size):
     funcSizeExp = Expression(ClusterizedEq(funcEq, ispace=None), None, True)
 
     return funcSizeExp, floatSizeInit
-
-def io_size_build(ioSize, func_size, funcStencil):
-    """
-    Generates init expression calculating io_size.
-
-    Args:
-        ioSize (Symbol): Symbol representing the total amount of I/O data
-        func_size (Symbol): Symbol representing the I/O function size
-        funcStencil (Function): function signature (Ex.: func(t, x, y, z))
-
-    Returns:
-        funcSizeExp: Expression initializing ioSize
-    """
-
-    time_M = funcStencil.time_dim.symbolic_max
-    time_m = funcStencil.time_dim.symbolic_min
-    
-    first_space_dim_index = _get_first_space_dim_index(funcStencil.dimensions)
-    
-    #TODO: Field and pointer must be retrieved from somewhere
-    # funcSize1 = FieldFromPointer(f"size[{first_space_dim_index}]", funcStencil._C_name)
-    funcSize1 = funcStencil.symbolic_shape[first_space_dim_index]
-    
-    ioSizeEq = IREq(ioSize, ((time_M - time_m+1) * funcSize1 * func_size))
-
-    return Expression(ClusterizedEq(ioSizeEq, ispace=None), None, True)
-
-
-def _get_first_space_dim_index(dimensions):
-    """
-    This method returns the index of the first space dimension of the Function.
-
-    Args:
-        dimensions (tuple): dimensions
-
-    Returns:
-        int: index
-    """
-    
-    first_space_dim_index = 0
-    for dim in dimensions:
-        if isinstance(dim, SpaceDimension):
-            break
-        else:
-            first_space_dim_index += 1
-    
-    return first_space_dim_index
