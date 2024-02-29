@@ -3,7 +3,7 @@ from sympy import Mod
 from pdb import set_trace
 
 from devito.passes.iet.engine import iet_pass
-from devito.symbolics import (CondEq, CondNe, Macro, String, cast_mapper, SizeOf)
+from devito.symbolics import (CondEq, CondNe, Macro, String, cast_mapper, SizeOf, Null)
 from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
 from devito.types import CustomDimension, Array, Symbol, Pointer, FILE, Timer, NThreads, off_t, size_t, PointerArray
 from devito.ir.iet import (Expression, Iteration, Conditional, Call, Conditional, CallableBody, Callable,
@@ -251,7 +251,7 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim):
     
     ifNodes.append(Call(name="perror", arguments=String("\"Error to allocate slices\\n\"")))
     ifNodes.append(Call(name="exit", arguments=1))
-    itNodes.append(Conditional(CondEq(slicesSize, Macro("NULL")), ifNodes))
+    itNodes.append(Conditional(CondEq(slicesSize, Null), ifNodes))
     
     # Return to begin of the file
     itNodes.append(Call(name="lseek", arguments=[metasArray[tid], 0, Macro("SEEK_SET")]))

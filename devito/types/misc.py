@@ -1,4 +1,4 @@
-from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64, c_int32, c_float
+from ctypes import c_double, c_void_p, c_int, Structure, c_uint, c_int64, c_int32, c_float, c_size_t, c_uint64
 
 import numpy as np
 from sympy.core.core import ordering_of_classes
@@ -9,7 +9,8 @@ from devito.types.basic import IndexedData
 from devito.tools import Pickable, as_tuple
 
 __all__ = ['Timer', 'Pointer', 'VolatileInt', 'FIndexed', 'Wildcard',
-           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 'off_t', 'size_t', 'zfp_type']
+           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 
+           'off_t', 'size_t', 'zfp_type', 'zfp_field', 'bitstream', 'zfp_stream']
 
 
 class Timer(CompositeObject):
@@ -210,7 +211,7 @@ class off_t(c_int64):
 
     pass
 
-class size_t(c_uint64):
+class size_t(c_size_t):
     
     """
     Class representing the size_t type in C/C++
@@ -240,6 +241,78 @@ class zfp_type(Structure):
         ("zfp_type_int64", c_int64),
         ("zfp_type_float", c_float),
         ("zfp_type_float", c_double)
+    ]
+    
+class zfp_field(Structure):
+    
+    """
+    Class representing:
+    
+    typedef struct {
+        zfp_type type;            // scalar type (e.g., int32, double)
+        size_t nx, ny, nz, nw;    // sizes (zero for unused dimensions)
+        ptrdiff_t sx, sy, sz, sw; // strides (zero for contiguous array a[nw][nz][ny][nx])
+        void* data;               // pointer to array data
+    } zfp_field;
+    """
+    
+    # NOTE: I don't know how to specify an unspecified type
+    
+    _fields_ = [
+        ("type", zfp_type),
+        ("nx", c_size_t), ("ny", c_size_t), ("nz", c_size_t),("nw", c_size_t),
+        ("sx", c_int), ("sy", c_int), ("sz", c_int),("sw", c_int),
+        ("data", c_void_p)
+    ]
+
+class bitstream(Structure):
+    
+    """
+    Class representing:
+    
+    struct bitstream {
+        bitstream_count bits;  // number of buffered bits (0 <= bits < word size)
+        bitstream_word buffer; // incoming/outgoing bits (buffer < 2^bits)
+        bitstream_word* ptr;   // pointer to next word to be read/written
+        bitstream_word* begin; // beginning of stream
+        bitstream_word* end;   // end of stream (not enforced)
+        size_t mask;           // one less the block size in number of words (if BIT_STREAM_STRIDED)
+        ptrdiff_t delta;       // number of words between consecutive blocks (if BIT_STREAM_STRIDED)
+    };
+    """
+    
+    # NOTE: I don't know how to specify an unspecified type
+    
+    _fields_ = [
+        ("minbits", c_uint),
+        ("maxbits", c_uint), 
+        ("maxprec", c_uint), 
+        ("minexp", c_int)
+    ]
+    
+
+class zfp_stream(Structure):
+    
+    """
+    Class representing:
+    
+    typedef struct {
+        uint minbits;       // minimum number of bits to store per block
+        uint maxbits;       // maximum number of bits to store per block
+        uint maxprec;       // maximum number of bit planes to store
+        int minexp;         // minimum floating point bit plane number to store
+        bitstream* stream;  // compressed bit stream
+        zfp_execution exec; // execution policy and parameters
+    } zfp_stream;
+    """
+    
+    # NOTE: I don't know how to specify an unspecified type
+    
+    _fields_ = [
+        ("minbits", c_uint),
+        ("maxbits", c_uint), 
+        ("maxprec", c_uint), 
+        ("minexp", c_int)
     ]
     
 
