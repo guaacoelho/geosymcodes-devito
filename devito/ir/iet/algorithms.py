@@ -1,5 +1,5 @@
 import numpy as np
-import ctypes as ct, c_void_p
+import ctypes as ct
 import cgen
 
 from pdb import set_trace
@@ -129,17 +129,21 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
     funcSizeExp, floatSizeInit = func_size_build(func, func_size)
 
+    size_name = 'write_size' if is_forward else 'read_size'
+    ioSize = Symbol(name=size_name, dtype=np.int64)
     if is_compression: 
+        
+        ######## Build write/read_size var ########
+        ioSizeEq = ClusterizedEq(IREq(ioSize, 0), ispace=None)
+                    
         ######## Build compress/decompress section ########
-        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterator) 
+        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterator, ioSize) 
     else:
         ######## Build write/read section ########    
         write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
         
-        ######## Build write_size var ########
-        size_name = 'write_size' if is_forward else 'read_size'
-        ioSize = Symbol(name=size_name, dtype=np.int64)
-        ioSizeExp = io_size_build(ioSize, func_size, func)
+        ######## Build write/read_size var ########
+        ioSizeEq = io_size_build(ioSize, func_size, func)
     
     ######## Build close section ########
     closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)    
@@ -153,13 +157,13 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     iet_body.insert(0, floatSizeInit)
     iet_body.insert(0, openSection)
     iet_body.append(closeSection)
-    iet_body.append(ioSizeExp)
+    iet_body.append(ioSizeEq)
     # iet_body.append(saveCall)
 
     return iet_body
 
 
-def compress_or_decompress_build(iet_body, filesArray, metasArray, iSymbol, is_forward, funcStencil, nthreads, t0):
+def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, t0, ioSize):
     
     uVecSize1 = funcStencil.symbolic_shape[1]
     uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
@@ -173,13 +177,13 @@ def compress_or_decompress_build(iet_body, filesArray, metasArray, iSymbol, is_f
     cTidEq = ClusterizedEq(tidEq, ispace=ispace)
     
     if is_forward:
-        ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0)
+        ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, ioSize)
     else:
-        ooc_section = decompress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0)
+        ooc_section = decompress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, ioSize)
         
     
 
-def compress_build(filesArray, metasArray, funcStencil, iSymbol,pragma, uSizeDim, tid, cTidEq, ispace, t0):
+def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, ioSize):
     
     uVecSize1 = funcStencil.symbolic_shape[1]    
     uVecSize2 = funcStencil.symbolic_shape[2]
@@ -187,45 +191,49 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol,pragma, uSizeDim
     itNodes=[]
     ifNodes=[]
     
-    zfp_type.zfp_type_float = 3
+    # zfp_type.zfp_type_float = 3
     Type = Symbol(name='type', dtype=zfp_type)
-    TypeEq = IREq(Type, zfp_type.zfp_type_float)
-    cTypeEq = ClusterizedEq(TypeEq, ispace=ispace)
+    TypeEq = IREq(Type, String(r"zfp_type_float"))
+    cTypeEq = ClusterizedEq(TypeEq, ispace=None)
     
     itNodes.append(Expression(cTidEq, None, True))
     
     field = Pointer(name="field", dtype=zfp_field)
     zfp = Pointer(name="zfp", dtype=zfp_stream)
     bufsize = Symbol(name="bufsize", dtype=size_t)
-    buffer = Pointer(name="buffer", dtype=c_void_p)
+    buffer = Pointer(name="buffer", dtype=ct.c_void_p)
     stream = Pointer(name="stream", dtype=bitstream)
     zfpsize = Symbol(name="zfpsize", dtype=size_t)
     
-    Call(name="zfp_field_2d", arguments=[funcStencil[t0,iSymbol], Type, uVecSize2, uVecSize3], retobj=field)
-    Call(name="zfp_stream_open", arguments=[Null], retobj=zfp)
-    # Call(name="zfp_stream_set_rate", arguments=[zfp, String(r"RATE"), Type, Call(name="zfp_field_dimensionality", arguments=[field]), ])
-    Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize)
-    Call(name="malloc", arguments=[bufsize], retobj=buffer)
-    Call(name="zfp_stream_set_bit_stream", arguments=[zfp, stream])
-    Call(name="zfp_stream_rewind", arguments=[zfp])
-    Call(name="zfp_compress", arguments=[zfp, field], retobj=zfpsize)
+    itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t0,iSymbol], Type, uVecSize2, uVecSize3], retobj=field))
+    itNodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
+    itNodes.append(Call(name="zfp_stream_set_rate", arguments=[zfp, String(r"RATE"), Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]))
+    itNodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
+    itNodes.append(Call(name="malloc", arguments=[bufsize], retobj=buffer))
+    itNodes.append(Call(name="stream_open", arguments=[bufsize, bufsize], retobj=stream))
+    itNodes.append(Call(name="zfp_stream_set_bit_stream", arguments=[zfp, stream]))
+    itNodes.append(Call(name="zfp_stream_rewind", arguments=[zfp]))
+    itNodes.append(Call(name="zfp_compress", arguments=[zfp, field], retobj=zfpsize))
     
     ifNodes.append(Call(name="fprintf", arguments=[String(r"stderr"), String("\"compression failed\\n\"")]))
     ifNodes.append(Call(name="exit", arguments=1))
     cond = Conditional(Not(zfpsize), ifNodes)
     itNodes.append(cond)
     
-    Call(name="write", arguments=[filesArray[tid], buffer, zfpsize])
-    Call(name="write", arguments=[metasArray[tid], Byref(zfpsize), SizeOf(String(r"size_t"))])
+    itNodes.append(Call(name="write", arguments=[filesArray[tid], buffer, zfpsize]))
+    itNodes.append(Call(name="write", arguments=[metasArray[tid], Byref(zfpsize), SizeOf(String(r"size_t"))]))
     
     # write_size += zfpsize
+    itNodes.append(Expression(ClusterizedEq(IREq(ioSize, ioSize+zfpsize), ispace=ispace), None, False))
     
-    Call(name="zfp_field_free", arguments=[field])
-    Call(name="zfp_stream_close", arguments=[zfp])
-    Call(name="stream_close", arguments=[stream])
-    Call(name="free", arguments=[buffer])
+    itNodes.append(Call(name="zfp_field_free", arguments=[field]))
+    itNodes.append(Call(name="zfp_stream_close", arguments=[zfp]))
+    itNodes.append(Call(name="stream_close", arguments=[stream]))
+    itNodes.append(Call(name="free", arguments=[buffer]))
     
-    compressSection = [cTypeEq, Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])]
+    compressSection = [Expression(cTypeEq, None, True), Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])]
+    
+    set_trace()
     
     return Section("compress", compressSection)
 

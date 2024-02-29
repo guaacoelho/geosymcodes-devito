@@ -1,4 +1,4 @@
-from ctypes import c_double, c_void_p, c_int, Structure, c_uint, c_int64, c_int32, c_float, c_size_t, c_uint64
+from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64, c_float, c_size_t, c_byte
 
 import numpy as np
 from sympy.core.core import ordering_of_classes
@@ -211,7 +211,7 @@ class off_t(c_int64):
 
     pass
 
-class size_t(c_size_t):
+class size_t(c_uint64):
     
     """
     Class representing the size_t type in C/C++
@@ -220,7 +220,11 @@ class size_t(c_size_t):
     pass
 
 ### Compression specific classes ###
-class zfp_type(Structure):
+class zfp_type(c_int):
+    
+    # NOTE: I don't know how to specify an unspecified type
+    # NOTE: Maybe the more appropriate solution is making zfp_type subclass of Structure and develop it with __fields__,
+    # but devito does not translate it the way I want
     
     """
     Class representing:
@@ -232,18 +236,19 @@ class zfp_type(Structure):
         zfp_type_float  = 3, // single precision floating point
         zfp_type_double = 4  // double precision floating point
     } zfp_type;
-    """
+    """    
+    # _fields_ = [
+    #     # ("zfp_type_int32", c_int32),
+    #     # ("zfp_type_int64", c_int64),
+    #     # ("zfp_type_float", c_float),
+    #     # ("zfp_type_double", c_double)
+    # ]
+    pass
     
-    # NOTE: I don't know how to specify an unspecified type
+class zfp_field(c_int):
     
-    _fields_ = [
-        ("zfp_type_int32", c_int32),
-        ("zfp_type_int64", c_int64),
-        ("zfp_type_float", c_float),
-        ("zfp_type_float", c_double)
-    ]
-    
-class zfp_field(Structure):
+    # NOTE: Maybe the more appropriate solution is making zfp_field subclass of Structure and develop it with __fields__,
+    # but devito does not translate it the way I want
     
     """
     Class representing:
@@ -256,16 +261,19 @@ class zfp_field(Structure):
     } zfp_field;
     """
     
-    # NOTE: I don't know how to specify an unspecified type
-    
-    _fields_ = [
-        ("type", zfp_type),
-        ("nx", c_size_t), ("ny", c_size_t), ("nz", c_size_t),("nw", c_size_t),
-        ("sx", c_int), ("sy", c_int), ("sz", c_int),("sw", c_int),
-        ("data", c_void_p)
-    ]
+    # _fields_ = [
+    #     ("zfp_field", c_float),
+    #     ("type", zfp_type),
+    #     ("nx", c_size_t), ("ny", c_size_t), ("nz", c_size_t),("nw", c_size_t),
+    #     ("sx", c_int), ("sy", c_int), ("sz", c_int),("sw", c_int),
+    #     ("data", c_void_p)
+    # ]
+    pass
 
-class bitstream(Structure):
+class bitstream(c_int):
+    
+    # NOTE: Maybe the more appropriate solution is making bitstream subclass of Structure and develop it with __fields__,
+    # but devito does not translate it the way I want
     
     """
     Class representing:
@@ -281,17 +289,18 @@ class bitstream(Structure):
     };
     """
     
-    # NOTE: I don't know how to specify an unspecified type
-    
-    _fields_ = [
-        ("minbits", c_uint),
-        ("maxbits", c_uint), 
-        ("maxprec", c_uint), 
-        ("minexp", c_int)
-    ]
-    
+    # _fields_ = [
+    #     ("minbits", c_uint),
+    #     ("maxbits", c_uint), 
+    #     ("maxprec", c_uint), 
+    #     ("minexp", c_int)
+    # ]
+    pass
 
-class zfp_stream(Structure):
+class zfp_stream(c_int):
+    
+    # NOTE: Maybe the more appropriate solution is making zfp_stream subclass of Structure and develop it with __fields__,
+    # but devito does not translate it the way I want
     
     """
     Class representing:
@@ -306,13 +315,12 @@ class zfp_stream(Structure):
     } zfp_stream;
     """
     
-    # NOTE: I don't know how to specify an unspecified type
-    
-    _fields_ = [
-        ("minbits", c_uint),
-        ("maxbits", c_uint), 
-        ("maxprec", c_uint), 
-        ("minexp", c_int)
-    ]
+    # _fields_ = [
+    #     ("minbits", c_uint),
+    #     ("maxbits", c_uint), 
+    #     ("maxprec", c_uint), 
+    #     ("minexp", c_int)
+    # ]    
+    pass
     
 
