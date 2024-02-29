@@ -224,10 +224,10 @@ def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, fun
     
     uVecSize1 = funcStencil.symbolic_shape[1]
     if is_forward:
-        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, is_mpi)
+        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1, t0, is_mpi)
         temp_name = 'write_temp'
     else: # gradient
-        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, countersArray)
+        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1, t0, countersArray)
         temp_name = 'read_temp'  
 
     sections = FindNodes(Section).visit(iet_body)
@@ -238,7 +238,7 @@ def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, fun
     transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
     iet_body[timeIndex] = transformedIet
 
-def write_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, is_mpi):
+def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1, t0, is_mpi):
     """
     This method inteds to code gradient.c write section.
     Obs: maybe the desciption of the variables should be better    
@@ -288,7 +288,7 @@ def write_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, is_mpi)
 
     return Section("write", writeIteration)
 
-def read_build(nthreads, filesArray, iSymbol, func_size, uVecSize1, t0, counters):
+def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1, t0, counters):
     """
     This method inteds to code gradient.c read section.
     Obs: maybe the desciption of the variables should be better    
