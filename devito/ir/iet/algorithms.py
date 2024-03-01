@@ -11,7 +11,7 @@ from devito.ir.iet.utils import array_alloc_check, get_first_space_dim_index
 from devito.tools import timed_pass
 from devito.symbolics import (CondNe, Macro, String, Null, Byref, SizeOf)
 
-from devito.types import (CustomDimension, Array, Symbol, Pointer, TimeDimension, 
+from devito.types import (CustomDimension, Array, Symbol, Pointer, TimeDimension, PointerArray,
                           off_t, zfp_type, size_t, zfp_field, bitstream, zfp_stream)
 from devito.ir.iet import (Expression, Increment, Iteration, List, Conditional, SyncSpot,
                            Section, HaloSpot, ExpressionBundle, Call, Conditional, 
@@ -119,10 +119,13 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     countersArray = Array(name='counters', dimensions=[nthreadsDim], dtype=np.int32)
     metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
     sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
+    offsetArray = Array(name='offset', dimensions=[nthreadsDim], dtype=off_t)
 
 
     ######## Build open section ########
     # TODO: why metas doesn't appear as input when we print the hole operator?
+    # slices_size = Pointer(name="slices_size", dtype=np.int32)
+    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
     openSection = open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression)
 
     ######## Build func_size var ########
@@ -137,7 +140,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
         ioSizeEq = ClusterizedEq(IREq(ioSize, 0), ispace=None)
                     
         ######## Build compress/decompress section ########
-        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterator, ioSize) 
+        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterator, ioSize, sptArray, offsetArray, slices_size) 
     else:
         ######## Build write/read section ########    
         write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
@@ -163,7 +166,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     return iet_body
 
 
-def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, t0, ioSize):
+def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterator, ioSize, sptArray, offsetArray, slices_size):
     
     uVecSize1 = funcStencil.symbolic_shape[1]
     uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
@@ -177,9 +180,9 @@ def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_f
     cTidEq = ClusterizedEq(tidEq, ispace=ispace)
     
     if is_forward:
-        ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, ioSize)
+        ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterator, ioSize)
     else:
-        ooc_section = decompress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, ioSize)
+        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterator, sptArray, slices_size, offsetArray, ioSize)
         
     
 
@@ -217,14 +220,13 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     
     ifNodes.append(Call(name="fprintf", arguments=[String(r"stderr"), String("\"compression failed\\n\"")]))
     ifNodes.append(Call(name="exit", arguments=1))
-    cond = Conditional(Not(zfpsize), ifNodes)
-    itNodes.append(cond)
+    itNodes.append(Conditional(Not(zfpsize), ifNodes))
     
     itNodes.append(Call(name="write", arguments=[filesArray[tid], buffer, zfpsize]))
     itNodes.append(Call(name="write", arguments=[metasArray[tid], Byref(zfpsize), SizeOf(String(r"size_t"))]))
     
     # write_size += zfpsize
-    itNodes.append(Expression(ClusterizedEq(IREq(ioSize, ioSize+zfpsize), ispace=ispace), None, False))
+    itNodes.append(Expression(Increment(IREq(ioSize, zfpsize))))
     
     itNodes.append(Call(name="zfp_field_free", arguments=[field]))
     itNodes.append(Call(name="zfp_stream_close", arguments=[zfp]))
@@ -233,20 +235,78 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     
     compressSection = [Expression(cTypeEq, None, True), Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])]
     
-    set_trace()
-    
     return Section("compress", compressSection)
 
-def decompress_build(funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0):
+def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray, ioSize):
     
     uVecSize1 = funcStencil.symbolic_shape[1]    
+    uVecSize2 = funcStencil.symbolic_shape[2]
+    uVecSize3 = funcStencil.symbolic_shape[3]
     itNodes=[]
+    if1Nodes=[]
+    if2Nodes=[]
     
     itNodes.append(Expression(cTidEq, None, True))
     
-    decompressIteration = Iteration(itNodes, uSizeDim, uVecSize1-1, direction=Backward, pragmas=[pragma])
+    Type = Symbol(name='type', dtype=zfp_type)
+    field = Pointer(name="field", dtype=zfp_field)
+    zfp = Pointer(name="zfp", dtype=zfp_stream)
+    bufsize = Symbol(name="bufsize", dtype=off_t)
+    buffer = Pointer(name="buffer", dtype=ct.c_void_p)
+    stream = Pointer(name="stream", dtype=bitstream)
+    Slice = Symbol(name="slice", dtype=np.int32)
+    ret = Symbol(name="ret", dtype=np.int32)
     
-    return Section("decompress", decompressIteration)
+    TypeEq = IREq(Type, String(r"zfp_type_float"))
+    cTypeEq = ClusterizedEq(TypeEq, ispace=None)
+    itNodes.append(Expression(cTypeEq, None, True))
+    
+    itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t2,iSymbol], Type, uVecSize2, uVecSize3], retobj=field))
+    itNodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
+    itNodes.append(Call(name="zfp_stream_set_rate", arguments=[zfp, String(r"RATE"), Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]))
+    itNodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
+    itNodes.append(Call(name="malloc", arguments=[bufsize], retobj=buffer))
+    itNodes.append(Call(name="stream_open", arguments=[bufsize, bufsize], retobj=stream))
+    itNodes.append(Call(name="zfp_stream_set_bit_stream", arguments=[zfp, stream]))
+    itNodes.append(Call(name="zfp_stream_rewind", arguments=[zfp]))
+    
+    SliceEq = IREq(Slice, sptArray[tid])
+    cSliceEq = ClusterizedEq(SliceEq, ispace=None)
+    itNodes.append(Expression(cSliceEq, None, True))
+    
+    offsetIncr = IREq(offsetArray[tid], slices_size[tid, Slice])
+    cOffsetIncr = ClusterizedEq(offsetIncr, ispace=ispace)
+    itNodes.append(Increment(cOffsetIncr))
+    
+    itNodes.append(Call(name="lseek", arguments=[filesArray[tid], (-1)*offsetArray[tid], Macro("SEEK_END")]))
+    itNodes.append(Call(name="read", arguments=[filesArray[tid], buffer, slices_size[tid, Slice]], retobj=ret))
+    itNodes.append(Increment(ClusterizedEq(IREq(ioSize, slices_size[tid, Slice]), ispace=ispace)))
+    
+    if1Nodes.append(Call(name="printf", arguments=[String("\"%zu\\n\""), offsetArray[tid]]))
+    if1Nodes.append(Call(name="perror", arguments=[String("\"Cannot open output file\"")]))
+    if1Nodes.append(Call(name="exit", arguments=1))
+    itNodes.append(Conditional(CondNe(ret, slices_size[tid, Slice]), if1Nodes))
+    
+    if2Nodes.append(Call(name="printf", arguments=[String("\"decompression failed\\n\"")]))
+    if2Nodes.append(Call(name="exit", arguments=1))
+    zfpsize = Symbol(name="zfpsize", dtype=size_t)  # auxiliry
+    itNodes.append(Call(name="zfp_decompress", arguments=[zfp, field], retobj=zfpsize))
+    itNodes.append(Conditional(Not(zfpsize), if2Nodes))
+    
+    itNodes.append(Call(name="zfp_field_free", arguments=[field]))
+    itNodes.append(Call(name="zfp_stream_close", arguments=[zfp]))
+    itNodes.append(Call(name="stream_close", arguments=[stream]))
+    itNodes.append(Call(name="free", arguments=[buffer]))
+    
+    newSptEq = IREq(sptArray[tid], (-1))
+    cNewSptEq = ClusterizedEq(newSptEq, ispace=ispace)
+    itNodes.append(Increment(cNewSptEq))
+    
+    decompressSection = Iteration(itNodes, uSizeDim, uVecSize1-1, direction=Backward, pragmas=[pragma])
+    
+    set_trace()
+    
+    return Section("decompress", decompressSection)
 
 
 
@@ -269,12 +329,11 @@ def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, fun
 
     """
     
-    uVecSize1 = funcStencil.symbolic_shape[1]
     if is_forward:
-        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1, t0, is_mpi)
+        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mpi)
         temp_name = 'write_temp'
     else: # gradient
-        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1, t0, countersArray)
+        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray)
         temp_name = 'read_temp'  
 
     sections = FindNodes(Section).visit(iet_body)
@@ -285,7 +344,7 @@ def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, fun
     transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
     iet_body[timeIndex] = transformedIet
 
-def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1, t0, is_mpi):
+def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mpi):
     """
     This method inteds to code gradient.c write section.
     Obs: maybe the desciption of the variables should be better    
@@ -303,7 +362,7 @@ def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1
         Section: complete wrie section
     """
     
-    
+    uVecSize1 = funcStencil.symbolic_shape[1]
     uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
     interval = Interval(uSizeDim, 0, uVecSize1)
     intervalGroup = IntervalGroup((interval))
@@ -335,7 +394,7 @@ def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1
 
     return Section("write", writeIteration)
 
-def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1, t0, counters):
+def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counters):
     """
     This method inteds to code gradient.c read section.
     Obs: maybe the desciption of the variables should be better    
@@ -357,6 +416,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, uVecSize1,
     #  pragma omp parallel for schedule(static,1) num_threads(nthreads)
     #  0 <= i <= u_vec->size[1]-1
     #  TODO: Pragmas should depend on user's selected optimization options and generated by the compiler
+    
     uVecSize1 = funcStencil.symbolic_shape[1]
     pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
     iDim = CustomDimension(name="i", symbolic_size=uVecSize1)
