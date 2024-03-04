@@ -26,9 +26,7 @@ def iet_build(stree, **kwargs):
     """
     Construct an Iteration/Expression tree(IET) from a ScheduleTree.
     """
-
     ooc = kwargs['options']['out-of-core']
-    if ooc.function.save: raise ValueError("Out of core incompatible with TimeFunction save functionality")
     is_mpi = kwargs['options']['mpi']
     time_iterator = None
     
@@ -98,9 +96,11 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     Returns:
         List : iet_body is a list of nodes
     """
-    func = ooc.function
+    func = ooc.functions[0]
     out_of_core = ooc.mode
     is_compression = ooc.compression
+
+    if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality")
 
     is_forward = out_of_core == 'forward'
 

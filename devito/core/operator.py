@@ -7,11 +7,11 @@ from devito.mpi.routines import mpi_registry
 from devito.parameters import configuration
 from devito.operator import Operator
 from devito.tools import as_tuple, is_integer, timed_pass
-from devito.types import NThreads, AbstractFunction
+from devito.types import NThreads, TimeFunction
 
 __all__ = ['CoreOperator', 'CustomOperator',
            # Optimization options
-           'ParTile', 'OutOfCoreTuple']
+           'ParTile', 'OutOfCoreConfig']
 
 
 class BasicOperator(Operator):
@@ -392,25 +392,33 @@ class ParTile(tuple, OptOption):
         return obj
 
 
-class OutOfCoreTuple(OptOption):
+class OutOfCoreConfig(OptOption):
     def __new__(cls, items):
         if not items:
             return None
         elif isinstance(items, (list, tuple)):
             n = len(items)
+
+            #Tuple format check
             if n != 2 and n != 3:
                 raise ValueError("Out of core options must be a two or three elements tuple: (function, mode, compression)")
-            #TODO: All AbstractFunctions?
-            if not isinstance(items[0], AbstractFunction):
-                raise ValueError("First element of out of core options must be a AbstractFunction, got %s"
-                                  % type(items[0]))
+           
+            # Fields check
+            #TODO: All TimeFunctions?
+            fields = items[0] if isinstance(items[0], list) else [items[0]]
+            for field in fields:
+                if not isinstance(field, TimeFunction):
+                    raise ValueError("First element of out of core options must be TimeFunctions, got %s"
+                                  % type(field))
+            
+            # Mode check
             if str(items[1]) != "forward" and str(items[1]) != "gradient":
                 raise ValueError("Second element of out of core options must be forward or gradient")
         else:
             raise ValueError("Wrong type for out of core options")
         
         obj = super().__new__(cls)
-        obj.function = items[0]
+        obj.functions = fields
         obj.mode = items[1]
         obj.compression = False if n < 3 else bool(items[2])
         return obj

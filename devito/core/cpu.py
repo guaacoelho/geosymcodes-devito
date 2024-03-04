@@ -1,6 +1,6 @@
 from functools import partial
 
-from devito.core.operator import CoreOperator, CustomOperator, ParTile, OutOfCoreTuple
+from devito.core.operator import CoreOperator, CustomOperator, ParTile, OutOfCoreConfig
 from devito.exceptions import InvalidOperator
 from devito.passes.equations import collect_derivatives
 from devito.passes.clusters import (Lift, blocking, buffering, cire, cse,
@@ -27,7 +27,7 @@ class Cpu64OperatorMixin(object):
         o['mpi'] = oo.pop('mpi')
         o['parallel'] = o['openmp']  # Backwards compatibility
 
-        o['out-of-core'] = OutOfCoreTuple(oo.pop('out-of-core', None))
+        o['out-of-core'] = OutOfCoreConfig(oo.pop('out-of-core', None))
 
         # Buffering
         o['buf-async-degree'] = oo.pop('buf-async-degree', None)
