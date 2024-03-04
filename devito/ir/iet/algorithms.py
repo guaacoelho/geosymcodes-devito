@@ -7,7 +7,7 @@ from sympy import Mod, Not
 from functools import reduce
 from collections import OrderedDict
 
-from devito.ir.iet.utils import array_alloc_check, get_first_space_dim_index
+from devito.ir.iet.utils import array_alloc_check, get_first_space_dim_index, update_iet
 from devito.tools import timed_pass
 from devito.symbolics import (CondNe, Macro, String, Null, Byref, SizeOf)
 
@@ -60,10 +60,16 @@ def iet_build(stree, **kwargs):
         elif i.is_Iteration:
             iteration_nodes = queues.pop(i)
             if isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'forward':
-                iteration_nodes.append(Section("write_temp"))
+                if ooc.compression:
+                    iteration_nodes.append(Section("compress"))
+                else:
+                    iteration_nodes.append(Section("write_temp"))
                 time_iterator = i.sub_iterators[0]
             elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'gradient':
-                iteration_nodes.insert(0, Section("read_temp"))
+                if ooc.compression:
+                    iteration_nodes.append(Section("decompress"))
+                else:
+                    iteration_nodes.append(Section("read_temp"))
                 time_iterator = i.sub_iterators[0]
 
             body = Iteration(iteration_nodes, i.dim, i.limits, direction=i.direction,
@@ -137,7 +143,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     if is_compression: 
         
         ######## Build write/read_size var ########
-        ioSizeEq = ClusterizedEq(IREq(ioSize, 0), ispace=None)
+        ioSizeEq = Expression(ClusterizedEq(IREq(ioSize, 0), ispace=None), None, True)
                     
         ######## Build compress/decompress section ########
         compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterator, ioSize, sptArray, offsetArray, slices_size) 
@@ -167,6 +173,22 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
 
 
 def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterator, ioSize, sptArray, offsetArray, slices_size):
+    """_summary_
+
+    Args:
+        filesArray (_type_): _description_
+        metasArray (_type_): _description_
+        iet_body (_type_): _description_
+        iSymbol (_type_): _description_
+        is_forward (bool): _description_
+        funcStencil (_type_): _description_
+        nthreads (_type_): _description_
+        time_iterator (_type_): _description_
+        ioSize (_type_): _description_
+        sptArray (_type_): _description_
+        offsetArray (_type_): _description_
+        slices_size (_type_): _description_
+    """
     
     uVecSize1 = funcStencil.symbolic_shape[1]
     uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
@@ -181,12 +203,33 @@ def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_f
     
     if is_forward:
         ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterator, ioSize)
+        temp_name = "compress"
     else:
         ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterator, sptArray, slices_size, offsetArray, ioSize)
+        temp_name = "decompress"
         
+    update_iet(iet_body, temp_name, ooc_section)      
     
 
 def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, ioSize):
+    """_summary_
+
+    Args:
+        filesArray (_type_): _description_
+        metasArray (_type_): _description_
+        funcStencil (_type_): _description_
+        iSymbol (_type_): _description_
+        pragma (_type_): _description_
+        uSizeDim (_type_): _description_
+        tid (_type_): _description_
+        cTidEq (_type_): _description_
+        ispace (bool): _description_
+        t0 (_type_): _description_
+        ioSize (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
     
     uVecSize1 = funcStencil.symbolic_shape[1]    
     uVecSize2 = funcStencil.symbolic_shape[2]
@@ -197,7 +240,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     # zfp_type.zfp_type_float = 3
     Type = Symbol(name='type', dtype=zfp_type)
     TypeEq = IREq(Type, String(r"zfp_type_float"))
-    cTypeEq = ClusterizedEq(TypeEq, ispace=None)
+    cTypeEq = ClusterizedEq(TypeEq, ispace=ispace)
     
     itNodes.append(Expression(cTidEq, None, True))
     
@@ -238,6 +281,26 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     return Section("compress", compressSection)
 
 def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray, ioSize):
+    """_summary_
+
+    Args:
+        filesArray (_type_): _description_
+        funcStencil (_type_): _description_
+        iSymbol (_type_): _description_
+        pragma (_type_): _description_
+        uSizeDim (_type_): _description_
+        tid (_type_): _description_
+        cTidEq (_type_): _description_
+        ispace (bool): _description_
+        t2 (_type_): _description_
+        sptArray (_type_): _description_
+        slices_size (_type_): _description_
+        offsetArray (_type_): _description_
+        ioSize (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
     
     uVecSize1 = funcStencil.symbolic_shape[1]    
     uVecSize2 = funcStencil.symbolic_shape[2]
@@ -258,7 +321,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     ret = Symbol(name="ret", dtype=np.int32)
     
     TypeEq = IREq(Type, String(r"zfp_type_float"))
-    cTypeEq = ClusterizedEq(TypeEq, ispace=None)
+    cTypeEq = ClusterizedEq(TypeEq, ispace=ispace)
     itNodes.append(Expression(cTypeEq, None, True))
     
     itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t2,iSymbol], Type, uVecSize2, uVecSize3], retobj=field))
@@ -271,7 +334,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     itNodes.append(Call(name="zfp_stream_rewind", arguments=[zfp]))
     
     SliceEq = IREq(Slice, sptArray[tid])
-    cSliceEq = ClusterizedEq(SliceEq, ispace=None)
+    cSliceEq = ClusterizedEq(SliceEq, ispace=ispace)
     itNodes.append(Expression(cSliceEq, None, True))
     
     offsetIncr = IREq(offsetArray[tid], slices_size[tid, Slice])
@@ -306,9 +369,6 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     
     return Section("decompress", decompressSection)
 
-
-
-
 def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray, is_mpi):
     """
     Builds the read or write section of the operator, depending on the out_of_core mode.
@@ -334,13 +394,7 @@ def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, fun
         ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray)
         temp_name = 'read_temp'  
 
-    sections = FindNodes(Section).visit(iet_body)
-    temp_sec = next((section for section in sections if section.name == temp_name), None)
-    mapper={temp_sec: ooc_section}
-
-    timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
-    transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
-    iet_body[timeIndex] = transformedIet
+    update_iet(iet_body, temp_name, ooc_section)     
 
 def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mpi):
     """

@@ -1,10 +1,10 @@
-from devito.ir.iet import FindSections, FindSymbols, Call, Conditional
+from devito.ir.iet import FindSections, FindSymbols, Call, Conditional, FindNodes, Transformer, Iteration, Section
 from devito.symbolics import Keyword, Macro, CondEq, String
 from devito.tools import filter_ordered
-from devito.types import Global, SpaceDimension
+from devito.types import Global, SpaceDimension, TimeDimension
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index']
+           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index', 'update_iet']
 
 
 class IterationTree(tuple):
@@ -191,3 +191,21 @@ def get_first_space_dim_index(dimensions):
             first_space_dim_index += 1
     
     return first_space_dim_index
+
+def update_iet(iet_body, temp_name, ooc_section):
+    """_summary_
+
+    Args:
+        iet_body (_type_): _description_
+        temp_name (_type_): _description_
+        ooc_section (_type_): _description_
+    """
+    
+    sections = FindNodes(Section).visit(iet_body)
+    temp_sec = next((section for section in sections if section.name == temp_name), None)
+    mapper={temp_sec: ooc_section}
+
+    timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
+    transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
+    iet_body[timeIndex] = transformedIet 
+    # import pdb; pdb.set_trace()

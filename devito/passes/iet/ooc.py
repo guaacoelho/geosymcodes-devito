@@ -265,7 +265,6 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim):
         
     getSliceSizeBody = CallableBody(funcBody)
     callable = Callable("get_slices_size", getSliceSizeBody, "size_t**", [metasArray, sptArray, nthreads])
-    set_trace()
     return callable    
     
 
