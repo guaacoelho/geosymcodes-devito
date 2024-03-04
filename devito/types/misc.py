@@ -1,5 +1,4 @@
-from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64, c_float, c_size_t, c_byte
-
+from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64, c_int
 import numpy as np
 from sympy.core.core import ordering_of_classes
 from sympy.codegen.ast import SignedIntType

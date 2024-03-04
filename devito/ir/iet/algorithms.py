@@ -201,11 +201,11 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     
     itNodes.append(Expression(cTidEq, None, True))
     
-    field = Pointer(name="field", dtype=zfp_field)
-    zfp = Pointer(name="zfp", dtype=zfp_stream)
+    field = Pointer(name="field", dtype=ct.POINTER(zfp_field))
+    zfp = Pointer(name="zfp", dtype=ct.POINTER(zfp_stream))
     bufsize = Symbol(name="bufsize", dtype=size_t)
     buffer = Pointer(name="buffer", dtype=ct.c_void_p)
-    stream = Pointer(name="stream", dtype=bitstream)
+    stream = Pointer(name="stream", dtype=ct.POINTER(bitstream))
     zfpsize = Symbol(name="zfpsize", dtype=size_t)
     
     itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t0,iSymbol], Type, uVecSize2, uVecSize3], retobj=field))
@@ -226,7 +226,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     itNodes.append(Call(name="write", arguments=[metasArray[tid], Byref(zfpsize), SizeOf(String(r"size_t"))]))
     
     # write_size += zfpsize
-    itNodes.append(Expression(Increment(IREq(ioSize, zfpsize))))
+    itNodes.append(Increment(ClusterizedEq(IREq(ioSize, zfpsize))))
     
     itNodes.append(Call(name="zfp_field_free", arguments=[field]))
     itNodes.append(Call(name="zfp_stream_close", arguments=[zfp]))
@@ -249,11 +249,11 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     itNodes.append(Expression(cTidEq, None, True))
     
     Type = Symbol(name='type', dtype=zfp_type)
-    field = Pointer(name="field", dtype=zfp_field)
-    zfp = Pointer(name="zfp", dtype=zfp_stream)
+    field = Pointer(name="field", dtype=ct.POINTER(zfp_field))
+    zfp = Pointer(name="zfp", dtype=ct.POINTER(zfp_stream))
     bufsize = Symbol(name="bufsize", dtype=off_t)
     buffer = Pointer(name="buffer", dtype=ct.c_void_p)
-    stream = Pointer(name="stream", dtype=bitstream)
+    stream = Pointer(name="stream", dtype=ct.POINTER(bitstream))
     Slice = Symbol(name="slice", dtype=np.int32)
     ret = Symbol(name="ret", dtype=np.int32)
     
@@ -303,8 +303,6 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     itNodes.append(Increment(cNewSptEq))
     
     decompressSection = Iteration(itNodes, uSizeDim, uVecSize1-1, direction=Backward, pragmas=[pragma])
-    
-    set_trace()
     
     return Section("decompress", decompressSection)
 
