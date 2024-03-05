@@ -167,28 +167,32 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     iet_body.insert(0, floatSizeInit)
     iet_body.insert(0, openSection)
     iet_body.append(closeSection)
-    iet_body.append(ioSizeEq)
+    if is_compression:
+        iet_body.insert(0, ioSizeEq)
+    else:
+        iet_body.append(ioSizeEq)
     # iet_body.append(saveCall)
 
     return iet_body
 
 
 def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterators, ioSize, sptArray, offsetArray, slices_size):
-    """_summary_
+    """
+    This function decides if it is either a compression or a decompression
 
     Args:
-        filesArray (_type_): _description_
-        metasArray (_type_): _description_
-        iet_body (_type_): _description_
-        iSymbol (_type_): _description_
-        is_forward (bool): _description_
-        funcStencil (_type_): _description_
-        nthreads (_type_): _description_
-        time_iterator (_type_): _description_
-        ioSize (_type_): _description_
-        sptArray (_type_): _description_
-        offsetArray (_type_): _description_
-        slices_size (_type_): _description_
+        filesArray (Array): array of files
+        metasArray (Array): array of metadata
+        iet_body (List): IET body nodes
+        iSymbol (Symbol): iterator symbol
+        is_forward (bool): if True, it is forward. It is gradient otherwise
+        funcStencil (Function): Function defined by user for Operator
+        nthreads (NThreads): number of threads
+        time_iterator (tuple): time iterator indexes
+        ioSize (Symbol): read_size or write_size
+        sptArray (Array): array of slices per thread
+        offsetArray (Array): array of offset
+        slices_size (PointerArray): 2d-array of slices
     """
     
     uVecSize1 = funcStencil.symbolic_shape[1]
@@ -208,28 +212,29 @@ def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_f
     else:
         ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[-1], sptArray, slices_size, offsetArray, ioSize)
         temp_name = "decompress_temp"
-        
+
     update_iet(iet_body, temp_name, ooc_section)      
     
 
-def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, ioSize):
-    """_summary_
+def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, WriteSize):
+    """
+    This function generates compress section.
 
     Args:
-        filesArray (_type_): _description_
-        metasArray (_type_): _description_
-        funcStencil (_type_): _description_
-        iSymbol (_type_): _description_
-        pragma (_type_): _description_
-        uSizeDim (_type_): _description_
-        tid (_type_): _description_
-        cTidEq (_type_): _description_
-        ispace (bool): _description_
-        t0 (_type_): _description_
-        ioSize (_type_): _description_
+        filesArray (Array): array of files
+        metasArray (Array): array of metadata
+        funcStencil (Function): Function defined by user for Operator
+        iSymbol (Symbol): iterator symbol
+        pragma (Pragma): omp pragma directives
+        uSizeDim (CustomDimension): symbolic dimension of loop
+        tid (Symbol): iterator index symbol
+        cTidEq (ClusterizedEq): expression that defines tid --> int tid = i%nthreads
+        ispace (IterationSpace): space of iteration
+        t0 (ModuloDimension): time iterator index for compression
+        WriteSize (Symbol): write_size even if it is compression
 
     Returns:
-        _type_: _description_
+        Section: compress section
     """
     
     uVecSize1 = funcStencil.symbolic_shape[1]    
@@ -238,10 +243,10 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     itNodes=[]
     ifNodes=[]
     
-    # zfp_type.zfp_type_float = 3
     Type = Symbol(name='type', dtype=zfp_type)
-    TypeEq = IREq(Type, String(r"zfp_type_float"))
+    TypeEq = IREq(Type, Symbol(name="zfp_type_float", dtype=ct.c_int))
     cTypeEq = ClusterizedEq(TypeEq, ispace=ispace)
+    itNodes.append(Expression(cTypeEq, None, True))
     
     itNodes.append(Expression(cTidEq, None, True))
     
@@ -270,7 +275,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     itNodes.append(Call(name="write", arguments=[metasArray[tid], Byref(zfpsize), SizeOf(String(r"size_t"))]))
     
     # write_size += zfpsize
-    itNodes.append(Increment(ClusterizedEq(IREq(ioSize, zfpsize))))
+    itNodes.append(Increment(ClusterizedEq(IREq(WriteSize, zfpsize), ispace=ispace)))
     
     itNodes.append(Call(name="zfp_field_free", arguments=[field]))
     itNodes.append(Call(name="zfp_stream_close", arguments=[zfp]))
@@ -278,29 +283,29 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     itNodes.append(Call(name="free", arguments=[buffer]))
     
     compressSection = [Expression(cTypeEq, None, True), Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])]
-    
     return Section("compress", compressSection)
 
-def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray, ioSize):
-    """_summary_
+def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray, ReadSize):
+    """
+    This function generates decompress section.
 
     Args:
-        filesArray (_type_): _description_
-        funcStencil (_type_): _description_
-        iSymbol (_type_): _description_
-        pragma (_type_): _description_
-        uSizeDim (_type_): _description_
-        tid (_type_): _description_
-        cTidEq (_type_): _description_
-        ispace (bool): _description_
-        t2 (_type_): _description_
-        sptArray (_type_): _description_
-        slices_size (_type_): _description_
-        offsetArray (_type_): _description_
-        ioSize (_type_): _description_
+        filesArray (Array): array of files
+        funcStencil (Function): Function defined by user for Operator
+        iSymbol (Symbol): iterator symbol
+        pragma (Pragma): omp pragma directives
+        uSizeDim (CustomDimension): symbolic dimension of loop
+        tid (Symbol): iterator index symbol
+        cTidEq (ClusterizedEq): expression that defines tid --> int tid = i%nthreads
+        ispace (IterationSpace): space of iteration
+        t2 (ModuloDimension): time iterator index for compression
+        sptArray (Array): array of slices per thread
+        slices_size (PointerArray): 2d-array of slices
+        offsetArray (Array): array of offset
+        ReadSize (Symbol): read_size even if it is compression
 
     Returns:
-        _type_: _description_
+        Section: decompress section
     """
     
     uVecSize1 = funcStencil.symbolic_shape[1]    
@@ -321,7 +326,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     Slice = Symbol(name="slice", dtype=np.int32)
     ret = Symbol(name="ret", dtype=np.int32)
     
-    TypeEq = IREq(Type, String(r"zfp_type_float"))
+    TypeEq = IREq(Type, Symbol(name="zfp_type_float", dtype=ct.c_int))
     cTypeEq = ClusterizedEq(TypeEq, ispace=ispace)
     itNodes.append(Expression(cTypeEq, None, True))
     
@@ -344,7 +349,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     
     itNodes.append(Call(name="lseek", arguments=[filesArray[tid], (-1)*offsetArray[tid], Macro("SEEK_END")]))
     itNodes.append(Call(name="read", arguments=[filesArray[tid], buffer, slices_size[tid, Slice]], retobj=ret))
-    itNodes.append(Increment(ClusterizedEq(IREq(ioSize, slices_size[tid, Slice]), ispace=ispace)))
+    itNodes.append(Increment(ClusterizedEq(IREq(ReadSize, slices_size[tid, Slice]), ispace=ispace)))
     
     if1Nodes.append(Call(name="printf", arguments=[String("\"%zu\\n\""), offsetArray[tid]]))
     if1Nodes.append(Call(name="perror", arguments=[String("\"Cannot open output file\"")]))

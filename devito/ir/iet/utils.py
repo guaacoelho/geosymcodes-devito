@@ -193,12 +193,13 @@ def get_first_space_dim_index(dimensions):
     return first_space_dim_index
 
 def update_iet(iet_body, temp_name, ooc_section):
-    """_summary_
+    """
+    This function substitute a temp section with definitive section.
 
     Args:
-        iet_body (_type_): _description_
-        temp_name (_type_): _description_
-        ooc_section (_type_): _description_
+        iet_body (List): IET body noes
+        temp_name (string): name of section
+        ooc_section (Section): Read/Decompress or Write/Compress section
     """
     
     sections = FindNodes(Section).visit(iet_body)
@@ -208,4 +209,3 @@ def update_iet(iet_body, temp_name, ooc_section):
     timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
     transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
     iet_body[timeIndex] = transformedIet 
-    # import pdb; pdb.set_trace()
