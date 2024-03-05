@@ -31,7 +31,7 @@ def iet_build(stree, **kwargs):
     ooc = kwargs['options']['out-of-core']
     if ooc.function.save: raise ValueError("Out of core incompatible with TimeFunction save functionality")
     is_mpi = kwargs['options']['mpi']
-    time_iterator = None
+    time_iterators = None
     
     nsections = 0
     queues = OrderedDict()
@@ -40,7 +40,7 @@ def iet_build(stree, **kwargs):
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
             if(ooc):
-                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, ooc, is_mpi, time_iterator)
+                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, ooc, is_mpi, time_iterators)
                 return List(body=iet_body)
             else:                
                 return List(body=iet_body)
@@ -61,16 +61,16 @@ def iet_build(stree, **kwargs):
             iteration_nodes = queues.pop(i)
             if isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'forward':
                 if ooc.compression:
-                    iteration_nodes.append(Section("compress"))
+                    iteration_nodes.append(Section("compress_temp"))
                 else:
                     iteration_nodes.append(Section("write_temp"))
-                time_iterator = i.sub_iterators[0]
+                time_iterators = i.sub_iterators
             elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'gradient':
                 if ooc.compression:
-                    iteration_nodes.append(Section("decompress"))
+                    iteration_nodes.append(Section("decompress_temp"))
                 else:
                     iteration_nodes.append(Section("read_temp"))
-                time_iterator = i.sub_iterators[0]
+                time_iterators = i.sub_iterators
 
             body = Iteration(iteration_nodes, i.dim, i.limits, direction=i.direction,
                              properties=i.properties, uindices=i.sub_iterators)
@@ -91,7 +91,7 @@ def iet_build(stree, **kwargs):
 
 
 @timed_pass(name='ooc_build')
-def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
+def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     """
     This private method builds a iet_body (list) with out-of-core nodes.
 
@@ -109,6 +109,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     out_of_core = ooc.mode
     is_compression = ooc.compression
     is_forward = out_of_core == 'forward'
+    time_iterator = time_iterators[0]
 
     # Creates nthreads once again in order to enable the ignoreDefinition flag
     #nthreads = NThreads(ignoreDefinition=True)
@@ -132,7 +133,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     # TODO: why metas doesn't appear as input when we print the hole operator?
     # slices_size = Pointer(name="slices_size", dtype=np.int32)
     slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
-    openSection = open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression)
+    openSection = open_build(filesArray, countersArray, metasArray, sptArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression)
 
     ######## Build func_size var ########
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
@@ -146,7 +147,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
         ioSizeEq = Expression(ClusterizedEq(IREq(ioSize, 0), ispace=None), None, True)
                     
         ######## Build compress/decompress section ########
-        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterator, ioSize, sptArray, offsetArray, slices_size) 
+        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterators, ioSize, sptArray, offsetArray, slices_size) 
     else:
         ######## Build write/read section ########    
         write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
@@ -172,7 +173,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterator):
     return iet_body
 
 
-def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterator, ioSize, sptArray, offsetArray, slices_size):
+def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterators, ioSize, sptArray, offsetArray, slices_size):
     """_summary_
 
     Args:
@@ -202,11 +203,11 @@ def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_f
     cTidEq = ClusterizedEq(tidEq, ispace=ispace)
     
     if is_forward:
-        ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterator, ioSize)
-        temp_name = "compress"
+        ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[0], ioSize)
+        temp_name = "compress_temp"
     else:
-        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterator, sptArray, slices_size, offsetArray, ioSize)
-        temp_name = "decompress"
+        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[-1], sptArray, slices_size, offsetArray, ioSize)
+        temp_name = "decompress_temp"
         
     update_iet(iet_body, temp_name, ooc_section)      
     
@@ -521,7 +522,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counte
 
     return section
 
-def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression):
+def open_build(filesArray, countersArray, metasArray, sptArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression):
     """
     This method inteds to code open section for both Forward and Gradient operators.
     
@@ -542,13 +543,16 @@ def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_
     filesArrCond = array_alloc_check(filesArray) #  Forward
     
     #Call open_thread_files
-    funcArgs = [filesArray, nthreads]
+    funcArgsOpenThreadsCall = [filesArray, nthreads]
     if is_compression:
-        funcArgs = [filesArray, metasArray, nthreads]
-    open_thread_call = Call(name='open_thread_files', arguments=funcArgs)
+        funcArgsOpenThreadsCall = [filesArray, metasArray, nthreads]
+        get_slices_call = Call(name='get_slices_size_temp', arguments=[metasArray, sptArray, nthreads])
+    open_thread_call = Call(name='open_thread_files_temp', arguments=funcArgsOpenThreadsCall)
+    
 
     # Open section body
     body = [filesArrCond, open_thread_call]
+    
     
     if not is_forward and not is_compression:
         countersArrCond = array_alloc_check(countersArray) # gradient
@@ -558,6 +562,9 @@ def open_build(filesArray, countersArray, metasArray, nthreadsDim, nthreads, is_
         cNewCountersEq = ClusterizedEq(IREq(countersArray[iSymbol], 1), ispace=IterationSpace(intervalGroup))
         openIterationGrad = Iteration(Expression(cNewCountersEq, None, False), nthreadsDim, nthreads-1)
         body.append(openIterationGrad)
+    elif not is_forward and is_compression:
+        body.append(get_slices_call)
+    
         
     return Section("open", body)
 

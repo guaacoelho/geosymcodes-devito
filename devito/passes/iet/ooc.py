@@ -227,7 +227,7 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim):
     nthreadsDim.name='tid'
     
     slicesSize = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
-    mAllocCall = Call(name="(size_t**) malloc", arguments=[nthreads*SizeOf(Pointer(name='size_t *', dtype=size_t))], retobj=slicesSize)
+    mAllocCall = Call(name="(size_t**) malloc", arguments=[nthreads*SizeOf(String(r"size_t *"))], retobj=slicesSize)
     funcBody.append(mAllocCall)
     
     # Get size of the file
@@ -242,12 +242,7 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim):
     itNodes.append(Expression(cSptEq, None, False))
     
     # Allocate
-    slicesSizeTidMallocCall = Call(name='malloc', arguments=[fSize], retobj=slicesSize[tid])
-    slicesSizeTidCast = cast_mapper[(size_t, '*')](slicesSize[tid])
-    slicesSizeTidCastEq = IREq(slicesSize[tid], slicesSizeTidCast)
-    cSlicesSizeTidCastEq = ClusterizedEq(slicesSizeTidCastEq, ispace=None)
-    itNodes.append(slicesSizeTidMallocCall)
-    itNodes.append(Expression(cSlicesSizeTidCastEq, None, False))
+    itNodes.append(Call(name='(size_t*) malloc', arguments=[fSize], retobj=slicesSize[tid]))
     
     ifNodes.append(Call(name="perror", arguments=String("\"Error to allocate slices\\n\"")))
     ifNodes.append(Call(name="exit", arguments=1))
@@ -309,7 +304,7 @@ def ooc_efuncs(iet, **kwargs):
             new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads])
             slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim)
             efuncs.append(slicesSizeCallable)
-            get_slices_call = next((call for call in calls if call.name == 'get_slices_size'), None)
+            get_slices_call = next((call for call in calls if call.name == 'get_slices_size_temp'), None)
             mapper[get_slices_call] = new_get_slices_call
             
     else:
@@ -320,9 +315,9 @@ def ooc_efuncs(iet, **kwargs):
                                              nthreadsDim, nameArray, is_forward, 
                                              is_mpi, is_compression)
     efuncs.append(openThreadsCallable)   
-    open_threads_call = next((call for call in calls if call.name == 'open_thread_files'), None)
+    open_threads_call = next((call for call in calls if call.name == 'open_thread_files_temp'), None)
     mapper[open_threads_call] = new_open_thread_call
     
-    iet = Transformer(mapper).visit(iet)   
+    iet = Transformer(mapper).visit(iet)  
     
     return iet, {'efuncs': efuncs}
