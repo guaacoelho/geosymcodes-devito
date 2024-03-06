@@ -191,7 +191,7 @@ class Operator(Callable):
 
         out_of_core = kwargs['options']['out-of-core']
         is_mpi = kwargs['options']['mpi']
-        is_compression = True
+        is_compression = out_of_core.compression
 
         # Lower the input expressions into an IET
         irs, byproduct = cls._lower(expressions, profiler=profiler, **kwargs)
