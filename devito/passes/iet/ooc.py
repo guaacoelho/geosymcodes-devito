@@ -3,7 +3,7 @@ from sympy import Mod
 from pdb import set_trace
 
 from devito.passes.iet.engine import iet_pass
-from devito.symbolics import (CondEq, CondNe, Macro, String, cast_mapper, SizeOf)
+from devito.symbolics import (CondEq, CondNe, Macro, String, cast_mapper, SizeOf, Null)
 from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
 from devito.types import CustomDimension, Array, Symbol, Pointer, FILE, Timer, NThreads, off_t, size_t, PointerArray
 from devito.ir.iet import (Expression, Iteration, Conditional, Call, Conditional, CallableBody, Callable,
@@ -122,7 +122,7 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol):
     funcBody=[]
     
     slicesSize = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
-    mAllocCall = Call(name="(size_t**) malloc", arguments=[nthreads*SizeOf(Pointer(name='size_t *', dtype=size_t))], retobj=slicesSize)
+    mAllocCall = Call(name="(size_t**) malloc", arguments=[nthreads*SizeOf(String(r"size_t *"))], retobj=slicesSize)
     funcBody.append(mAllocCall)
     
     # Get size of the file
@@ -131,21 +131,16 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol):
     itNodes.append(lseekCall)
     
     # Get number of slices per thread file
-    sptEq = IREq(sptArray[iSymbol], cast_mapper[int](fSize) / SizeOf(Symbol(name='size_t', dtype=size_t)) -1)
+    sptEq = IREq(sptArray[iSymbol], cast_mapper[int](fSize) / SizeOf(String(r"size_t")) -1)
     cSptEq = ClusterizedEq(sptEq, ispace=None)
     itNodes.append(Expression(cSptEq, None, False))
     
     # Allocate
-    slicesSizeTidMallocCall = Call(name='malloc', arguments=[fSize], retobj=slicesSize[iSymbol])
-    slicesSizeTidCast = cast_mapper[(size_t, '*')](slicesSize[iSymbol])
-    slicesSizeTidCastEq = IREq(slicesSize[iSymbol], slicesSizeTidCast)
-    cSlicesSizeTidCastEq = ClusterizedEq(slicesSizeTidCastEq, ispace=None)
-    itNodes.append(slicesSizeTidMallocCall)
-    itNodes.append(Expression(cSlicesSizeTidCastEq, None, False))
+    itNodes.append(Call(name='(size_t*) malloc', arguments=[fSize], retobj=slicesSize[iSymbol]))
     
     ifNodes.append(Call(name="perror", arguments=String("\"Error to allocate slices\\n\"")))
     ifNodes.append(Call(name="exit", arguments=1))
-    itNodes.append(Conditional(CondEq(slicesSize, Macro("NULL")), ifNodes))
+    itNodes.append(Conditional(CondEq(slicesSize, Null), ifNodes))
     
     # Return to begin of the file
     itNodes.append(Call(name="lseek", arguments=[metasArray[iSymbol], 0, Macro("SEEK_SET")]))
@@ -211,6 +206,6 @@ def ooc_efuncs(iet, **kwargs):
     open_threads_call = next((call for call in calls if call.name == 'open_thread_files_temp'), None)
     mapper[open_threads_call] = new_open_thread_call
     
-    iet = Transformer(mapper).visit(iet)   
+    iet = Transformer(mapper).visit(iet)  
     
     return iet, {'efuncs': efuncs}

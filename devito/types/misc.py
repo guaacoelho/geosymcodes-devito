@@ -1,5 +1,4 @@
-from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64
-
+from ctypes import c_double, c_void_p, c_int, Structure, c_uint64, c_int64, c_int
 import numpy as np
 from sympy.core.core import ordering_of_classes
 from sympy.codegen.ast import SignedIntType
@@ -9,7 +8,8 @@ from devito.types.basic import IndexedData
 from devito.tools import Pickable, as_tuple
 
 __all__ = ['Timer', 'Pointer', 'VolatileInt', 'FIndexed', 'Wildcard',
-           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 'off_t', 'size_t']
+           'Global', 'Hyperplane', 'Indirection', 'Temp', 'Jump', 'FILE', 
+           'off_t', 'size_t', 'zfp_type', 'zfp_field', 'bitstream', 'zfp_stream']
 
 
 class Timer(CompositeObject):
@@ -217,3 +217,109 @@ class size_t(c_uint64):
     """
 
     pass
+
+### Compression specific classes ###
+class zfp_type(c_int):
+    
+    # NOTE: I don't know how to specify an unspecified type
+    # NOTE: Maybe the more appropriate solution is making zfp_type subclass of Structure and develop it with __fields__,
+    # but devito does not translate it the way I want
+    
+    """
+    Class representing:
+    
+    typedef enum {
+        zfp_type_none   = 0, // unspecified type
+        zfp_type_int32  = 1, // 32-bit signed integer
+        zfp_type_int64  = 2, // 64-bit signed integer
+        zfp_type_float  = 3, // single precision floating point
+        zfp_type_double = 4  // double precision floating point
+    } zfp_type;
+    """    
+    # _fields_ = [
+    #     # ("zfp_type_int32", c_int32),
+    #     # ("zfp_type_int64", c_int64),
+    #     # ("zfp_type_float", c_float),
+    #     # ("zfp_type_double", c_double)
+    # ]
+    pass
+    
+class zfp_field(c_int):
+    
+    # NOTE: Maybe the more appropriate solution is making zfp_field subclass of Structure and develop it with __fields__,
+    # but devito does not translate it the way I want
+    
+    """
+    Class representing:
+    
+    typedef struct {
+        zfp_type type;            // scalar type (e.g., int32, double)
+        size_t nx, ny, nz, nw;    // sizes (zero for unused dimensions)
+        ptrdiff_t sx, sy, sz, sw; // strides (zero for contiguous array a[nw][nz][ny][nx])
+        void* data;               // pointer to array data
+    } zfp_field;
+    """
+    
+    # _fields_ = [
+    #     ("zfp_field", c_float),
+    #     ("type", zfp_type),
+    #     ("nx", c_size_t), ("ny", c_size_t), ("nz", c_size_t),("nw", c_size_t),
+    #     ("sx", c_int), ("sy", c_int), ("sz", c_int),("sw", c_int),
+    #     ("data", c_void_p)
+    # ]
+    pass
+
+class bitstream(c_int):
+    
+    # NOTE: Maybe the more appropriate solution is making bitstream subclass of Structure and develop it with __fields__,
+    # but devito does not translate it the way I want
+    
+    """
+    Class representing:
+    
+    struct bitstream {
+        bitstream_count bits;  // number of buffered bits (0 <= bits < word size)
+        bitstream_word buffer; // incoming/outgoing bits (buffer < 2^bits)
+        bitstream_word* ptr;   // pointer to next word to be read/written
+        bitstream_word* begin; // beginning of stream
+        bitstream_word* end;   // end of stream (not enforced)
+        size_t mask;           // one less the block size in number of words (if BIT_STREAM_STRIDED)
+        ptrdiff_t delta;       // number of words between consecutive blocks (if BIT_STREAM_STRIDED)
+    };
+    """
+    
+    # _fields_ = [
+    #     ("minbits", c_uint),
+    #     ("maxbits", c_uint), 
+    #     ("maxprec", c_uint), 
+    #     ("minexp", c_int)
+    # ]
+    pass
+
+class zfp_stream(c_int):
+    
+    # NOTE: Maybe the more appropriate solution is making zfp_stream subclass of Structure and develop it with __fields__,
+    # but devito does not translate it the way I want
+    
+    """
+    Class representing:
+    
+    typedef struct {
+        uint minbits;       // minimum number of bits to store per block
+        uint maxbits;       // maximum number of bits to store per block
+        uint maxprec;       // maximum number of bit planes to store
+        int minexp;         // minimum floating point bit plane number to store
+        bitstream* stream;  // compressed bit stream
+        zfp_execution exec; // execution policy and parameters
+    } zfp_stream;
+    """
+    
+    # _fields_ = [
+    #     ("minbits", c_uint),
+    #     ("maxbits", c_uint), 
+    #     ("maxprec", c_uint), 
+    #     ("minexp", c_int)
+    # ]    
+    pass
+    
+

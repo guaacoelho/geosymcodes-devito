@@ -1,10 +1,11 @@
-from devito.ir.iet import FindSections, FindSymbols
-from devito.symbolics import Keyword, Macro
+from devito.ir.iet import FindSections, FindSymbols, Call, Conditional, FindNodes, Transformer, Iteration, Section
+from devito.symbolics import Keyword, Macro, CondEq, String, Null
 from devito.tools import filter_ordered
-from devito.types import Global
+from devito.types import Global, SpaceDimension, TimeDimension
+from sympy import Or
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias']
+           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index', 'update_iet']
 
 
 class IterationTree(tuple):
@@ -155,3 +156,63 @@ def maybe_alias(obj, candidate):
         # the __rkwargs__ except for e.g. the name
 
     return False
+
+def array_alloc_check(arrays):
+    """
+    Checks wether malloc worked for array allocation.
+
+    Args:
+        array (Array): array (files or counters)
+
+    Returns:
+        Conditional: condition to handle allocated array
+    """
+    
+    eqs = []
+    for arr in arrays:
+        eqs.append(CondEq(arr, Macro('NULL')))
+    
+    ors = Or(*eqs)
+    
+    pstring = String("\"Error to alloc\"")
+    printfCall = Call(name="printf", arguments=pstring)
+    exitCall = Call(name="exit", arguments=1)
+    return Conditional(ors, [printfCall, exitCall])
+
+def get_first_space_dim_index(dimensions):
+    """
+    This method returns the index of the first space dimension of the Function.
+
+    Args:
+        dimensions (tuple): dimensions
+
+    Returns:
+        int: index
+    """
+    
+    first_space_dim_index = 0
+    for dim in dimensions:
+        if isinstance(dim, SpaceDimension):
+            break
+        else:
+            first_space_dim_index += 1
+    
+    return first_space_dim_index
+
+def update_iet(iet_body, temp_name, ooc_section):
+    """
+    This function substitute a temp section with definitive section.
+
+    Args:
+        iet_body (List): IET body noes
+        temp_name (string): name of section
+        ooc_section (Section): Read/Decompress or Write/Compress section
+    """
+    
+    sections = FindNodes(Section).visit(iet_body)
+    temp_sec = next((section for section in sections if section.name == temp_name), None)
+    mapper={temp_sec: ooc_section}
+
+    timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
+    transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
+    iet_body[timeIndex] = transformedIet 
