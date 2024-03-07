@@ -102,11 +102,14 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     Returns:
         List : iet_body is a list of nodes
     """
-    func = ooc.functions[0]
+    funcs = ooc.functions
     out_of_core = ooc.mode
     is_compression = ooc.compression
 
-    if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality")
+    for func in funcs:
+        if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
+    
+    funcs_dict = dict((func.name, func) for func in funcs)
     is_forward = out_of_core == 'forward'
     time_iterator = time_iterators[0]
 
@@ -120,8 +123,15 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
 
     ######## Build files and counters arrays ########
     # TODO: Encapsulate the arrays within an object for ease of reading
-    filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32)
-    countersArray = Array(name='counters', dimensions=[nthreadsDim], dtype=np.int32)
+    files_dict = dict()
+    counters_dict = dict()
+    for func in funcs:
+        filesArray = Array(name=func.name + '_files', dimensions=[nthreadsDim], dtype=np.int32)
+        countersArray = Array(name=func.name + '_counters', dimensions=[nthreadsDim], dtype=np.int32)
+        files_dict.update({func.name: filesArray})
+        counters_dict.update({func.name: countersArray})
+
+    # Compression arrays
     metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
     sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
     offsetArray = Array(name='offset', dimensions=[nthreadsDim], dtype=off_t)
@@ -131,7 +141,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
                                 array=Array(name='slices_size', dimensions=[nthreadsDim],
                                              dtype=size_t))
-    openSection = open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size)
+    openSection = open_build(files_dict, counters_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size)
 
 
     ######## Build func_size var ########
@@ -505,7 +515,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counte
 
     return section
 
-def open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size):
+def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size):
     """
     This method inteds to code open section for both Forward and Gradient operators.
     
@@ -524,22 +534,26 @@ def open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nth
     
     # Build conditional
     # Regular Forward or Gradient
-    arrays = [filesArray] 
-    if not is_compression and not is_forward: arrays.append(countersArray)
-    # Compression Forward or Gradient
+    arrays = [file_array for file_array in files_array_dict.values()] 
+    if not is_compression and not is_forward:
+        arrays.extend(counters_array for counters_array in counters_array_dict.values())
+    # Compression Forward or Compression Gradient
     if is_compression: arrays.append(metasArray)
     if is_compression and not is_forward: arrays.extend([sptArray, offsetArray]) 
 
     arrays_cond = array_alloc_check(arrays) 
     
     #Call open_thread_files
-    funcArgs = [filesArray, nthreads]
-    if is_compression: funcArgs.insert(1, metasArray)
-    open_thread_call = Call(name='open_thread_files_temp', arguments=funcArgs)
+    open_threads_calls = []
+    for func_name in files_array_dict:
+        funcArgs = [files_array_dict[func_name], nthreads, String(func_name)]
+        if is_compression: funcArgs.append(metasArray)
+        open_threads_calls.append(Call(name='open_thread_files_temp', arguments=funcArgs))
 
     # Open section body
-    body = [arrays_cond, open_thread_call]
+    body = [arrays_cond, *open_threads_calls]
     
+    import pdb; pdb.set_trace()
     # Additional initialization for Gradient operators
     if not is_forward and not is_compression:
         # Regular        
