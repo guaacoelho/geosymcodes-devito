@@ -5,7 +5,7 @@ from devito.types import Global, SpaceDimension, TimeDimension
 from sympy import Or
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index', 'update_iet']
+           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index', 'update_iet', 'get_compress_mode_function']
 
 
 class IterationTree(tuple):
@@ -216,3 +216,31 @@ def update_iet(iet_body, temp_name, ooc_section):
     timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
     transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
     iet_body[timeIndex] = transformedIet 
+
+def get_compress_mode_function(mode, zfp, value, field, Type):
+    """_summary_
+
+    Args:
+        mode (_type_): _description_
+        zfp (_type_): _description_
+        value (_type_): _description_
+        field (_type_): _description_
+        Type (_type_): _description_
+
+    Raises:
+        NotImplementedError: _description_
+
+    Returns:
+        _type_: _description_
+    """
+    
+    arguments = [zfp]
+    if mode == "set_rate":
+        arguments += [String(r"RATE"), Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
+    elif mode == "set_accuracy" or mode == "set_precision":
+        arguments.append(value)
+    else:
+        raise NotImplementedError(f"{mode} is not available. You must give one of the valid compression modes: set_rate, set_reversible, set_precision, set_accuracy")
+        
+        
+    return Call(name="zfp_stream_"+mode, arguments=arguments)

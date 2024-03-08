@@ -7,7 +7,7 @@ from sympy import Mod, Or, Not
 from functools import reduce
 from collections import OrderedDict
 
-from devito.ir.iet.utils import array_alloc_check, update_iet
+from devito.ir.iet.utils import array_alloc_check, update_iet, get_compress_mode_function
 from devito.tools import timed_pass
 from devito.symbolics import (CondNe, Macro, String, Null, Byref, SizeOf)
 
@@ -105,6 +105,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     func = ooc.functions[0]
     out_of_core = ooc.mode
     is_compression = ooc.compression
+    compression_mode = "set_nothing" # set_rate, set_accuracy or set_precision
 
     if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality")
     is_forward = out_of_core == 'forward'
@@ -140,7 +141,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
 
     if is_compression:                     
         ######## Build compress/decompress section ########
-        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterators, sptArray, offsetArray, slices_size) 
+        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterators, sptArray, offsetArray, slices_size, compression_mode) 
     else:
         ######## Build write/read section ########    
         write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
@@ -159,7 +160,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     return iet_body
 
 
-def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterators, sptArray, offsetArray, slices_size):
+def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterators, sptArray, offsetArray, slices_size, mode):
     """
     This function decides if it is either a compression or a decompression
 
@@ -189,16 +190,16 @@ def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_f
     cTidEq = ClusterizedEq(tidEq, ispace=ispace)
     
     if is_forward:
-        ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[0])
+        ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[0], mode)
         temp_name = "compress_temp"
     else:
-        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[-1], sptArray, slices_size, offsetArray)
+        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[-1], sptArray, slices_size, offsetArray, mode)
         temp_name = "decompress_temp"
 
     update_iet(iet_body, temp_name, ooc_section)      
     
 
-def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0):
+def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t0, mode):
     """
     This function generates compress section.
 
@@ -241,7 +242,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     
     itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t0,iSymbol], Type, uVecSize2, uVecSize3], retobj=field))
     itNodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
-    itNodes.append(Call(name="zfp_stream_set_rate", arguments=[zfp, String(r"RATE"), Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]))
+    itNodes.append(get_compress_mode_function(mode, zfp, 1e-8, field, Type))
     itNodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
     itNodes.append(Call(name="malloc", arguments=[bufsize], retobj=buffer))
     itNodes.append(Call(name="stream_open", arguments=[bufsize, bufsize], retobj=stream))
@@ -264,7 +265,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     compressSection = [Expression(cTypeEq, None, True), Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])]
     return Section("compress", compressSection)
 
-def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray):
+def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray, mode):
     """
     This function generates decompress section.
 
@@ -311,7 +312,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     
     itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t2,iSymbol], Type, uVecSize2, uVecSize3], retobj=field))
     itNodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
-    itNodes.append(Call(name="zfp_stream_set_rate", arguments=[zfp, String(r"RATE"), Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]))
+    itNodes.append(get_compress_mode_function(mode, zfp, 1e-8, field, Type))
     itNodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
     itNodes.append(Call(name="malloc", arguments=[bufsize], retobj=buffer))
     itNodes.append(Call(name="stream_open", arguments=[bufsize, bufsize], retobj=stream))
