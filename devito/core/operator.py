@@ -399,20 +399,26 @@ class CompressionConfig(OptOption):
     This class receives RATE, value and compression_mode
     """
     
-    def __new__(cls, RATE, value, mode):
+    def __new__(cls, mode, RATE=None, value=None):
         
         # Error handling
-        if not isinstance(RATE, int):
-            raise TypeError("RATE must be integer")
-        
-        if not isinstance(value, float):
-            raise TypeError("value must be float")
-        
         if not isinstance(mode, str):
             raise TypeError("compress_mode must be string")
         else:
-            if mode != 'set_rate' and mode != 'set_reversible' and mode != 'set_precision' and mode != 'set_accuracy':
-                raise ValueError("mode must be one of these options: set_reversible, set_rate, set_precision and set_accuracy")
+            if mode == 'set_rate':
+                if RATE is None:
+                    raise ValueError("If set_rate is used, you must set a RATE")
+                else:
+                    if not isinstance(RATE, int):
+                        raise TypeError("RATE must be integer")
+            elif mode == 'set_precision' or mode == 'set_accuracy':
+                if value is None:
+                    raise ValueError(f"If {mode} is used, you must set a value (tolerance or precision). See zfp docs")
+                else:
+                    if not isinstance(value, float):
+                        raise TypeError("value must be float")
+            elif mode != 'set_rate' and mode != 'set_reversible' and mode != 'set_precision' and mode != 'set_accuracy':
+                raise ValueError("mode must be one of these options: set_reversible, set_rate, set_precision and set_accuracy")               
         # End error handling
         
         obj = super().__new__(cls)
