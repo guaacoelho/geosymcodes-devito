@@ -217,13 +217,12 @@ def update_iet(iet_body, temp_name, ooc_section):
     transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
     iet_body[timeIndex] = transformedIet 
 
-def get_compress_mode_function(mode, zfp, value, field, Type):
+def get_compress_mode_function(compress_config, zfp, field, Type):
     """_summary_
 
     Args:
-        mode (_type_): _description_
-        zfp (_type_): _description_
-        value (_type_): _description_
+        compress_config (CompressionConfig): object with compress settings
+        zfp (zfp_stream): _description_
         field (_type_): _description_
         Type (_type_): _description_
 
@@ -235,12 +234,14 @@ def get_compress_mode_function(mode, zfp, value, field, Type):
     """
     
     arguments = [zfp]
-    if mode == "set_rate":
-        arguments += [String(r"RATE"), Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
-    elif mode == "set_accuracy" or mode == "set_precision":
-        arguments.append(value)
+    if compress_config.mode == "set_reversible":
+        pass
+    elif compress_config.mode == "set_rate":
+        arguments += [compress_config.rate, Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
+    elif compress_config.mode == "set_accuracy" or compress_config.mode == "set_precision":
+        arguments.append(compress_config.value)
     else:
-        raise NotImplementedError(f"{mode} is not available. You must give one of the valid compression modes: set_rate, set_reversible, set_precision, set_accuracy")
+        raise NotImplementedError(f"{compress_config.mode} is not available. You must give one of the valid compression modes: set_rate, set_reversible, set_precision, set_accuracy")
         
         
-    return Call(name="zfp_stream_"+mode, arguments=arguments)
+    return Call(name="zfp_stream_"+compress_config.mode, arguments=arguments)
