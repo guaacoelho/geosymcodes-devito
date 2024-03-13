@@ -11,7 +11,7 @@ from devito.types import NThreads, TimeFunction
 
 __all__ = ['CoreOperator', 'CustomOperator',
            # Optimization options
-           'ParTile', 'OutOfCoreConfig']
+           'ParTile', 'OutOfCoreConfig', 'CompressionConfig']
 
 
 class BasicOperator(Operator):
@@ -392,6 +392,41 @@ class ParTile(tuple, OptOption):
         return obj
 
 
+class CompressionConfig(OptOption):
+    
+    """
+    This class gathers objects that represent compression settings. 
+    This class receives RATE, value and compression_mode
+    """
+    
+    def __new__(cls, mode, RATE=None, value=None):
+        
+        # Error handling
+        if not isinstance(mode, str):
+            raise TypeError("compress_mode must be string")
+        else:
+            if mode == 'set_rate':
+                if RATE is None:
+                    raise ValueError("If set_rate is used, you must set a RATE")
+                else:
+                    if not isinstance(RATE, int):
+                        raise TypeError("RATE must be integer")
+            elif mode == 'set_precision' or mode == 'set_accuracy':
+                if value is None:
+                    raise ValueError(f"If {mode} is used, you must set a value (tolerance or precision). See zfp docs")
+                else:
+                    if not isinstance(value, float):
+                        raise TypeError("value must be float")
+            elif mode != 'set_rate' and mode != 'set_reversible' and mode != 'set_precision' and mode != 'set_accuracy':
+                raise ValueError("mode must be one of these options: set_reversible, set_rate, set_precision and set_accuracy")               
+        # End error handling
+        
+        obj = super().__new__(cls)
+        obj.rate = RATE
+        obj.value = value
+        obj.mode = mode
+        return obj
+
 class OutOfCoreConfig(OptOption):
     def __new__(cls, items):
         if not items:
@@ -414,11 +449,12 @@ class OutOfCoreConfig(OptOption):
             # Mode check
             if str(items[1]) != "forward" and str(items[1]) != "gradient":
                 raise ValueError("Second element of out of core options must be forward or gradient")
+            
         else:
             raise ValueError("Wrong type for out of core options")
         
         obj = super().__new__(cls)
         obj.functions = fields
         obj.mode = items[1]
-        obj.compression = False if n < 3 else bool(items[2])
+        obj.compression = False if n < 3 else items[2]
         return obj

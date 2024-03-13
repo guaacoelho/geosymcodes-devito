@@ -5,7 +5,7 @@ from devito.types import Global, SpaceDimension, TimeDimension
 from sympy import Or
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index', 'update_iet']
+           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index', 'update_iet', 'get_compress_mode_function']
 
 
 class IterationTree(tuple):
@@ -216,3 +216,32 @@ def update_iet(iet_body, temp_name, ooc_section):
     timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
     transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
     iet_body[timeIndex] = transformedIet 
+
+def get_compress_mode_function(compress_config, zfp, field, Type):
+    """_summary_
+
+    Args:
+        compress_config (CompressionConfig): object with compress settings
+        zfp (zfp_stream): _description_
+        field (_type_): _description_
+        Type (_type_): _description_
+
+    Raises:
+        NotImplementedError: _description_
+
+    Returns:
+        _type_: _description_
+    """
+    
+    arguments = [zfp]
+    if compress_config.mode == "set_reversible":
+        pass
+    elif compress_config.mode == "set_rate":
+        arguments += [compress_config.rate, Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
+    elif compress_config.mode == "set_accuracy" or compress_config.mode == "set_precision":
+        arguments.append(compress_config.value)
+    else:
+        raise NotImplementedError(f"{compress_config.mode} is not available. You must give one of the valid compression modes: set_rate, set_reversible, set_precision, set_accuracy")
+        
+        
+    return Call(name="zfp_stream_"+compress_config.mode, arguments=arguments)
