@@ -165,7 +165,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
         compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression) 
     else:
         ######## Build write/read section ########    
-        write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
+        write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
     
     
     ######## Build close section ########
@@ -376,7 +376,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     
     return Section("decompress", decompressSection)
 
-def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray, is_mpi):
+def write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_dict, funcs_dict, t0, counters_dict, is_mpi):
     """
     Builds the read or write section of the operator, depending on the out_of_core mode.
     Replaces the temporary section at the end of the time iteration by the read or write section.   
@@ -395,6 +395,8 @@ def write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, fun
     """
     
     if is_forward:
+        # Adaptar aqui, write/read build será chamado para cada função, e irá retornar um loop para a respectiva função
+        # A section  será construída aqui após ter todos os loops inseridos num vetor
         ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mpi)
         temp_name = 'write_temp'
     else: # gradient
