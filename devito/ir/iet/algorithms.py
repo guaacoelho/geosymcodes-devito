@@ -151,13 +151,13 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     openSection = open_build(files_dict, counters_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression, slices_size)
 
     ######## Build func_size var ########
-    func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
-    funcSizeExp, floatSizeInit = func_size_build(func, func_size)
+    floatSize = Symbol(name="float_size", dtype=np.uint64)
+    floatSizeInit = Call(name="sizeof", arguments=[String(r"float")], retobj=floatSize)
 
     func_sizes_dict = {}
     for func in funcs:
         func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
-        funcSizeExp = func_size_build(func, func_size)
+        funcSizeExp = func_size_build(func, func_size, floatSize)
         func_sizes_dict.update({func.name: funcSizeExp})
 
     if ooc_compression:                     
@@ -172,7 +172,8 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)
     
     #TODO: Generate blank lines between sections
-    iet_body.insert(0, funcSizeExp)
+    for size_init in func_sizes_dict.values():
+        iet_body.insert(0, size_init)
     iet_body.insert(0, floatSizeInit)
     iet_body.insert(0, openSection)
     iet_body.append(closeSection)
@@ -616,26 +617,22 @@ def close_build(nthreads, filesArray, iSymbol, nthreadsDim):
     
     return section
 
-def func_size_build(funcStencil, func_size):
+def func_size_build(funcStencil, func_size, float_size):
     """
     Generates float_size init call and the init function size expression.
 
     Args:
         funcStencil (AbstractFunction): I/O function
         func_size (Symbol): Symbol representing the I/O function size
+        float_size (Symbol): Symbol representing C "float" type size
 
     Returns:
         funcSizeExp: Expression initializing the function size
-        floatSizeInit: Call initializing float_size
     """
-
-    floatSize = Symbol(name="float_size", dtype=np.uint64)
-    floatString = String(r"float")
-    floatSizeInit = Call(name="sizeof", arguments=[floatString], retobj=floatSize)
     
     # TODO: Function name must come from user?
     sizes = funcStencil.symbolic_shape[2:]
-    funcEq = IREq(func_size, (reduce(lambda x, y: x * y, sizes) * floatSize))
+    funcEq = IREq(func_size, (reduce(lambda x, y: x * y, sizes) * float_size))
     funcSizeExp = Expression(ClusterizedEq(funcEq, ispace=None), None, True)
 
-    return funcSizeExp, floatSizeInit
+    return funcSizeExp
