@@ -108,6 +108,12 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
 
     for func in funcs:
         if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
+
+    if is_compression and len(funcs) > 1:
+        raise ValueError("Multi Function currently does not support compression")
+    
+    if is_mpi and len(funcs) > 1:
+        raise ValueError("Multi Function currently does not support multi process")
     
     funcs_dict = dict((func.name, func) for func in funcs)
     is_forward = out_of_core == 'forward'
@@ -142,7 +148,6 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
                                 array=Array(name='slices_size', dimensions=[nthreadsDim],
                                              dtype=size_t))
     openSection = open_build(files_dict, counters_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, is_compression, slices_size)
-
 
     ######## Build func_size var ########
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
@@ -546,21 +551,25 @@ def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offs
     #Call open_thread_files
     open_threads_calls = []
     for func_name in files_array_dict:
-        funcArgs = [files_array_dict[func_name], nthreads, String(func_name)]
+        funcArgs = [files_array_dict[func_name], nthreads, String('"{}"'.format(func_name))]
         if is_compression: funcArgs.append(metasArray)
         open_threads_calls.append(Call(name='open_thread_files_temp', arguments=funcArgs))
 
     # Open section body
     body = [arrays_cond, *open_threads_calls]
     
-    import pdb; pdb.set_trace()
     # Additional initialization for Gradient operators
     if not is_forward and not is_compression:
-        # Regular        
+        # Regular
+        counters_init = []
         intervalGroup = IntervalGroup((Interval(nthreadsDim, 0, nthreads)))
-        cNewCountersEq = ClusterizedEq(IREq(countersArray[iSymbol], 1), ispace=IterationSpace(intervalGroup))
-        openIterationGrad = Iteration(Expression(cNewCountersEq, None, False), nthreadsDim, nthreads-1)
+        for counter in counters_array_dict.values():
+            countersEq = ClusterizedEq(IREq(counter[iSymbol], 1), ispace=IterationSpace(intervalGroup))
+            counters_init.append(Expression(countersEq, None, False))
+        
+        openIterationGrad = Iteration(counters_init, nthreadsDim, nthreads-1)
         body.append(openIterationGrad)
+    
     elif not is_forward and is_compression:
         # Compression
         get_slices_size = Call(name="get_slices_size_temp", arguments=[metasArray, sptArray], retobj=slices_size)

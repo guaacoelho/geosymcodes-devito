@@ -35,7 +35,10 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
     
     # TODO: initialize char name[100]
     nvme_id = Symbol(name="nvme_id", dtype=np.int32)
-    ndisks = Symbol(name="NDISKS", dtype=np.int32, ignoreDefinition=True)        
+    ndisks = Symbol(name="NDISKS", dtype=np.int32, ignoreDefinition=True)
+
+    nameDim = [CustomDimension(name="nameDim", symbolic_size=100)]
+    stencilNameArray = Array(name='stencil', dimensions=nameDim, dtype=np.byte)        
     
     ifNodes.append(Call(name="perror", arguments=String("\"Cannot open output file\\n\"")))
     ifNodes.append(Call(name="exit", arguments=1))
@@ -64,7 +67,7 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
         nvmeIdEq = IREq(nvme_id, Mod(iSymbol, ndisks))
         cNvmeIdEq = ClusterizedEq(nvmeIdEq, ispace=None)        
         itNodes.append(Expression(cNvmeIdEq, None, True))   
-        itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/thread_%d.data\""), nvme_id, iSymbol]))        
+        itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/%s_vec_%d.bin\""), nvme_id, stencilNameArray, iSymbol]))        
     
     opFlagsStr = String("OPEN_FLAGS")
     opFlagsStrCompFwd = String("O_WRONLY | O_CREAT | O_TRUNC")
@@ -87,7 +90,7 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
         itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStr, flagsStr], retobj=filesArray[iSymbol]))   
     
     itNodes.append(Conditional(CondEq(filesArray[iSymbol], -1), ifNodes))
-    funcArgs = [filesArray, nthreads]
+    funcArgs = [filesArray, nthreads, stencilNameArray]
     if is_compression:
         itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/thread_%d.data\""), nvme_id, iSymbol]))
         if is_forward:
@@ -95,7 +98,7 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
         else:
             itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
         itNodes.append(Conditional(CondEq(metasArray[iSymbol], -1), ifNodes))
-        funcArgs = [filesArray, metasArray, nthreads]
+        funcArgs = funcArgs.append(metasArray)
     
     openIteration = Iteration(itNodes, nthreadsDim, nthreads)
     
@@ -198,9 +201,23 @@ def ooc_efuncs(iet, **kwargs):
             efuncs.append(slicesSizeCallable)
             get_slices_call = next((call for call in calls if call.name == 'get_slices_size_temp'), None)
             mapper[get_slices_call] = new_get_slices_call
-                                             
 
-    funcArgs = [filesArray, nthreads]
+    openThreadsCallable = open_threads_build(nthreads, filesArray, metasArray,iSymbol,
+                                             nthreadsDim, nameArray, is_forward, 
+                                             is_mpi, is_compression)
+    efuncs.append(openThreadsCallable)   
+    for call in calls:
+        if call.name == 'open_thread_files_temp':
+            new_open_thread_call = Call(name='open_thread_files', arguments=call.arguments)
+            mapper[call] = new_open_thread_call
+    
+    iet = Transformer(mapper).visit(iet)   
+    
+    return iet, {'efuncs': efuncs}
+
+
+"""
+funcArgs = [filesArray, nthreads]
     if is_compression: funcArgs.insert(1, metasArray)
     new_open_thread_call = Call(name='open_thread_files', arguments=funcArgs)
 
@@ -210,7 +227,4 @@ def ooc_efuncs(iet, **kwargs):
     efuncs.append(openThreadsCallable)   
     open_threads_call = next((call for call in calls if call.name == 'open_thread_files_temp'), None)
     mapper[open_threads_call] = new_open_thread_call
-    
-    iet = Transformer(mapper).visit(iet)   
-    
-    return iet, {'efuncs': efuncs}
+"""
