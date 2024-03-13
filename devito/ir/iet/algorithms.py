@@ -154,6 +154,12 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
     funcSizeExp, floatSizeInit = func_size_build(func, func_size)
 
+    func_sizes_dict = {}
+    for func in funcs:
+        func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
+        funcSizeExp = func_size_build(func, func_size)
+        func_sizes_dict.update({func.name: funcSizeExp})
+
     if ooc_compression:                     
         ######## Build compress/decompress section ########
         compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression) 
