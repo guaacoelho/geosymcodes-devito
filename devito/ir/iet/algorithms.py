@@ -155,17 +155,19 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     floatSizeInit = Call(name="sizeof", arguments=[String(r"float")], retobj=floatSize)
 
     func_sizes_dict = {}
+    func_sizes_symb_dict={}
     for func in funcs:
         func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
         funcSizeExp = func_size_build(func, func_size, floatSize)
         func_sizes_dict.update({func.name: funcSizeExp})
+        func_sizes_symb_dict.update({func.name: func_size})
 
     if ooc_compression:                     
         ######## Build compress/decompress section ########
         compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression) 
     else:
         ######## Build write/read section ########    
-        write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
+        write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_symb_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
     
     
     ######## Build close section ########
@@ -376,7 +378,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     
     return Section("decompress", decompressSection)
 
-def write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_dict, funcs_dict, t0, counters_dict, is_mpi):
+def write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_symb_dict, funcs_dict, t0, counters_dict, is_mpi):
     """
     Builds the read or write section of the operator, depending on the out_of_core mode.
     Replaces the temporary section at the end of the time iteration by the read or write section.   
@@ -393,17 +395,26 @@ def write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, fun
         countersArray (array): pointer of allocated memory of nthreads dimension. Each place has a size of int
 
     """
-    
+    io_body=[]
     if is_forward:
-        # Adaptar aqui, write/read build será chamado para cada função, e irá retornar um loop para a respectiva função
-        # A section  será construída aqui após ter todos os loops inseridos num vetor
-        ooc_section = write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mpi)
-        temp_name = 'write_temp'
+        temp_name = "write_temp"
+        name = "write"
+        for func in funcs_dict:
+            func_write = write_build(nthreads, files_dict[func], iSymbol, func_sizes_symb_dict[func],
+                                      funcs_dict[func], t0, is_mpi)
+            io_body.append(func_write)
+        
     else: # gradient
-        ooc_section = read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, countersArray)
-        temp_name = 'read_temp'  
+        temp_name = "read_temp"
+        name = "read"
+        for func in funcs_dict:
+            func_read = read_build(nthreads, files_dict[func], iSymbol, func_sizes_symb_dict[func],
+                                    funcs_dict[func], t0, counters_dict[func])
+            io_body.append(func_read)
+          
+    io_section = Section(name, io_body)
+    update_iet(iet_body, temp_name, io_section)     
 
-    update_iet(iet_body, temp_name, ooc_section)     
 
 def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mpi):
     """
@@ -420,9 +431,9 @@ def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mp
         uVecSize1 (FieldFromPointer): size of a vector u
 
     Returns:
-        Section: complete wrie section
+        Iteration: write loop
     """
-    
+
     uVecSize1 = funcStencil.symbolic_shape[1]
     uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
     interval = Interval(uSizeDim, 0, uVecSize1)
@@ -451,9 +462,8 @@ def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mp
         pragma = cgen.Pragma("omp parallel for schedule(static,1)")
     else:
         pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
-    writeIteration = Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])
 
-    return Section("write", writeIteration)
+    return Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])
 
 def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counters):
     """
@@ -471,7 +481,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counte
         counters (array): pointer of allocated memory of nthreads dimension. Each place has a size of int
 
     Returns:
-        section (Section): complete read section
+        Iteration: read loop
     """
     
     #  pragma omp parallel for schedule(static,1) num_threads(nthreads)
@@ -524,11 +534,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counte
     cNewCountersEq = ClusterizedEq(newCountersEq, ispace=ispace)
     itNodes.append(Increment(cNewCountersEq))
         
-    readIteration = Iteration(itNodes, iDim, uVecSize1-1, direction=Backward, pragmas=[pragma])
-    
-    section = Section("read", readIteration)
-
-    return section
+    return Iteration(itNodes, iDim, uVecSize1-1, direction=Backward, pragmas=[pragma])
 
 def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression, slices_size):
     """
