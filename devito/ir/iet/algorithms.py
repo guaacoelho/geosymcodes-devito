@@ -38,6 +38,7 @@ def iet_build(stree, **kwargs):
             iet_body = queues.pop(i)
             if(ooc):
                 iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, ooc, is_mpi, time_iterators)
+                
                 return List(body=iet_body)
             else:                
                 return List(body=iet_body)
@@ -104,15 +105,11 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     """
     func = ooc.functions[0]
     out_of_core = ooc.mode
-    ooc_compression = ooc.compression
-    # compression_mode = "set_nothing" # set_rate, set_accuracy or set_precision
+    ooc_compression = ooc.compression    
 
     if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality")
     is_forward = out_of_core == 'forward'
     time_iterator = time_iterators[0]
-
-    # Creates nthreads once again in order to enable the ignoreDefinition flag
-    #nthreads = NThreads(ignoreDefinition=True)
 
     ######## Dimension and symbol for iteration spaces ########
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads)    
@@ -129,11 +126,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
 
 
     ######## Build open section ########
-    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
-                                array=Array(name='slices_size', dimensions=[nthreadsDim],
-                                             dtype=size_t))
-    openSection = open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression, slices_size)
-
+    openSection = open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression)
 
     ######## Build func_size var ########
     func_size = Symbol(name=func.name+"_size", dtype=np.uint64) 
@@ -141,11 +134,10 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
 
     if ooc_compression:                     
         ######## Build compress/decompress section ########
-        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression) 
+        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreadsDim, nthreads, time_iterators, sptArray, offsetArray, ooc_compression) 
     else:
         ######## Build write/read section ########    
-        write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)
-    
+        write_or_read_build(iet_body, is_forward, nthreads, filesArray, iSymbol, func_size, func, time_iterator, countersArray, is_mpi)    
     
     ######## Build close section ########
     closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)
@@ -158,7 +150,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     return iet_body
 
 
-def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression):
+def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreadsDim, nthreads, time_iterators, sptArray, offsetArray, ooc_compression):
     """
     This function decides if it is either a compression or a decompression
 
@@ -192,7 +184,7 @@ def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_f
         ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[0], ooc_compression)
         temp_name = "compress_temp"
     else:
-        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[-1], sptArray, slices_size, offsetArray, ooc_compression)
+        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSizeDim, tid, cTidEq, ispace, time_iterators[-1], sptArray, offsetArray, ooc_compression)
         temp_name = "decompress_temp"
 
     update_iet(iet_body, temp_name, ooc_section)      
@@ -220,8 +212,6 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     """
     
     uVecSize1 = funcStencil.symbolic_shape[1]    
-    uVecSize2 = funcStencil.symbolic_shape[2]
-    uVecSize3 = funcStencil.symbolic_shape[3]
     itNodes=[]
     ifNodes=[]
     
@@ -239,7 +229,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     stream = Pointer(name="stream", dtype=ct.POINTER(bitstream))
     zfpsize = Symbol(name="zfpsize", dtype=size_t)
     
-    itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t0,iSymbol], Type, uVecSize2, uVecSize3], retobj=field))
+    itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t0,iSymbol], Type, funcStencil.symbolic_shape[2], funcStencil.symbolic_shape[3]], retobj=field))
     itNodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
     itNodes.append(get_compress_mode_function(ooc_compression, zfp, field, Type))
     itNodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
@@ -264,7 +254,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     compressSection = [Expression(cTypeEq, None, True), Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])]
     return Section("compress", compressSection)
 
-def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray, ooc_compression):
+def decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSizeDim, tid, cTidEq, ispace, t2, sptArray, offsetArray, ooc_compression):
     """
     This function generates decompress section.
 
@@ -288,8 +278,6 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     """
     
     uVecSize1 = funcStencil.symbolic_shape[1]    
-    uVecSize2 = funcStencil.symbolic_shape[2]
-    uVecSize3 = funcStencil.symbolic_shape[3]
     itNodes=[]
     if1Nodes=[]
     if2Nodes=[]
@@ -304,13 +292,16 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     stream = Pointer(name="stream", dtype=ct.POINTER(bitstream))
     Slice = Symbol(name="slice", dtype=np.int32)
     ret = Symbol(name="ret", dtype=np.int32)
+    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
+                                array=Array(name='slices_size', dimensions=[nthreadsDim],
+                                             dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
     
     # TypeEq = IREq(Type, Symbol(name="zfp_type_float", dtype=ct.c_int))
     TypeEq = IREq(Type, String(r"zfp_type_float"))
     cTypeEq = ClusterizedEq(TypeEq, ispace=ispace)
     itNodes.append(Expression(cTypeEq, None, True))
     
-    itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t2,iSymbol], Type, uVecSize2, uVecSize3], retobj=field))
+    itNodes.append(Call(name="zfp_field_2d", arguments=[funcStencil[t2,iSymbol], Type, funcStencil.symbolic_shape[2], funcStencil.symbolic_shape[3]], retobj=field))
     itNodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
     itNodes.append(get_compress_mode_function(ooc_compression, zfp, field, Type))
     itNodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
@@ -506,7 +497,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counte
 
     return section
 
-def open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression, slices_size):
+def open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression):
     """
     This method inteds to code open section for both Forward and Gradient operators.
     
@@ -550,6 +541,7 @@ def open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nth
         body.append(openIterationGrad)
     elif not is_forward and ooc_compression:
         # Compression
+        slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
         get_slices_size = Call(name="get_slices_size_temp", arguments=[metasArray, sptArray], retobj=slices_size)
         body.append(get_slices_size)
 

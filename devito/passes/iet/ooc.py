@@ -182,12 +182,12 @@ def ooc_efuncs(iet, **kwargs):
 
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads) 
     filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
-    metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=(not is_forward))
+    metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
 
     if is_compression and not is_forward:
-            sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
+            sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
             slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
-                                        array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
+                                        array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
             new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads], retobj=slices_size)
             slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol)
             efuncs.append(slicesSizeCallable)

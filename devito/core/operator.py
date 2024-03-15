@@ -392,33 +392,33 @@ class ParTile(tuple, OptOption):
         return obj
 
 
-class CompressionConfig(OptOption):
-    
+class CompressionConfig(OptOption):    
     """
     This class gathers objects that represent compression settings. 
-    This class receives RATE, value and compression_mode
+    This class receives RATE, value and mode.
+    
+    mode must be one of the following options:
+        - set_rate: in this case, you must give RATE
+        - set_reversible
+        - set_accuracy: in this case you must give value as a tolerance
+        - set_precision: in this case, you must give value as a precision
     """
     
-    def __new__(cls, mode, RATE=None, value=None):
+    from typing import Union
+    _modes_ = ('set_reversible', 'set_rate', 'set_precision', 'set_accuracy')
+    
+    def __new__(cls, mode: str, RATE: Union[float, int, None]=None, value: Union[float, int, None]=None):
         
         # Error handling
-        if not isinstance(mode, str):
-            raise TypeError("compress_mode must be string")
+        if mode not in cls._modes_:
+            raise Exception(f"mode must be one of the string options: {cls._modes_}")
         else:
-            if mode == 'set_rate':
-                if RATE is None:
-                    raise ValueError("If set_rate is used, you must set a RATE")
-                else:
-                    if not isinstance(RATE, int):
-                        raise TypeError("RATE must be integer")
-            elif mode == 'set_precision' or mode == 'set_accuracy':
-                if value is None:
-                    raise ValueError(f"If {mode} is used, you must set a value (tolerance or precision). See zfp docs")
-                else:
-                    if not isinstance(value, float):
-                        raise TypeError("value must be float")
-            elif mode != 'set_rate' and mode != 'set_reversible' and mode != 'set_precision' and mode != 'set_accuracy':
-                raise ValueError("mode must be one of these options: set_reversible, set_rate, set_precision and set_accuracy")               
+            if mode == 'set_rate' and (not isinstance(RATE, float) and not isinstance(RATE, int)):
+                raise TypeError("In case of set_rate, RATE must be either float or int")
+            elif mode == 'set_accuracy' and (not isinstance(value, float) and not isinstance(value, int)):
+                raise TypeError("In case of set_accuracy, value must be float or int")
+            elif mode == 'set_precision' and (not isinstance(value, int) or value <= 0):
+                raise TypeError("In case of set_precision, value must be a positive int")
         # End error handling
         
         obj = super().__new__(cls)
