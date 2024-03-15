@@ -234,14 +234,9 @@ def get_compress_mode_function(compress_config, zfp, field, Type):
     """
     
     arguments = [zfp]
-    if compress_config.mode == "set_reversible":
-        pass
-    elif compress_config.mode == "set_rate":
+    if compress_config.mode == "set_rate":
         arguments += [compress_config.rate, Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
     elif compress_config.mode == "set_accuracy" or compress_config.mode == "set_precision":
-        arguments.append(compress_config.value)
-    else:
-        raise NotImplementedError(f"{compress_config.mode} is not available. You must give one of the valid compression modes: set_rate, set_reversible, set_precision, set_accuracy")
-        
+        arguments.append(compress_config.value)     
         
     return Call(name="zfp_stream_"+compress_config.mode, arguments=arguments)
