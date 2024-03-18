@@ -145,7 +145,8 @@ class Operator(Callable):
                                    (("ifndef", "NDISKS"), ("NDISKS", "8")), #Find a way to replace 8 by a parameter
                                    (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_RDONLY"), ("else", ), ("OPEN_FLAGS", "O_DIRECT | O_RDONLY"))]
     _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", "8")),
-                              (("ifndef", "RATE"), ("RATE", "16"))]
+                                    #   (("ifndef", "RATE"), ("RATE", "16")) # Defined in Operator API
+                                      ]
     _out_of_core_includes = ["fcntl.h"]
     _out_of_core_mpi_includes = ["mpi.h"]
     _out_of_core_compression_includes = ["zfp.h"]
