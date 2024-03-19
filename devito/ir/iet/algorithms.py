@@ -64,9 +64,10 @@ def iet_build(stree, **kwargs):
                 time_iterators = i.sub_iterators
             elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'gradient':
                 if ooc.compression:
+                    # TODO: Move decompress section to the top (idx 0) and test
                     iteration_nodes.append(Section("decompress_temp"))
                 else:
-                    iteration_nodes.append(Section("read_temp"))
+                    iteration_nodes.insert(0, Section("read_temp"))
                 time_iterators = i.sub_iterators
 
             body = Iteration(iteration_nodes, i.dim, i.limits, direction=i.direction,
@@ -129,7 +130,6 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     
 
     ######## Build files and counters arrays ########
-    # TODO: Encapsulate the arrays within an object for ease of reading
     files_dict = dict()
     counters_dict = dict()
     for func in funcs:
@@ -164,14 +164,14 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
 
     if ooc_compression:                     
         ######## Build compress/decompress section ########
-        compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, func, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression) 
+        compress_or_decompress_build(files_dict, metasArray, iet_body, iSymbol, is_forward, funcs_dict, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression) 
     else:
         ######## Build write/read section ########    
         write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_symb_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
     
     
     ######## Build close section ########
-    closeSection = close_build(nthreads, filesArray, iSymbol, nthreadsDim)
+    closeSection = close_build(nthreads, files_dict, iSymbol, nthreadsDim)
     
     #TODO: Generate blank lines between sections
     for size_init in func_sizes_dict.values():
@@ -182,7 +182,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     return iet_body
 
 
-def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression):
+def compress_or_decompress_build(files_dict, metasArray, iet_body, iSymbol, is_forward, funcs_dict, nthreads, time_iterators, sptArray, offsetArray, slices_size, ooc_compression):
     """
     This function decides if it is either a compression or a decompression
 
@@ -201,6 +201,10 @@ def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_f
         ooc_compression (CompressionConfig): object with compression settings
     """
     
+    # TODO: Temporary workaround, while compression mode supports only one Function
+    funcStencil = next(iter(funcs_dict.values()))
+    filesArray = next(iter(files_dict.values()))
+
     uVecSize1 = funcStencil.symbolic_shape[1]
     uSizeDim = CustomDimension(name="i", symbolic_size=uVecSize1)
     interval = Interval(uSizeDim, 0, uVecSize1)
@@ -600,14 +604,14 @@ def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offs
         
     return Section("open", body)
 
-def close_build(nthreads, filesArray, iSymbol, nthreadsDim):
+def close_build(nthreads, files_dict, iSymbol, nthreadsDim):
     """
     This method inteds to code gradient.c close section.
     Obs: maybe the desciption of the variables should be better
 
     Args:
         nthreads (NThreads): symbol of number of threads
-        filesArray (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
+        files_dict (dict): dictionary with file pointers arrays
         iSymbol (Symbol): symbol of the iterator index i
         nthreadsDim (CustomDimension): dimension from 0 to nthreads
 
@@ -616,14 +620,15 @@ def close_build(nthreads, filesArray, iSymbol, nthreadsDim):
     """
 
     # close(files[i]);
-    itNode = Call(name="close", arguments=[filesArray[iSymbol]])    
+    itNodes=[]
+    for func in files_dict:
+        files = files_dict[func]
+        itNodes.append(Call(name="close", arguments=[files[iSymbol]])) 
     
     # for(int i=0; i < nthreads; i++) --> for(int i=0; i <= nthreads-1; i+=1)
-    closeIteration = Iteration(itNode, nthreadsDim, nthreads-1)
+    closeIteration = Iteration(itNodes, nthreadsDim, nthreads-1)
     
-    section = Section("close", closeIteration)
-    
-    return section
+    return Section("close", closeIteration)
 
 def func_size_build(funcStencil, func_size, float_size):
     """

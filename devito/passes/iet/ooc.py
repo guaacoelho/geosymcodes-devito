@@ -98,7 +98,7 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
         else:
             itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
         itNodes.append(Conditional(CondEq(metasArray[iSymbol], -1), ifNodes))
-        funcArgs = funcArgs.append(metasArray)
+        funcArgs.append(metasArray)
     
     openIteration = Iteration(itNodes, nthreadsDim, nthreads)
     
