@@ -147,8 +147,41 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     iet_body.insert(0, floatSizeInit)
     iet_body.insert(0, openSection)
     iet_body.append(closeSection)
+    
+    ### Free slices memory
+    if ooc_compression:
+        closeSlices = closeSlices_build(nthreads, iSymbol)
+        iet_body.append(closeSlices)
+        
     return iet_body
 
+def closeSlices_build(nthreads, iSymbol):
+    """
+    This method inteds to ls gradient.c free slices_size array memory.
+    Obs: code creates variables that already exists on the previous code 
+
+    Args:
+        nthreads (NThreads): symbol of number of threads
+
+    Returns:
+        closeIteration (Iteration): complete iteration loop 
+    """
+
+    # tid dimension
+    nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads)
+
+    # slices_size[];
+    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
+                                array=Array(name='slices_size', dimensions=[nthreadsDim],
+                                             dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
+
+    # free(slices_size[i]);
+    itNode = Call(name="free", arguments=[slices_size[iSymbol]])    
+    
+    # for(int tid=0; tid < nthreads; i++) --> for(int tid=0; tid <= nthreads-1; tid+=1)
+    closeIteration = Iteration(itNode, nthreadsDim, nthreads-1)
+    
+    return closeIteration
 
 def compress_or_decompress_build(filesArray, metasArray, iet_body, iSymbol, is_forward, funcStencil, nthreadsDim, nthreads, time_iterators, sptArray, offsetArray, ooc_compression):
     """
@@ -556,7 +589,7 @@ def open_build(filesArray, countersArray, metasArray, sptArray, offsetArray, nth
 
 def close_build(nthreads, filesArray, iSymbol, nthreadsDim):
     """
-    This method inteds to code gradient.c close section.
+    This method inteds to ls gradient.c close section.
     Obs: maybe the desciption of the variables should be better
 
     Args:
