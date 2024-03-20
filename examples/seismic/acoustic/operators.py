@@ -222,11 +222,8 @@ def GradientOperator(model, geometry, space_order=4, save=True,
     receivers = rec.inject(field=v.backward, expr=rec * s**2 / m)
 
     # Substitute spacing terms to reduce flops
-    kwargs.pop("opt")
-    kwargs.update({"opt": ('advanced', {'out-of-core': (u, "gradient")})})
     op = Operator(eqn + receivers + [gradient_update], subs=model.spacing_map,
                     name='Gradient', **kwargs)
-    #import pdb; pdb.set_trace()
     return op
 
 
