@@ -191,8 +191,9 @@ class Operator(Callable):
         profiler = create_profile('timers')
 
         out_of_core = kwargs['options']['out-of-core']
+        if out_of_core: is_compression = out_of_core.compression 
+        else: is_compression = False
         is_mpi = kwargs['options']['mpi']
-        is_compression = out_of_core.compression
 
         # Lower the input expressions into an IET
         irs, byproduct = cls._lower(expressions, profiler=profiler, **kwargs)
@@ -213,7 +214,7 @@ class Operator(Callable):
                 op._headers.update(cls._out_of_core_headers_forward)
             else:
                 op._headers.update(cls._out_of_core_headers_gradient)
-        if is_mpi: 
+        elif out_of_core and is_mpi: 
             op._headers.update(cls._out_of_core_mpi_headers)
             
         # Globals
@@ -225,8 +226,8 @@ class Operator(Callable):
         op._includes.update(profiler._default_includes)
         op._includes.update(byproduct.includes)
         if out_of_core: op._includes.update(cls._out_of_core_includes)
-        if is_mpi: op._includes.update(cls._out_of_core_mpi_includes)
-        if is_compression: op._includes.update(cls._out_of_core_compression_includes)
+        if out_of_core and is_mpi: op._includes.update(cls._out_of_core_mpi_includes)
+        if out_of_core and is_compression: op._includes.update(cls._out_of_core_compression_includes)
 
         # Required for the jit-compilation
         op._compiler = kwargs['compiler']
