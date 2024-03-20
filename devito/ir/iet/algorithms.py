@@ -139,10 +139,11 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
     sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
     offsetArray = Array(name='offset', dimensions=[nthreadsDim], dtype=off_t)
+    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True))
 
 
     ######## Build open section ########
-    openSection = open_build(files_dict, counters_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression)
+    openSection = open_build(files_dict, counters_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression, slices_size)
 
     ######## Build func_size var ########
     floatSize = Symbol(name="float_size", dtype=np.uint64)
@@ -158,7 +159,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
 
     if ooc_compression:                     
         ######## Build compress/decompress section ########
-        compress_or_decompress_build(files_dict, metasArray, iet_body, iSymbol, is_forward, funcs_dict, nthreadsDim, nthreads, time_iterators, sptArray, offsetArray, ooc_compression) 
+        compress_or_decompress_build(files_dict, metasArray, iet_body, iSymbol, is_forward, funcs_dict, nthreadsDim, nthreads, time_iterators, sptArray, slices_size, offsetArray, ooc_compression) 
     else:
         ######## Build write/read section ########    
         write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_symb_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
@@ -176,12 +177,12 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     
     ### Free slices memory
     if ooc_compression:
-        closeSlices = closeSlices_build(nthreads, iSymbol)
+        closeSlices = closeSlices_build(nthreads, iSymbol, slices_size)
         iet_body.append(closeSlices)
         
     return iet_body
 
-def closeSlices_build(nthreads, iSymbol):
+def closeSlices_build(nthreads, iSymbol, slices_size):
     """
     This method inteds to ls gradient.c free slices_size array memory.
     Obs: code creates variables that already exists on the previous code 
@@ -196,11 +197,6 @@ def closeSlices_build(nthreads, iSymbol):
     # tid dimension
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads)
 
-    # slices_size[];
-    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
-                                array=Array(name='slices_size', dimensions=[nthreadsDim],
-                                             dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
-
     # free(slices_size[i]);
     itNode = Call(name="free", arguments=[slices_size[iSymbol]])    
     
@@ -209,7 +205,7 @@ def closeSlices_build(nthreads, iSymbol):
     
     return closeIteration
 
-def compress_or_decompress_build(files_dict, metasArray, iet_body, iSymbol, is_forward, funcs_dict, nthreadsDim, nthreads, time_iterators, sptArray, offsetArray, ooc_compression):
+def compress_or_decompress_build(files_dict, metasArray, iet_body, iSymbol, is_forward, funcs_dict, nthreadsDim, nthreads, time_iterators, sptArray, slices_size, offsetArray, ooc_compression):
     """
     This function decides if it is either a compression or a decompression
 
@@ -247,7 +243,7 @@ def compress_or_decompress_build(files_dict, metasArray, iet_body, iSymbol, is_f
         ooc_section = compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cTidEq, ispace, time_iterators[0], ooc_compression)
         temp_name = "compress_temp"
     else:
-        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSizeDim, tid, cTidEq, ispace, time_iterators[-1], sptArray, offsetArray, ooc_compression)
+        ooc_section = decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSizeDim, tid, cTidEq, ispace, time_iterators[-1], sptArray, slices_size, offsetArray, ooc_compression)
         temp_name = "decompress_temp"
 
     update_iet(iet_body, temp_name, ooc_section)      
@@ -317,7 +313,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     compressSection = [Expression(cTypeEq, None, True), Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])]
     return Section("compress", compressSection)
 
-def decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSizeDim, tid, cTidEq, ispace, t2, sptArray, offsetArray, ooc_compression):
+def decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray, ooc_compression):
     """
     This function generates decompress section.
 
@@ -355,9 +351,6 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSiz
     stream = Pointer(name="stream", dtype=ct.POINTER(bitstream))
     Slice = Symbol(name="slice", dtype=np.int32)
     ret = Symbol(name="ret", dtype=np.int32)
-    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
-                                array=Array(name='slices_size', dimensions=[nthreadsDim],
-                                             dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
     
     # TypeEq = IREq(Type, Symbol(name="zfp_type_float", dtype=ct.c_int))
     TypeEq = IREq(Type, String(r"zfp_type_float"))
@@ -566,7 +559,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counte
         
     return Iteration(itNodes, iDim, uVecSize1-1, direction=Backward, pragmas=[pragma])
 
-def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression):
+def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offsetArray, nthreadsDim, nthreads, is_forward, iSymbol, ooc_compression, slices_size):
     """
     This method inteds to code open section for both Forward and Gradient operators.
     
@@ -618,7 +611,6 @@ def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offs
     
     elif not is_forward and ooc_compression:
         # Compression
-        slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
         get_slices_size = Call(name="get_slices_size_temp", arguments=[metasArray, sptArray], retobj=slices_size)
         body.append(get_slices_size)
 

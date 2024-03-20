@@ -107,7 +107,7 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
 
     return callable
 
-def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol):
+def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol, slicesSize):
     """_summary_
 
     Args:
@@ -124,7 +124,7 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol):
     ifNodes=[]
     funcBody=[]
     
-    slicesSize = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
+    # slicesSize = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
     mAllocCall = Call(name="(size_t**) malloc", arguments=[nthreads*SizeOf(String(r"size_t *"))], retobj=slicesSize)
     funcBody.append(mAllocCall)
     
@@ -191,9 +191,9 @@ def ooc_efuncs(iet, **kwargs):
     if is_compression and not is_forward:
         sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
         slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
-                                    array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
+                                    array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
         new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads], retobj=slices_size)
-        slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol)
+        slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol, slices_size)
         efuncs.append(slicesSizeCallable)
         get_slices_call = next((call for call in calls if call.name == 'get_slices_size_temp'), None)
         mapper[get_slices_call] = new_get_slices_call
