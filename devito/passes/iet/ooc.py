@@ -125,7 +125,7 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol):
     funcBody=[]
     
     slicesSize = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
-    mAllocCall = Call(name="(size_t**) malloc", arguments=[nthreads*SizeOf(Pointer(name='size_t *', dtype=size_t))], retobj=slicesSize)
+    mAllocCall = Call(name="(size_t**) malloc", arguments=[nthreads*SizeOf(String(r"size_t *"))], retobj=slicesSize)
     funcBody.append(mAllocCall)
     
     # Get size of the file
@@ -134,17 +134,13 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol):
     itNodes.append(lseekCall)
     
     # Get number of slices per thread file
-    sptEq = IREq(sptArray[iSymbol], cast_mapper[int](fSize) / SizeOf(Symbol(name='size_t', dtype=size_t)) -1)
+    sptEq = IREq(sptArray[iSymbol], cast_mapper[int](fSize) / SizeOf(String(r"size_t")) -1)
     cSptEq = ClusterizedEq(sptEq, ispace=None)
     itNodes.append(Expression(cSptEq, None, False))
     
     # Allocate
-    slicesSizeTidMallocCall = Call(name='malloc', arguments=[fSize], retobj=slicesSize[iSymbol])
-    slicesSizeTidCast = cast_mapper[(size_t, '*')](slicesSize[iSymbol])
-    slicesSizeTidCastEq = IREq(slicesSize[iSymbol], slicesSizeTidCast)
-    cSlicesSizeTidCastEq = ClusterizedEq(slicesSizeTidCastEq, ispace=None)
+    slicesSizeTidMallocCall = Call(name='(size_t *) malloc', arguments=[fSize], retobj=slicesSize[iSymbol])
     itNodes.append(slicesSizeTidMallocCall)
-    itNodes.append(Expression(cSlicesSizeTidCastEq, None, False))
     
     ifNodes.append(Call(name="perror", arguments=String("\"Error to allocate slices\\n\"")))
     ifNodes.append(Call(name="exit", arguments=1))
@@ -193,14 +189,14 @@ def ooc_efuncs(iet, **kwargs):
     metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
 
     if is_compression and not is_forward:
-            sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
-            slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
-                                        array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
-            new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads], retobj=slices_size)
-            slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol)
-            efuncs.append(slicesSizeCallable)
-            get_slices_call = next((call for call in calls if call.name == 'get_slices_size_temp'), None)
-            mapper[get_slices_call] = new_get_slices_call
+        sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
+        slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim],
+                                    array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
+        new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads], retobj=slices_size)
+        slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol)
+        efuncs.append(slicesSizeCallable)
+        get_slices_call = next((call for call in calls if call.name == 'get_slices_size_temp'), None)
+        mapper[get_slices_call] = new_get_slices_call
 
     openThreadsCallable = open_threads_build(nthreads, filesArray, metasArray,iSymbol,
                                              nthreadsDim, nameArray, is_forward, 
