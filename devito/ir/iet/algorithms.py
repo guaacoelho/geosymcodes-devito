@@ -27,9 +27,8 @@ def iet_build(stree, **kwargs):
     Construct an Iteration/Expression tree(IET) from a ScheduleTree.
     """
     ooc = kwargs['options']['out-of-core']
-    is_mpi = kwargs['options']['mpi']
     time_iterators = None
-    
+
     nsections = 0
     queues = OrderedDict()
     for i in stree.visit():
@@ -37,7 +36,7 @@ def iet_build(stree, **kwargs):
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
             if(ooc):
-                iet_body = _ooc_build(iet_body, kwargs['sregistry'].nthreads, ooc, is_mpi, time_iterators)
+                iet_body = _ooc_build(iet_body, ooc, kwargs['sregistry'].nthreads, kwargs['options']['mpi'], kwargs['language'], time_iterators)
                 
                 return List(body=iet_body)
             else:                
@@ -90,15 +89,16 @@ def iet_build(stree, **kwargs):
 
 
 @timed_pass(name='ooc_build')
-def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
+def _ooc_build(iet_body, ooc, nthreads, is_mpi, language, time_iterators):
     """
     This private method builds a iet_body (list) with out-of-core nodes.
 
     Args:
         iet_body (List): a list of nodes
-        nthreads (NThreads): symbol representing nthreads parameter of OpenMP
         ooc (Object): out of core parameters
+        nthreads (NThreads): symbol representing nthreads parameter of OpenMP
         is_mpi (bool): MPI execution flag
+        language (str): language set for the operator (C, openmp or openacc)
         time_iterators(Dimension): iterator used as index in each timestep
 
     Returns:
@@ -108,9 +108,12 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     out_of_core = ooc.mode
     ooc_compression = ooc.compression    
 
+    if language != 'openmp':
+        raise ValueError("Out of core requires OpenMP. Language parameter must be openmp, got %s" % language)
+    
     for func in funcs:
         if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
-
+    
     if ooc_compression and len(funcs) > 1:
         raise ValueError("Multi Function currently does not support compression")
     
