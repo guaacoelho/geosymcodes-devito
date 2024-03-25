@@ -36,11 +36,8 @@ def iet_build(stree, **kwargs):
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
             if(ooc):
-                iet_body = _ooc_build(iet_body, ooc, kwargs['sregistry'].nthreads, kwargs['options']['mpi'], kwargs['language'], time_iterators)
-                
-                return List(body=iet_body)
-            else:                
-                return List(body=iet_body)
+                iet_body = _ooc_build(iet_body, ooc, kwargs['sregistry'].nthreads, kwargs['options']['mpi'], kwargs['language'], time_iterators)               
+            return List(body=iet_body)
 
         elif i.is_Exprs:
             exprs = []
@@ -107,9 +104,9 @@ def _ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     funcs = ooc.functions
     out_of_core = ooc.mode
     ooc_compression = ooc.compression    
-    set_trace()
-    #if language != 'openmp':
-    #   raise ValueError("Out of core requires OpenMP. Language parameter must be openmp, got %s" % language)
+
+    if language != 'openmp':
+       raise ValueError("Out of core requires OpenMP. Language parameter must be openmp, got %s" % language)
     
     for func in funcs:
         if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
@@ -125,7 +122,7 @@ def _ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     time_iterator = time_iterators[0]
 
     ######## Dimension and symbol for iteration spaces ########
-    nthreads = nt if nt else NThreads()
+    nthreads = nt or NThreads()
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads)    
     iSymbol = Symbol(name="i", dtype=np.int32)
     
@@ -164,32 +161,26 @@ def _ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     if ooc_compression:                     
         ######## Build compress/decompress section ########
         compress_or_decompress_build(files_dict, metasArray, iet_body, iSymbol, is_forward, funcs_dict, nthreadsDim, nthreads, time_iterators, sptArray, slices_size, offsetArray, ooc_compression) 
-    #else:
+    else:
         ######## Build write/read section ########    
-     #   write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_symb_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
+        write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_symb_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
     
     
     ######## Build close section ########
     closeSection = close_build(nthreads, files_dict, iSymbol, nthreadsDim)
     
     #TODO: Generate blank lines between sections
-    '''
     for size_init in func_sizes_dict.values():
         iet_body.insert(0, size_init)
     iet_body.insert(0, floatSizeInit)
     iet_body.insert(0, openSection)
-    if not nt:
-        ntCall = Call(name="omp_get_num_threads", retobj=nthreads)
-        iet_body.insert(0, ntCall)
     iet_body.append(closeSection)
     
     ### Free slices memory
     if ooc_compression:
         closeSlices = closeSlices_build(nthreads, iSymbol, slices_size)
         iet_body.append(closeSlices)
-    '''
-
-    iet_body.append(Call(name='printf', arguments=[]))
+    
     return iet_body
 
 def closeSlices_build(nthreads, iSymbol, slices_size):
