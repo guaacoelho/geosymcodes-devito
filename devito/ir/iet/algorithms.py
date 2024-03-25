@@ -139,7 +139,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
     sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
     offsetArray = Array(name='offset', dimensions=[nthreadsDim], dtype=off_t)
-    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True))
+    slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
 
 
     ######## Build open section ########
@@ -176,9 +176,10 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     iet_body.append(closeSection)
     
     ### Free slices memory
-    if ooc_compression:
+    if ooc_compression and not is_forward:
         closeSlices = closeSlices_build(nthreads, iSymbol, slices_size)
         iet_body.append(closeSlices)
+        iet_body.append(Call(name="free", arguments=[(String(r"slices_size"))]))
         
     return iet_body
 
@@ -277,7 +278,6 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     Type = Symbol(name='type', dtype=zfp_type)
     TypeEq = IREq(Type, String(r"zfp_type_float"))
     cTypeEq = ClusterizedEq(TypeEq, ispace=ispace)
-    itNodes.append(Expression(cTypeEq, None, True))
     
     itNodes.append(Expression(cTidEq, None, True))
     
@@ -293,7 +293,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     itNodes.append(get_compress_mode_function(ooc_compression, zfp, field, Type))
     itNodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
     itNodes.append(Call(name="malloc", arguments=[bufsize], retobj=buffer))
-    itNodes.append(Call(name="stream_open", arguments=[bufsize, bufsize], retobj=stream))
+    itNodes.append(Call(name="stream_open", arguments=[buffer, bufsize], retobj=stream))
     itNodes.append(Call(name="zfp_stream_set_bit_stream", arguments=[zfp, stream]))
     itNodes.append(Call(name="zfp_stream_rewind", arguments=[zfp]))
     itNodes.append(Call(name="zfp_compress", arguments=[zfp, field], retobj=zfpsize))
@@ -310,7 +310,7 @@ def compress_build(filesArray, metasArray, funcStencil, iSymbol, pragma, uSizeDi
     itNodes.append(Call(name="stream_close", arguments=[stream]))
     itNodes.append(Call(name="free", arguments=[buffer]))
     
-    compressSection = [Expression(cTypeEq, None, True), Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])]
+    compressSection = [Expression(cTypeEq, None, True), Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma]), Call(name="printf", arguments=[String("\"Hello!\\n\"")])]
     return Section("compress", compressSection)
 
 def decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSizeDim, tid, cTidEq, ispace, t2, sptArray, slices_size, offsetArray, ooc_compression):
@@ -362,7 +362,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, nthreadsDim, uSiz
     itNodes.append(get_compress_mode_function(ooc_compression, zfp, field, Type))
     itNodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
     itNodes.append(Call(name="malloc", arguments=[bufsize], retobj=buffer))
-    itNodes.append(Call(name="stream_open", arguments=[bufsize, bufsize], retobj=stream))
+    itNodes.append(Call(name="stream_open", arguments=[buffer, bufsize], retobj=stream))
     itNodes.append(Call(name="zfp_stream_set_bit_stream", arguments=[zfp, stream]))
     itNodes.append(Call(name="zfp_stream_rewind", arguments=[zfp]))
     
@@ -640,6 +640,7 @@ def close_build(nthreads, files_dict, iSymbol, nthreadsDim):
 
     # close(files[i]);
     itNodes=[]
+    
     for func in files_dict:
         files = files_dict[func]
         itNodes.append(Call(name="close", arguments=[files[iSymbol]])) 

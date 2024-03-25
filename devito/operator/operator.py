@@ -147,7 +147,7 @@ class Operator(Callable):
     _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", "8")),
                                     #   (("ifndef", "RATE"), ("RATE", "16")) # Defined in Operator API
                                       ]
-    _out_of_core_includes = ["fcntl.h"]
+    _out_of_core_includes = ["fcntl.h", "stdio.h", "unistd.h"]
     _out_of_core_mpi_includes = ["mpi.h"]
     _out_of_core_compression_includes = ["zfp.h"]
 
