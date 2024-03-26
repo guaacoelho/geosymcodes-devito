@@ -2,7 +2,7 @@ from functools import partial
 
 import numpy as np
 
-from devito.core.operator import CoreOperator, CustomOperator, ParTile
+from devito.core.operator import CoreOperator, CustomOperator, ParTile, OutOfCoreConfig
 from devito.exceptions import InvalidOperator
 from devito.operator.operator import rcompile
 from devito.passes import is_on_device
@@ -38,6 +38,8 @@ class DeviceOperatorMixin(object):
         # Execution modes
         o['mpi'] = oo.pop('mpi')
         o['parallel'] = True
+
+        o['out-of-core'] = OutOfCoreConfig(oo.pop('out-of-core', None))
 
         # Buffering
         o['buf-async-degree'] = oo.pop('buf-async-degree', None)
