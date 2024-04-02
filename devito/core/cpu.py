@@ -174,7 +174,8 @@ class Cpu64AdvOperator(Cpu64OperatorMixin, CoreOperator):
         mpiize(graph, **kwargs)
 
         # Out of Core
-        if kwargs['options']['out-of-core']: ooc_efuncs(graph, **kwargs)
+        if kwargs['options']['out-of-core']:
+            ooc_efuncs(graph, **kwargs)
 
         # Lower BlockDimensions so that blocks of arbitrary shape may be used
         relax_incr_dimensions(graph, **kwargs)

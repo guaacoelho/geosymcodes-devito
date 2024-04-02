@@ -109,7 +109,8 @@ def _ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
        raise ValueError("Out of core requires OpenMP. Language parameter must be openmp, got %s" % language)
     
     for func in funcs:
-        if func.save: raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
+        if func.save:
+            raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
     
     if ooc_compression and len(funcs) > 1:
         raise ValueError("Multi Function currently does not support compression")
@@ -583,8 +584,10 @@ def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offs
     if not ooc_compression and not is_forward:
         arrays.extend(counters_array for counters_array in counters_array_dict.values())
     # Compression Forward or Compression Gradient
-    if ooc_compression: arrays.append(metasArray)
-    if ooc_compression and not is_forward: arrays.extend([sptArray, offsetArray]) 
+    if ooc_compression:
+        arrays.append(metasArray)
+    if ooc_compression and not is_forward:
+        arrays.extend([sptArray, offsetArray]) 
 
     arrays_cond = array_alloc_check(arrays) 
     
@@ -592,7 +595,8 @@ def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offs
     open_threads_calls = []
     for func_name in files_array_dict:
         funcArgs = [files_array_dict[func_name], nthreads, String('"{}"'.format(func_name))]
-        if ooc_compression: funcArgs.append(metasArray)
+        if ooc_compression:
+            funcArgs.append(metasArray)
         open_threads_calls.append(Call(name='open_thread_files_temp', arguments=funcArgs))
 
     # Open section body

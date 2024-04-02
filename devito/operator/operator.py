@@ -1041,7 +1041,8 @@ class Operator(Callable):
 rcompile_registry = {
     'mpi': False,
     'linearize': False,
-    'place-transfers': False
+    'place-transfers': False,
+    'out-of-core': False
 }
 
 

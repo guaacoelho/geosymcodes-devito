@@ -136,9 +136,10 @@ def ForwardOperator(model, geometry, space_order=4,
 
     # Substitute spacing terms to reduce flops
     #kwargs.pop("opt")
-    #kwargs.update({"opt": ('advanced', {'out-of-core': (u, "forward")})})
+    #kwargs.update({"opt": ('advanced', {'out-of-core': ([u], "forward")})})
     op = Operator(eqn + src_term + rec_term, subs=model.spacing_map,
                     name='Forward', **kwargs)
+    #import pdb; pdb.set_trace()
     return op
 
 def AdjointOperator(model, geometry, space_order=4,

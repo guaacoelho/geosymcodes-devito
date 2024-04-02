@@ -7,7 +7,7 @@ from devito.symbolics import (CondEq, CondNe, Macro, String, cast_mapper, SizeOf
 from devito.symbolics.extended_sympy import (FieldFromPointer, Byref)
 from devito.types import CustomDimension, Array, Symbol, Pointer, FILE, Timer, NThreads, off_t, size_t, PointerArray
 from devito.ir.iet import (Expression, Iteration, Conditional, Call, Conditional, CallableBody, Callable,
-                            FindNodes, Transformer, Return, Definition)
+                            FindNodes, Transformer, Return, Definition, EntryFunction)
 from devito.ir.equations import IREq, ClusterizedEq
 
 __all__ = ['ooc_efuncs']
@@ -171,7 +171,10 @@ def ooc_efuncs(iet, **kwargs):
     Returns:
         _type_: _description_
     """
-            
+    # Out of core built only in the EntryFunction
+    if not isinstance(iet, EntryFunction):
+        return iet, {}
+           
     is_forward = kwargs['options']['out-of-core'].mode == 'forward'
     is_mpi = kwargs['options']['mpi']
     is_compression = kwargs['options']['out-of-core'].compression
