@@ -209,13 +209,13 @@ class Operator(Callable):
             op._headers.update(cls._out_of_core_compression_headers)
         elif out_of_core and not is_compression: 
             if out_of_core.mode == "forward":
-                if is_mpi:
-                    cls._out_of_core_headers_forward[1] = (("ifndef", "NDISKS"), ("NDISKS", "4"))
                 op._headers.update(cls._out_of_core_headers_forward)
             else:
                 op._headers.update(cls._out_of_core_headers_gradient)
-        elif out_of_core and is_mpi: 
-            op._headers.update(cls._out_of_core_mpi_headers)
+
+            if is_mpi:
+                op._headers.update(cls._out_of_core_mpi_headers)
+            
             
         # Globals
         op._globals = OrderedSet(*cls._default_globals)
