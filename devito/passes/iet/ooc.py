@@ -126,7 +126,8 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol, slice
     ifNodes=[]
     funcBody=[]
     
-    mAllocCall = Call(name="malloc", arguments=[nthreads*SizeOf(String(r"size_t *"))], retobj=slicesSize, cast=True)
+    mAllocCall = Call(name="malloc", arguments=[nthreads*SizeOf(String(r"size_t *"))], 
+                      retobj=Pointer(name='slices_size', dtype=POINTER(POINTER(size_t)), ignoreDefinition=True), cast=True)
     funcBody.append(mAllocCall)
     
     # Get size of the file
@@ -188,14 +189,13 @@ def ooc_efuncs(iet, **kwargs):
     iSymbol = Symbol(name="i", dtype=c_int32)
 
     nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads) 
-    filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
-    metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
+    filesArray = Array(name='files', dimensions=[nthreadsDim], dtype=np.int32)
+    metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
 
     if is_compression and not is_forward:
-        sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
+        sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
         slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t), ignoreDefinition=True)
-        slices_size_aux = Pointer(name='slices_size', dtype=POINTER(POINTER(size_t)), ignoreDefinition=True)
-        new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads], retobj=slices_size_aux)
+        new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads], retobj=Pointer(name='sslices_size', dtype=POINTER(POINTER(size_t))))
         slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol, slices_size)
         efuncs.append(slicesSizeCallable)
         get_slices_call = next((call for call in calls if call.name == 'get_slices_size_temp'), None)

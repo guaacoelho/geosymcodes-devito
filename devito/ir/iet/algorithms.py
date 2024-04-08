@@ -181,13 +181,13 @@ def _ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     
     ### Free slices memory
     if ooc_compression and not is_forward:
-        closeSlices = closeSlices_build(nthreads, iSymbol, slices_size)
+        closeSlices = closeSlices_build(nthreads, iSymbol, slices_size, nthreadsDim)
         iet_body.append(closeSlices)
         iet_body.append(Call(name="free", arguments=[(String(r"slices_size"))]))
         
     return iet_body
 
-def closeSlices_build(nthreads, iSymbol, slices_size):
+def closeSlices_build(nthreads, iSymbol, slices_size, nthreadsDim):
     """
     This method inteds to ls gradient.c free slices_size array memory.
     Obs: code creates variables that already exists on the previous code 
@@ -198,10 +198,7 @@ def closeSlices_build(nthreads, iSymbol, slices_size):
     Returns:
         closeIteration (Iteration): complete iteration loop 
     """
-
-    # tid dimension
-    nthreadsDim = CustomDimension(name="i", symbolic_size=nthreads)
-
+    
     # free(slices_size[i]);
     itNode = Call(name="free", arguments=[slices_size[iSymbol]])    
     
