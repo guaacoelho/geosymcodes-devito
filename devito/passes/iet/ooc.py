@@ -2,6 +2,7 @@ import numpy as np
 from sympy import Mod
 from pdb import set_trace
 from ctypes import c_int32, POINTER
+import ctypes as ct
 
 from devito.passes.iet.engine import iet_pass
 from devito.symbolics import (CondEq, Macro, String, cast_mapper, SizeOf)
@@ -189,7 +190,7 @@ def ooc_efuncs(iet, **kwargs):
 
     if is_compression and not is_forward:
         sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32, ignoreDefinition=True)
-        slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
+        slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t), ignoreDefinition=True)
         slices_size_aux = Pointer(name='slices_size', dtype=POINTER(POINTER(size_t)), ignoreDefinition=True)
         new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads], retobj=slices_size_aux)
         slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol, slices_size)

@@ -141,7 +141,7 @@ def _ooc_build(iet_body, nthreads, ooc, is_mpi, time_iterators):
     metasArray = Array(name='metas', dimensions=[nthreadsDim], dtype=np.int32)
     sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
     offsetArray = Array(name='offset', dimensions=[nthreadsDim], dtype=off_t)
-    slices_size = PointerArray(name='slices_size', dimensions=(nthreadsDim, ), array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t))
+    slices_size = PointerArray(name='slices_size', dimensions=(nthreadsDim, ), array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t, ignoreDefinition=True), ignoreDefinition=True)
     # slices_size = Array(name='slices_size', dimensions=(nthreadsDim, nthreadsDim), dtype=ct.POINTER(ct.POINTER(size_t)))
     # slices_size = ArayObject...
     # slices_size = ThreadArray...

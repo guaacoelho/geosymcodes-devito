@@ -383,7 +383,7 @@ class DataManager(object):
         # (i) Dereferencing a PointerArray, e.g., `float (*r0)[.] = (float(*)[.]) pr0[.]`
         # (ii) Declaring a raw pointer, e.g., `float * r0 = NULL; *malloc(&(r0), ...)
         defines = set(FindSymbols('defines|globals').visit(iet))
-        bases = sorted({i.base for i in indexeds}, key=lambda i: i.name)
+        bases = sorted({i.base for i in indexeds if not i.function.ignoreDefinition}, key=lambda i: i.name)
 
         # Some objects don't distinguish their _C_symbol because they are known,
         # by construction, not to require it, thus making the generated code
@@ -393,6 +393,7 @@ class DataManager(object):
         # Create and attach the type casts
         casts = tuple(self.lang.PointerCast(i.function, obj=i) for i in bases
                       if i not in defines)
+        
         if casts:
             iet = iet._rebuild(body=iet.body._rebuild(casts=casts + iet.body.casts))
 
