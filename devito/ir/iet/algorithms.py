@@ -166,7 +166,7 @@ def _ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
         compress_or_decompress_build(files_dict, metasArray, iet_body, is_forward, funcs_dict, nthreads, time_iterators, sptArray, offsetArray, ooc_compression, slices_size) 
     else:
         ######## Build write/read section ########    
-        write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_symb_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
+        write_or_read_build(iet_body, is_forward, nthreads, files_dict, func_sizes_symb_dict, funcs_dict, time_iterator, counters_dict, is_mpi)
     
     
     ######## Build close section ########
@@ -401,7 +401,7 @@ def decompress_build(filesArray, funcStencil, iSymbol, pragma, uSizeDim, tid, cT
     
     return Section("decompress", decompressSection)
 
-def write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, func_sizes_symb_dict, funcs_dict, t0, counters_dict, is_mpi):
+def write_or_read_build(iet_body, is_forward, nthreads, files_dict, func_sizes_symb_dict, funcs_dict, t0, counters_dict, is_mpi):
     """
     Builds the read or write section of the operator, depending on the out_of_core mode.
     Replaces the temporary section at the end of the time iteration by the read or write section.   
@@ -423,23 +423,21 @@ def write_or_read_build(iet_body, is_forward, nthreads, files_dict, iSymbol, fun
         temp_name = "write_temp"
         name = "write"
         for func in funcs_dict:
-            func_write = write_build(nthreads, files_dict[func], iSymbol, func_sizes_symb_dict[func],
-                                      funcs_dict[func], t0, is_mpi)
+            func_write = write_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func], t0, is_mpi)
             io_body.append(func_write)
         
     else: # gradient
         temp_name = "read_temp"
         name = "read"
         for func in funcs_dict:
-            func_read = read_build(nthreads, files_dict[func], iSymbol, func_sizes_symb_dict[func],
-                                    funcs_dict[func], t0, counters_dict[func])
+            func_read = read_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func], t0, counters_dict[func])
             io_body.append(func_read)
           
     io_section = Section(name, io_body)
     update_iet(iet_body, temp_name, io_section)     
 
 
-def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mpi):
+def write_build(nthreads, filesArray, func_size, funcStencil, t0, is_mpi):
     """
     This method inteds to code gradient.c write section.
     Obs: maybe the desciption of the variables should be better    
@@ -465,12 +463,12 @@ def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mp
     itNodes = []
 
     tid = Symbol(name="tid", dtype=np.int32)
-    tidEq = IREq(tid, Mod(iSymbol, nthreads))
+    tidEq = IREq(tid, Mod(uSizeDim, nthreads))
     cTidEq = ClusterizedEq(tidEq, ispace=ispace)
     itNodes.append(Expression(cTidEq, None, True))
     
     ret = Symbol(name="ret", dtype=np.int32)
-    writeCall = Call(name="write", arguments=[filesArray[tid], funcStencil[t0, iSymbol], func_size], retobj=ret)
+    writeCall = Call(name="write", arguments=[filesArray[tid], funcStencil[t0, uSizeDim], func_size], retobj=ret)
     itNodes.append(writeCall)
     
     pstring = String("\"Write size mismatch with function slice size\"")
@@ -488,7 +486,7 @@ def write_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, is_mp
 
     return Iteration(itNodes, uSizeDim, uVecSize1-1, pragmas=[pragma])
 
-def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counters):
+def read_build(nthreads, filesArray, func_size, funcStencil, t0, counters):
     """
     This method inteds to code gradient.c read section.
     Obs: maybe the desciption of the variables should be better    
@@ -521,7 +519,7 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counte
 
     # int tid = i%nthreads;
     tid = Symbol(name="tid", dtype=np.int32)
-    tidEq = IREq(tid, Mod(iSymbol, nthreads))
+    tidEq = IREq(tid, Mod(iDim, nthreads))
     cTidEq = ClusterizedEq(tidEq, ispace=ispace)
     itNodes.append(Expression(cTidEq, None, True))
     
@@ -536,16 +534,15 @@ def read_build(nthreads, filesArray, iSymbol, func_size, funcStencil, t0, counte
 
     # int ret = read(files[tid], u[t0][i], func_size);
     ret = Symbol(name="ret", dtype=np.int32)
-    readCall = Call(name="read", arguments=[filesArray[tid], funcStencil[t0, iSymbol], func_size], retobj=ret)
+    readCall = Call(name="read", arguments=[filesArray[tid], funcStencil[t0, iDim], func_size], retobj=ret)
     itNodes.append(readCall)
 
     # printf("%d", ret);
     # perror("Cannot open output file");
     # exit(1);
-    pret = String("'%d', ret")
     pstring = String("\"Cannot open output file\"")
     condNodes = [
-        Call(name="printf", arguments=pret),
+        Call(name="printf", arguments=[String("\"%d\""), ret]),
         Call(name="perror", arguments=pstring), 
         Call(name="exit", arguments=1)
     ]
