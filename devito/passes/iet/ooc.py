@@ -1,8 +1,7 @@
 import numpy as np
 from sympy import Mod
 from pdb import set_trace
-from ctypes import c_int32, POINTER
-import ctypes as ct
+from ctypes import c_int32, POINTER, c_int
 
 from devito.passes.iet.engine import iet_pass
 from devito.symbolics import (CondEq, Macro, String, cast_mapper, SizeOf)
@@ -79,27 +78,30 @@ def open_threads_build(nthreads, filesArray, metasArray, iSymbol, nthreadsDim, n
     if is_forward and is_compression:
         itNodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), nameArray]))
         itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStrCompFwd, flagsStr], retobj=filesArray[iSymbol]))
+        itNodes.append(Conditional(CondEq(filesArray[iSymbol], -1), ifNodes))
+        itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/thread_%d.data\""), nvme_id, iSymbol]))
+        itNodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), nameArray]))
         itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStrCompFwd, flagsStr], retobj=metasArray[iSymbol]))
+        itNodes.append(Conditional(CondEq(metasArray[iSymbol], -1), ifNodes))
     elif is_forward and not is_compression:
         itNodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), nameArray]))
         itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStr, flagsStr], retobj=filesArray[iSymbol]))
+        itNodes.append(Conditional(CondEq(filesArray[iSymbol], -1), ifNodes))
     elif not is_forward and is_compression:
         itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
         itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStrCompGrd, flagsStr], retobj=filesArray[iSymbol]))
+        itNodes.append(Conditional(CondEq(filesArray[iSymbol], -1), ifNodes))
+        itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/thread_%d.data\""), nvme_id, iSymbol]))
+        itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
         itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStrCompGrd, flagsStr], retobj=metasArray[iSymbol]))
+        itNodes.append(Conditional(CondEq(metasArray[iSymbol], -1), ifNodes))
     elif not is_forward and not is_compression:
         itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
         itNodes.append(Call(name="open", arguments=[nameArray, opFlagsStr, flagsStr], retobj=filesArray[iSymbol]))   
+        itNodes.append(Conditional(CondEq(filesArray[iSymbol], -1), ifNodes))    
     
-    itNodes.append(Conditional(CondEq(filesArray[iSymbol], -1), ifNodes))
     funcArgs = [filesArray, nthreads, stencilNameArray]
-    if is_compression:
-        itNodes.append(Call(name="sprintf", arguments=[nameArray, String("\"data/nvme%d/thread_%d.data\""), nvme_id, iSymbol]))
-        if is_forward:
-            itNodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), nameArray]))
-        else:
-            itNodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), nameArray]))
-        itNodes.append(Conditional(CondEq(metasArray[iSymbol], -1), ifNodes))
+    if is_compression:            
         funcArgs.append(metasArray)
     
     openIteration = Iteration(itNodes, nthreadsDim, nthreads)
@@ -157,7 +159,7 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol, slice
     getSlicesIteration = Iteration(itNodes, nthreadsDim, nthreads-1)
     funcBody.append(getSlicesIteration)
     funcBody.append(Return(String(r"slices_size")))
-        
+    
     callable = Callable("get_slices_size", CallableBody(funcBody), "size_t**", [metasArray, sptArray, nthreads])
     return callable    
     
@@ -195,13 +197,14 @@ def ooc_efuncs(iet, **kwargs):
     if is_compression and not is_forward:
         sptArray = Array(name='spt', dimensions=[nthreadsDim], dtype=np.int32)
         slices_size = PointerArray(name='slices_size', dimensions=[nthreadsDim], array=Array(name='slices_size', dimensions=[nthreadsDim], dtype=size_t), ignoreDefinition=True)
-        new_get_slices_call = Call(name='get_slices_size', arguments=[metasArray, sptArray, nthreads], retobj=Pointer(name='sslices_size', dtype=POINTER(POINTER(size_t))))
         slicesSizeCallable = get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol, slices_size)
         efuncs.append(slicesSizeCallable)
+        new_get_slices_call = Call(name='get_slices_size', arguments=[String(r"metas_vec"), String(r"spt_vec"), nthreads], 
+                                   retobj=Pointer(name='slices_size', dtype=POINTER(POINTER(size_t)), ignoreDefinition=True))
         get_slices_call = next((call for call in calls if call.name == 'get_slices_size_temp'), None)
         mapper[get_slices_call] = new_get_slices_call
 
-    openThreadsCallable = open_threads_build(nthreads, filesArray, metasArray,iSymbol,
+    openThreadsCallable = open_threads_build(nthreads, filesArray, metasArray, iSymbol,
                                              nthreadsDim, nameArray, is_forward, 
                                              is_mpi, is_compression)
     efuncs.append(openThreadsCallable)   

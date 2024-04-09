@@ -614,12 +614,9 @@ def open_build(files_array_dict, counters_array_dict, metasArray, sptArray, offs
     
     elif not is_forward and ooc_compression:
         # Compression
-        slices_size_aux = Pointer(name='slices_size_aux', dtype=ct.POINTER(ct.POINTER(size_t)), ignoreDefinition=True)
-        get_slices_size = Call(name='get_slices_size_temp', arguments=[metasArray, sptArray], retobj=slices_size_aux)
+        get_slices_size = Call(name='get_slices_size_temp', arguments=[String(r"metas_vec"), String(r"spt_vec"), nthreads], 
+                               retobj=Pointer(name='slices_size', dtype=ct.POINTER(ct.POINTER(size_t)), ignoreDefinition=True))
         body.append(get_slices_size)
-        # set_trace()
-        # c_slices_size_Eq = LoweredEq(Eq(slices_size, Byref(slices_size_aux)), ispace=None)
-        # body.append(Expression(c_slices_size_Eq, None))
 
         intervalGroup = IntervalGroup((Interval(nthreadsDim, 0, nthreads)))
         c_offset_init_Eq = ClusterizedEq(IREq(offsetArray[iSymbol], 0), ispace=IterationSpace(intervalGroup))
