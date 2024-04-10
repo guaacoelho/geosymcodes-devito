@@ -137,19 +137,6 @@ class Operator(Callable):
     _default_includes = ['stdlib.h', 'math.h', 'sys/time.h']
     _default_globals = []
     
-    _out_of_core_mpi_headers=[(("ifndef", "DPS"), ("DPS", "4"))]
-    _out_of_core_headers_forward=[("_GNU_SOURCE", ""),
-                                  (("ifndef", "NDISKS"), ("NDISKS", "8")), #Find a way to replace 8 by a parameter
-                                  (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_WRONLY | O_CREAT"), ("else", ), ("OPEN_FLAGS", "O_DIRECT | O_WRONLY | O_CREAT"))]
-    _out_of_core_headers_gradient=[("_GNU_SOURCE", ""),
-                                   (("ifndef", "NDISKS"), ("NDISKS", "8")), #Find a way to replace 8 by a parameter
-                                   (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_RDONLY"), ("else", ), ("OPEN_FLAGS", "O_DIRECT | O_RDONLY"))]
-    _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", "8")),
-                                    #   (("ifndef", "RATE"), ("RATE", "16")) # Defined in Operator API
-                                      ]
-    _out_of_core_includes = ["fcntl.h", "stdio.h", "unistd.h"]
-    _out_of_core_mpi_includes = ["mpi.h"]
-    _out_of_core_compression_includes = ["zfp.h"]
 
     def __new__(cls, expressions, **kwargs):
         if expressions is None:
@@ -205,17 +192,6 @@ class Operator(Callable):
         # Headers
         op._headers = OrderedSet(*cls._default_headers)
         op._headers.update(byproduct.headers)
-        if out_of_core and is_compression:
-            op._headers.update(cls._out_of_core_compression_headers)
-        elif out_of_core and not is_compression: 
-            if out_of_core.mode == "forward":
-                op._headers.update(cls._out_of_core_headers_forward)
-            else:
-                op._headers.update(cls._out_of_core_headers_gradient)
-
-            if is_mpi:
-                op._headers.update(cls._out_of_core_mpi_headers)
-            
             
         # Globals
         op._globals = OrderedSet(*cls._default_globals)
@@ -225,9 +201,6 @@ class Operator(Callable):
         op._includes = OrderedSet(*cls._default_includes)
         op._includes.update(profiler._default_includes)
         op._includes.update(byproduct.includes)
-        if out_of_core: op._includes.update(cls._out_of_core_includes)
-        if out_of_core and is_mpi: op._includes.update(cls._out_of_core_mpi_includes)
-        if out_of_core and is_compression: op._includes.update(cls._out_of_core_compression_includes)
 
         # Required for the jit-compilation
         op._compiler = kwargs['compiler']

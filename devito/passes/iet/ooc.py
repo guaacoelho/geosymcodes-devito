@@ -164,6 +164,42 @@ def get_slices_build(sptArray, nthreads, metasArray, nthreadsDim, iSymbol, slice
     return callable    
     
 
+
+def headers_build(is_forward, is_compression, is_mpi):
+    _out_of_core_mpi_headers=[(("ifndef", "DPS"), ("DPS", "4"))]
+    _out_of_core_headers_forward=[("_GNU_SOURCE", ""),
+                                  (("ifndef", "NDISKS"), ("NDISKS", "8")), 
+                                  (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_WRONLY | O_CREAT"), ("else", ), ("OPEN_FLAGS", "O_DIRECT | O_WRONLY | O_CREAT"))]
+    _out_of_core_headers_gradient=[("_GNU_SOURCE", ""),
+                                   (("ifndef", "NDISKS"), ("NDISKS", "8")), 
+                                   (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_RDONLY"), ("else", ), ("OPEN_FLAGS", "O_DIRECT | O_RDONLY"))]
+    _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", "8")),]
+    _out_of_core_includes = ["fcntl.h", "stdio.h", "unistd.h"]
+    _out_of_core_mpi_includes = ["mpi.h"]
+    _out_of_core_compression_includes = ["zfp.h"]
+
+
+    # Headers
+    headers=[]
+    if is_compression:
+        headers.extend(_out_of_core_compression_headers)
+    else: 
+        if is_forward:
+            headers.extend(_out_of_core_headers_forward)
+        else:
+            headers.extend(_out_of_core_headers_gradient)
+
+        if is_mpi:
+            headers.extend(_out_of_core_mpi_headers)
+
+    # Includes
+    includes=[]
+    includes.extend(_out_of_core_includes)
+    if is_mpi: includes.extend(_out_of_core_mpi_includes)
+    if is_compression: includes.extend(_out_of_core_compression_includes)
+
+    return headers, includes
+
 @iet_pass
 def ooc_efuncs(iet, **kwargs):
     """_summary_
@@ -215,7 +251,8 @@ def ooc_efuncs(iet, **kwargs):
     
     iet = Transformer(mapper).visit(iet)   
     
-    return iet, {'efuncs': efuncs}
+    headers, includes = headers_build(is_forward, is_compression, is_mpi)
+    return iet, {'efuncs': efuncs, "headers": headers, "includes": includes}
 
 
 """
