@@ -157,12 +157,12 @@ def maybe_alias(obj, candidate):
 
     return False
 
-def array_alloc_check(arrays):
+def ooc_array_alloc_check(arrays):
     """
     Checks wether malloc worked for array allocation.
 
     Args:
-        array (Array): array (files or counters)
+        arrays (list): list of Array (files or counters)
 
     Returns:
         Conditional: condition to handle allocated array
@@ -175,9 +175,9 @@ def array_alloc_check(arrays):
     ors = Or(*eqs)
     
     pstring = String("\"Error to alloc\"")
-    printfCall = Call(name="printf", arguments=pstring)
-    exitCall = Call(name="exit", arguments=1)
-    return Conditional(ors, [printfCall, exitCall])
+    printf_call = Call(name="printf", arguments=pstring)
+    exit_call = Call(name="exit", arguments=1)
+    return Conditional(ors, [printf_call, exit_call])
 
 def get_first_space_dim_index(dimensions):
     """
@@ -199,13 +199,13 @@ def get_first_space_dim_index(dimensions):
     
     return first_space_dim_index
 
-def update_iet(iet_body, temp_name, ooc_section):
+def ooc_update_iet(iet_body, temp_name, ooc_section):
     """
-    This function substitute a temp section with definitive section.
+    This function substitute a temp section by a definitive section.
 
     Args:
-        iet_body (List): IET body noes
-        temp_name (string): name of section
+        iet_body (List): IET body nodes
+        temp_name (string): temp section name
         ooc_section (Section): Read/Decompress or Write/Compress section
     """
     
@@ -213,29 +213,27 @@ def update_iet(iet_body, temp_name, ooc_section):
     temp_sec = next((section for section in sections if section.name == temp_name), None)
     mapper={temp_sec: ooc_section}
 
-    timeIndex = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration) and isinstance(node.dim, TimeDimension)), None)
-    transformedIet = Transformer(mapper).visit(iet_body[timeIndex])
-    iet_body[timeIndex] = transformedIet 
+    time_index = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration)
+                       and isinstance(node.dim, TimeDimension)), None)
+    transformed_iet = Transformer(mapper).visit(iet_body[time_index])
+    iet_body[time_index] = transformed_iet 
 
-def get_compress_mode_function(compress_config, zfp, field, Type):
+def ooc_get_compress_mode_function(compress_config, zfp, field, type_symbol):
     """_summary_
 
     Args:
         compress_config (CompressionConfig): object with compress settings
-        zfp (zfp_stream): _description_
-        field (_type_): _description_
-        Type (_type_): _description_
-
-    Raises:
-        NotImplementedError: _description_
+        zfp (Pointer): pointer to a zfp_stream type
+        field (Pointer): zfp field pointer
+        type_symbol (Symbol): Symbol for zfp_type
 
     Returns:
-        _type_: _description_
+        Call : call to a zfp stream mode specific function
     """
     
     arguments = [zfp]
     if compress_config.mode == "set_rate":
-        arguments += [compress_config.rate, Type, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
+        arguments += [compress_config.rate, type_symbol, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
     elif compress_config.mode == "set_accuracy" or compress_config.mode == "set_precision":
         arguments.append(compress_config.value)     
         
