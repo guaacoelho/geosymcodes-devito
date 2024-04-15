@@ -41,13 +41,13 @@ def iet_build(stree, **kwargs):
 
         elif i.is_Iteration:
             iteration_nodes = queues.pop(i)
-            if isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'forward':
+            if isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'write':
                 if ooc.compression:
                     iteration_nodes.append(Section("compress_temp"))
                 else:
                     iteration_nodes.append(Section("write_temp"))
                 time_iterators = i.sub_iterators
-            elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'gradient':
+            elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'read':
                 if ooc.compression:
                     # TODO: Move decompress section to the top (idx 0) and test
                     iteration_nodes.append(Section("decompress_temp"))

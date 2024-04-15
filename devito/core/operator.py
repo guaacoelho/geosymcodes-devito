@@ -447,8 +447,8 @@ class OutOfCoreConfig(OptOption):
                                   % type(field))
             
             # Mode check
-            if str(items[1]) != "forward" and str(items[1]) != "gradient":
-                raise ValueError("Second element of out of core options must be forward or gradient")
+            if str(items[1]) != "write" and str(items[1]) != "read":
+                raise ValueError("Second element of out of core options must be write or read")
             
         else:
             raise ValueError("Wrong type for out of core options")

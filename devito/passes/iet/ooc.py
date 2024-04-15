@@ -22,7 +22,7 @@ from devito.ir.support import (Interval, IntervalGroup, IterationSpace, Backward
 __all__ = ['ooc_build', 'ooc_efuncs']
 
 
-def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_forward, is_mpi, is_compression):
+def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_write, is_mpi, is_compression):
     """
     This method generates the function open_thread_files according to the operator used.
 
@@ -33,7 +33,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         i_symbol (Symbol): iterator symbol
         nthreads_dim (CustomDimension): dimension i from 0 to nthreads
         name_array (Array): Function name
-        is_forward (bool): True for the Forward operator; False for the Gradient operator
+        is_write (bool): True for the Forward operator; False for the Gradient operator
         is_mpi (bool): True for the use of MPI; False otherwise.
         is_compression (bool): True for the use of compression; False otherwise.
 
@@ -84,7 +84,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
     o_flags_comp_read = String("O_RDONLY")
     s_flags = String("S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH")        
     
-    if is_forward and is_compression:
+    if is_write and is_compression:
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
@@ -92,11 +92,11 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
-    elif is_forward and not is_compression:
+    elif is_write and not is_compression:
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, op_flags, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
-    elif not is_forward and is_compression:
+    elif not is_write and is_compression:
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
@@ -104,7 +104,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
-    elif not is_forward and not is_compression:
+    elif not is_write and not is_compression:
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, op_flags, s_flags], retobj=files_array[i_symbol]))   
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))    
@@ -174,12 +174,12 @@ def get_slices_build(spt_array, nthreads, metas_array, nthreads_dim, i_symbol, s
     
 
 
-def headers_build(is_forward, is_compression, is_mpi):
+def headers_build(is_write, is_compression, is_mpi):
     """
     Builds operator's headers
 
     Args:
-        is_forward (bool): True for the write mode; False for read mode
+        is_write (bool): True for the write mode; False for read mode
         is_compression (bool): True for the compression operator; False otherwise
         is_mpi (bool): True for MPI execution; False otherwise
 
@@ -188,11 +188,11 @@ def headers_build(is_forward, is_compression, is_mpi):
         includes (List): list with includes
     """
     _out_of_core_mpi_headers=[(("ifndef", "DPS"), ("DPS", "4"))]
-    _out_of_core_headers_forward=[("_GNU_SOURCE", ""),
+    _out_of_core_headers_write=[("_GNU_SOURCE", ""),
                                   (("ifndef", "NDISKS"), ("NDISKS", "8")), 
                                   (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_WRONLY | O_CREAT"), ("else", ),
                                    ("OPEN_FLAGS", "O_DIRECT | O_WRONLY | O_CREAT"))]
-    _out_of_core_headers_gradient=[("_GNU_SOURCE", ""),
+    _out_of_core_headers_read=[("_GNU_SOURCE", ""),
                                    (("ifndef", "NDISKS"), ("NDISKS", "8")), 
                                    (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_RDONLY"), ("else", ),
                                     ("OPEN_FLAGS", "O_DIRECT | O_RDONLY"))]
@@ -207,10 +207,10 @@ def headers_build(is_forward, is_compression, is_mpi):
     if is_compression:
         headers.extend(_out_of_core_compression_headers)
     else: 
-        if is_forward:
-            headers.extend(_out_of_core_headers_forward)
+        if is_write:
+            headers.extend(_out_of_core_headers_write)
         else:
-            headers.extend(_out_of_core_headers_gradient)
+            headers.extend(_out_of_core_headers_read)
 
         if is_mpi:
             headers.extend(_out_of_core_mpi_headers)
@@ -239,7 +239,7 @@ def ooc_efuncs(iet, **kwargs):
     if not isinstance(iet, EntryFunction):
         return iet, {}
            
-    is_forward = kwargs['options']['out-of-core'].mode == 'forward'
+    is_write = kwargs['options']['out-of-core'].mode == 'write'
     is_mpi = kwargs['options']['mpi']
     is_compression = kwargs['options']['out-of-core'].compression
     efuncs = []
@@ -255,7 +255,7 @@ def ooc_efuncs(iet, **kwargs):
     files_array = Array(name='files', dimensions=[nthreads_dim], dtype=np.int32)
     metas_array = Array(name='metas', dimensions=[nthreads_dim], dtype=np.int32)
 
-    if is_compression and not is_forward:
+    if is_compression and not is_write:
         spt_array = Array(name='spt', dimensions=[nthreads_dim], dtype=np.int32)
         slices_size = PointerArray(name='slices_size', dimensions=[nthreads_dim], 
                                    array=Array(name='slices_size', dimensions=[nthreads_dim], dtype=size_t), ignoreDefinition=True)
@@ -267,7 +267,7 @@ def ooc_efuncs(iet, **kwargs):
         mapper[get_slices_call] = new_get_slices_call
 
     open_threads_callable = open_threads_build(nthreads, files_array, metas_array, i_symbol,
-                                             nthreads_dim, name_array, is_forward, 
+                                             nthreads_dim, name_array, is_write, 
                                              is_mpi, is_compression)
     efuncs.append(open_threads_callable)   
     for call in calls:
@@ -277,7 +277,7 @@ def ooc_efuncs(iet, **kwargs):
     
     iet = Transformer(mapper).visit(iet)   
     
-    headers, includes = headers_build(is_forward, is_compression, is_mpi)
+    headers, includes = headers_build(is_write, is_compression, is_mpi)
     return iet, {'efuncs': efuncs, "headers": headers, "includes": includes}
 
 
@@ -319,7 +319,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
         raise ValueError("Out of core currently does not support MPI and compression working togheter")
     
     funcs_dict = dict((func.name, func) for func in funcs)
-    is_forward = out_of_core == 'forward'
+    is_write = out_of_core == 'write'
     time_iterator = time_iterators[0]
 
     ######## Dimension and symbol for iteration spaces ########
@@ -347,7 +347,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
 
     ######## Build open section ########
     open_section = open_build(files_dict, counters_dict, metas_array, spt_array, offset_array,
-                             nthreads_dim, nthreads, is_forward, i_symbol, ooc_compression, slices_size)
+                             nthreads_dim, nthreads, is_write, i_symbol, ooc_compression, slices_size)
 
     ######## Build func_size var ########
     float_size = Symbol(name="float_size", dtype=np.uint64)
@@ -363,11 +363,11 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
 
     if ooc_compression:                     
         ######## Build compress/decompress section ########
-        compress_or_decompress_build(files_dict, metas_array, iet_body, is_forward, funcs_dict, nthreads,
+        compress_or_decompress_build(files_dict, metas_array, iet_body, is_write, funcs_dict, nthreads,
                                      time_iterators, spt_array, offset_array, ooc_compression, slices_size) 
     else:
         ######## Build write/read section ########    
-        write_or_read_build(iet_body, is_forward, nthreads, files_dict, func_sizes_symb_dict, funcs_dict,
+        write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_symb_dict, funcs_dict,
                             time_iterator, counters_dict, is_mpi)
     
     
@@ -382,7 +382,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     iet_body.append(close_section)
     
     ######## Free slices memory ########
-    if ooc_compression and not is_forward:
+    if ooc_compression and not is_write:
         close_slices = close_slices_build(nthreads, i_symbol, slices_size, nthreads_dim)
         iet_body.append(close_slices)
         iet_body.append(Call(name="free", arguments=[(String(r"slices_size"))]))
@@ -390,7 +390,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     return iet_body
 
 
-def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, offset_array, nthreads_dim, nthreads, is_forward, i_symbol, ooc_compression, slices_size):
+def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, offset_array, nthreads_dim, nthreads, is_write, i_symbol, ooc_compression, slices_size):
     """
     This method builds open section for both Forward and Gradient operators.
     
@@ -402,7 +402,7 @@ def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, of
         offset_array (Array): offset array, for compression
         nthreads_dim (CustomDimension): dimension from 0 to nthreads 
         nthreads (NThreads): number of threads
-        is_forward (bool): True for the Forward operator; False for the Gradient operator
+        is_write (bool): True for the Forward operator; False for the Gradient operator
         i_symbol (Symbol): iterator symbol
         ooc_compression (CompressionConfig): object representing compression settings
         slices_size (PointerArray): 2d-array of slices
@@ -414,12 +414,12 @@ def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, of
     # Build conditional
     # Regular Forward or Gradient
     arrays = [file_array for file_array in files_array_dict.values()] 
-    if not ooc_compression and not is_forward:
+    if not ooc_compression and not is_write:
         arrays.extend(counters_array for counters_array in counters_array_dict.values())
     # Compression Forward or Compression Gradient
     if ooc_compression:
         arrays.append(metas_array)
-    if ooc_compression and not is_forward:
+    if ooc_compression and not is_write:
         arrays.extend([spt_array, offset_array]) 
 
     arrays_cond = ooc_array_alloc_check(arrays) 
@@ -436,7 +436,7 @@ def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, of
     body = [arrays_cond, *open_threads_calls]
     
     # Additional initialization for Gradient operators
-    if not is_forward and not ooc_compression:
+    if not is_write and not ooc_compression:
         # Regular
         counters_init = []
         interval_group = IntervalGroup((Interval(nthreads_dim, 0, nthreads)))
@@ -447,7 +447,7 @@ def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, of
         open_iteration_grad = Iteration(counters_init, nthreads_dim, nthreads-1)
         body.append(open_iteration_grad)
     
-    elif not is_forward and ooc_compression:
+    elif not is_write and ooc_compression:
         # Compression
         get_slices_size = Call(name='get_slices_size_temp', arguments=[String(r"metas_vec"), String(r"spt_vec"), nthreads], 
                                retobj=Pointer(name='slices_size', dtype=POINTER(POINTER(size_t)), ignoreDefinition=True))
@@ -483,7 +483,7 @@ def func_size_build(func_stencil, func_size, float_size):
     return func_size_exp
 
 
-def compress_or_decompress_build(files_dict, metas_array, iet_body, is_forward, funcs_dict, nthreads, time_iterators, spt_array, offset_array, ooc_compression, slices_size):
+def compress_or_decompress_build(files_dict, metas_array, iet_body, is_write, funcs_dict, nthreads, time_iterators, spt_array, offset_array, ooc_compression, slices_size):
     """
     This function decides if it is either a compression or a decompression
 
@@ -491,7 +491,7 @@ def compress_or_decompress_build(files_dict, metas_array, iet_body, is_forward, 
         files_dict (Dictonary): dict with arrays of files
         metas_dict (Dictonary): dict with arrays of metadata
         iet_body (List): IET body nodes
-        is_forward (bool): if True, it is forward. It is gradient otherwise
+        is_write (bool): if True, it is write. It is read otherwise
         funcs_dict (Dictonary): dict with Functions defined by user for Operator
         nthreads (NThreads): number of threads
         time_iterators (tuple): time iterator indexes
@@ -517,7 +517,7 @@ def compress_or_decompress_build(files_dict, metas_array, iet_body, is_forward, 
     tid_eq = IREq(tid, Mod(i_symbol, nthreads))
     c_tid_eq = ClusterizedEq(tid_eq, ispace=ispace)
     
-    if is_forward:
+    if is_write:
         ooc_section = compress_build(files_array, metas_array, func_stencil, i_symbol, pragma,
                                      func_size_dim, tid, c_tid_eq, ispace, time_iterators[0], ooc_compression)
         temp_name = "compress_temp"
@@ -678,14 +678,14 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
     
     return Section("decompress", decompress_section)
 
-def write_or_read_build(iet_body, is_forward, nthreads, files_dict, func_sizes_symb_dict, funcs_dict, t0, counters_dict, is_mpi):
+def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_symb_dict, funcs_dict, t0, counters_dict, is_mpi):
     """
     Builds the read or write section of the operator, depending on the out_of_core mode.
     Replaces the temporary section at the end of the time iteration by the read or write section.   
 
     Args:
         iet_body (List): list of IET nodes 
-        is_forward (bool): True for the Forward operator; False for the Gradient operator
+        is_write (bool): True for the Forward operator; False for the Gradient operator
         nthreads (NThreads): symbol of number of threads
         files_dict (Dictonary): dict with arrays of files
         func_sizes_symb_dict (Dictonary): dict with Function sizes symbols
@@ -696,14 +696,14 @@ def write_or_read_build(iet_body, is_forward, nthreads, files_dict, func_sizes_s
 
     """
     io_body=[]
-    if is_forward:
+    if is_write:
         temp_name = "write_temp"
         name = "write"
         for func in funcs_dict:
             func_write = write_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func], t0, is_mpi)
             io_body.append(func_write)
         
-    else: # gradient
+    else: # read
         temp_name = "read_temp"
         name = "read"
         for func in funcs_dict:
@@ -716,7 +716,7 @@ def write_or_read_build(iet_body, is_forward, nthreads, files_dict, func_sizes_s
 
 def write_build(nthreads, files_array, func_size, func_stencil, t0, is_mpi):
     """
-    This method inteds to code gradient.c write section.
+    This method inteds to code read.c write section.
     Obs: maybe the desciption of the variables should be better    
 
     Args:
@@ -764,7 +764,7 @@ def write_build(nthreads, files_array, func_size, func_stencil, t0, is_mpi):
 
 def read_build(nthreads, files_array, func_size, func_stencil, t0, counters):
     """
-    This method inteds to code gradient.c read section.
+    This method inteds to code read.c read section.
     Obs: maybe the desciption of the variables should be better    
 
     Args:
@@ -825,7 +825,7 @@ def read_build(nthreads, files_array, func_size, func_stencil, t0, counters):
 
 def close_build(nthreads, files_dict, i_symbol, nthreads_dim):
     """
-    This method inteds to ls gradient.c close section.
+    This method inteds to ls read.c close section.
     Obs: maybe the desciption of the variables should be better
 
     Args:
@@ -851,7 +851,7 @@ def close_build(nthreads, files_dict, i_symbol, nthreads_dim):
 
 def close_slices_build(nthreads, i_symbol, slices_size, nthreads_dim):
     """
-    This method inteds to ls gradient.c free slices_size array memory.
+    This method inteds to ls read.c free slices_size array memory.
     Obs: code creates variables that already exists on the previous code 
 
     Args:
