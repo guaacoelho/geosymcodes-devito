@@ -5,7 +5,7 @@ from devito.types import Global, SpaceDimension, TimeDimension
 from sympy import Or
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias', 'array_alloc_check', 'get_first_space_dim_index', 'update_iet', 'get_compress_mode_function']
+           'maybe_alias', 'ooc_array_alloc_check', 'get_first_space_dim_index', 'ooc_update_iet', 'ooc_get_compress_mode_function']
 
 
 class IterationTree(tuple):
@@ -159,7 +159,7 @@ def maybe_alias(obj, candidate):
 
 def ooc_array_alloc_check(arrays):
     """
-    Checks wether malloc worked for array allocation.
+    Checks wether malloc worked for array allocation in ooc build.
 
     Args:
         arrays (list): list of Array (files or counters)
@@ -219,8 +219,8 @@ def ooc_update_iet(iet_body, temp_name, ooc_section):
     iet_body[time_index] = transformed_iet 
 
 def ooc_get_compress_mode_function(compress_config, zfp, field, type_symbol):
-    """_summary_
-
+    """
+    Returns the propper compress function according to a specific compress mode
     Args:
         compress_config (CompressionConfig): object with compress settings
         zfp (Pointer): pointer to a zfp_stream type
