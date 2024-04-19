@@ -9,6 +9,7 @@ from devito.operator import Operator
 from devito.tools import as_tuple, is_integer, timed_pass
 from devito.types import NThreads, TimeFunction
 
+
 __all__ = ['CoreOperator', 'CustomOperator',
            # Optimization options
            'ParTile', 'OutOfCoreConfig', 'CompressionConfig']
@@ -428,33 +429,56 @@ class CompressionConfig(OptOption):
         return obj
 
 class OutOfCoreConfig(OptOption):
-    def __new__(cls, items):
-        if not items:
-            return None
-        elif isinstance(items, (list, tuple)):
-            n = len(items)
-
-            #Tuple format check
-            if n != 2 and n != 3:
-                raise ValueError("Out of core options must be a two or three elements tuple: (function, mode, compression)")
-           
-            # Fields check
-            #TODO: All TimeFunctions?
-            fields = items[0] if isinstance(items[0], list) else [items[0]]
-            for field in fields:
-                if not isinstance(field, TimeFunction):
-                    raise ValueError("First element of out of core options must be TimeFunctions, got %s"
-                                  % type(field))
-            
-            # Mode check
-            if str(items[1]) != "write" and str(items[1]) != "read":
-                raise ValueError("Second element of out of core options must be write or read")
-            
-        else:
-            raise ValueError("Wrong type for out of core options")
+    def _validate_functions(functions):
+        if not functions:
+            raise ValueError("Missing functions argument in out of core configuration")
         
+        funcs = functions if isinstance(functions, list) else [functions]
+        for function in funcs:
+            if not isinstance(function, TimeFunction):
+                raise ValueError("Out of core functions must be TimeFunction, got %s"
+                                % type(function))
+        return funcs
+    
+    def _validate_mode(mode):
+        if str(mode) != "write" and str(mode) != "read":
+            raise ValueError("Out of core mode must be write or read")
+
+        return mode
+    
+    def _validate_compression(cc):
+        if isinstance(cc, CompressionConfig):
+            return cc
+        else:
+            return False
+        
+    def _validate_ndisks(ndisks):
+        if not ndisks:
+            return 1
+        elif not isinstance(ndisks, int) or ndisks < 1:
+            raise ValueError("Out of core number of disks (ndisks) must be a positive integer")
+        return ndisks
+    
+    def _validate_dps(dps):
+        if not dps:
+            return 1
+        elif not isinstance(dps, int) or dps < 1:
+            raise ValueError("Out of core number of disks per socket (dps) must be a positive integer")
+        return dps
+    
+    def _validate_path(path):
+        if not path:
+             raise ValueError("Out of core data path must be provided")
+        elif not isinstance(path, str):
+            raise ValueError("Out of core data path must be a string")
+        return path
+    
+    def __new__(cls, **kwargs):        
         obj = super().__new__(cls)
-        obj.functions = fields
-        obj.mode = items[1]
-        obj.compression = False if n < 3 else items[2]
+        obj.functions = cls._validate_functions(kwargs.get('functions'))  
+        obj.mode = cls._validate_mode(kwargs.get('mode'))
+        obj.compression = cls._validate_compression(kwargs.get('compression'))
+        obj.ndisks = cls._validate_ndisks(kwargs.get('ndisks'))
+        obj.dps = cls._validate_dps(kwargs.get('dps'))
+        obj.path = cls._validate_path(kwargs.get('path'))         
         return obj

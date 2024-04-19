@@ -22,7 +22,7 @@ from devito.ir.support import (Interval, IntervalGroup, IterationSpace, Backward
 __all__ = ['ooc_build', 'ooc_efuncs']
 
 
-def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_write, is_mpi, is_compression):
+def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_write, is_mpi, is_compression, io_path):
     """
     This method generates the function open_thread_files according to the operator used.
 
@@ -72,12 +72,12 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="MPI_Comm_rank", arguments=[Macro("MPI_COMM_WORLD"), Byref(myrank)]))
         it_nodes.append(Expression(c_socket_eq, None, True)) 
         it_nodes.append(Expression(c_nvme_id_eq, None, True)) 
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String("\"data/nvme%d/socket_%d_thread_%d.data\""), nvme_id, myrank, i_symbol]))
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/socket_%d_thread_%d.data\""), nvme_id, myrank, i_symbol]))
     else:
         nvme_id_eq = IREq(nvme_id, Mod(i_symbol, ndisks))
         c_nvme_id_eq = ClusterizedEq(nvme_id_eq, ispace=None)        
         it_nodes.append(Expression(c_nvme_id_eq, None, True))   
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String("\"data/nvme%d/%s_vec_%d.bin\""), nvme_id, stencil_name_array, i_symbol]))        
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/%s_vec_%d.bin\""), nvme_id, stencil_name_array, i_symbol]))        
     
     op_flags = String("OPEN_FLAGS")
     o_flags_comp_write = String("O_WRONLY | O_CREAT | O_TRUNC")
@@ -88,7 +88,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String("\"data/nvme%d/thread_%d.data\""), nvme_id, i_symbol]))
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/thread_%d.data\""), nvme_id, i_symbol]))
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
@@ -100,7 +100,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String("\"data/nvme%d/thread_%d.data\""), nvme_id, i_symbol]))
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/thread_%d.data\""), nvme_id, i_symbol]))
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
@@ -174,7 +174,7 @@ def get_slices_build(spt_array, nthreads, metas_array, nthreads_dim, i_symbol, s
     
 
 
-def headers_build(is_write, is_compression, is_mpi):
+def headers_build(is_write, is_compression, is_mpi, ooc_config):
     """
     Builds operator's headers
 
@@ -187,16 +187,18 @@ def headers_build(is_write, is_compression, is_mpi):
         headers (List) : list with header defines
         includes (List): list with includes
     """
-    _out_of_core_mpi_headers=[(("ifndef", "DPS"), ("DPS", "4"))]
+    ndisks = str(ooc_config.ndisks)
+    dps = str(ooc_config.dps)
+    _out_of_core_mpi_headers=[(("ifndef", "DPS"), ("DPS", dps))]
     _out_of_core_headers_write=[("_GNU_SOURCE", ""),
-                                  (("ifndef", "NDISKS"), ("NDISKS", "8")), 
+                                  (("ifndef", "NDISKS"), ("NDISKS", ndisks)), 
                                   (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_WRONLY | O_CREAT"), ("else", ),
                                    ("OPEN_FLAGS", "O_DIRECT | O_WRONLY | O_CREAT"))]
     _out_of_core_headers_read=[("_GNU_SOURCE", ""),
-                                   (("ifndef", "NDISKS"), ("NDISKS", "8")), 
+                                   (("ifndef", "NDISKS"), ("NDISKS", ndisks)), 
                                    (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_RDONLY"), ("else", ),
                                     ("OPEN_FLAGS", "O_DIRECT | O_RDONLY"))]
-    _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", "8")),]
+    _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", ndisks)),]
     _out_of_core_includes = ["fcntl.h", "stdio.h", "unistd.h"]
     _out_of_core_mpi_includes = ["mpi.h"]
     _out_of_core_compression_includes = ["zfp.h"]
@@ -238,10 +240,11 @@ def ooc_efuncs(iet, **kwargs):
     # Out of core built only in the EntryFunction
     if not isinstance(iet, EntryFunction):
         return iet, {}
-           
-    is_write = kwargs['options']['out-of-core'].mode == 'write'
+    
+    ooc_config = kwargs['options']['out-of-core']
+    is_write = ooc_config.mode == 'write'
     is_mpi = kwargs['options']['mpi']
-    is_compression = kwargs['options']['out-of-core'].compression
+    is_compression = ooc_config.compression
     efuncs = []
     mapper={}
     calls = FindNodes(Call).visit(iet)
@@ -268,7 +271,7 @@ def ooc_efuncs(iet, **kwargs):
 
     open_threads_callable = open_threads_build(nthreads, files_array, metas_array, i_symbol,
                                              nthreads_dim, name_array, is_write, 
-                                             is_mpi, is_compression)
+                                             is_mpi, is_compression, ooc_config.path)
     efuncs.append(open_threads_callable)   
     for call in calls:
         if call.name == 'open_thread_files_temp':
@@ -277,7 +280,7 @@ def ooc_efuncs(iet, **kwargs):
     
     iet = Transformer(mapper).visit(iet)   
     
-    headers, includes = headers_build(is_write, is_compression, is_mpi)
+    headers, includes = headers_build(is_write, is_compression, is_mpi, ooc_config)
     return iet, {'efuncs': efuncs, "headers": headers, "includes": includes}
 
 

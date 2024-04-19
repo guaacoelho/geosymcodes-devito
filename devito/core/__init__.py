@@ -11,7 +11,7 @@ from devito.core.gpu import (DeviceNoopOmpOperator, DeviceNoopAccOperator,
                              DeviceAdvOmpOperator, DeviceAdvAccOperator,
                              DeviceFsgOmpOperator, DeviceFsgAccOperator,
                              DeviceCustomOmpOperator, DeviceCustomAccOperator)
-from devito.core.operator import CompressionConfig
+from devito.core.operator import (OutOfCoreConfig, CompressionConfig)
 from devito.operator.registry import operator_registry
 
 
