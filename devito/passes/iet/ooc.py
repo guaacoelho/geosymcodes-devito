@@ -72,7 +72,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="MPI_Comm_rank", arguments=[Macro("MPI_COMM_WORLD"), Byref(myrank)]))
         it_nodes.append(Expression(c_socket_eq, None, True)) 
         it_nodes.append(Expression(c_nvme_id_eq, None, True)) 
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/socket_%d_thread_%d.data\""), nvme_id, myrank, i_symbol]))
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/socket_%d_%s_vec_%d.data\""), nvme_id, myrank, stencil_name_array, i_symbol]))
     else:
         nvme_id_eq = IREq(nvme_id, Mod(i_symbol, ndisks))
         c_nvme_id_eq = ClusterizedEq(nvme_id_eq, ispace=None)        
@@ -88,7 +88,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/thread_%d.data\""), nvme_id, i_symbol]))
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/%s_vec_%d.data\""), nvme_id, stencil_name_array, i_symbol]))
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
@@ -100,7 +100,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/thread_%d.data\""), nvme_id, i_symbol]))
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/%s_vec_%d.data\""), nvme_id, stencil_name_array, i_symbol]))
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
@@ -312,9 +312,6 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
         if func.save:
             raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
     
-    if ooc_compression and len(funcs) > 1:
-        raise ValueError("Multi Function currently does not support compression")
-    
     if is_mpi and len(funcs) > 1:
         raise ValueError("Multi Function currently does not support multi process")
 
@@ -341,16 +338,27 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
         counters_dict.update({func.name: counters_array})
 
     # Compression arrays
-    metas_array = Array(name='metas', dimensions=[nthreads_dim], dtype=np.int32)
-    spt_array = Array(name='spt', dimensions=[nthreads_dim], dtype=np.int32)
-    offset_array = Array(name='offset', dimensions=[nthreads_dim], dtype=off_t)
-    slices_size = PointerArray(name='slices_size', dimensions=(nthreads_dim, ), 
-                               array=Array(name='slices_size', dimensions=[nthreads_dim], dtype=size_t, ignoreDefinition=True),
+    metas_dict= dict()
+    spt_dict = dict()
+    offset_dict = dict()
+    slices_size_dict = dict()
+    for func in funcs:
+        metas_array = Array(name=func.name + '_metas', dimensions=[nthreads_dim], dtype=np.int32)
+        spt_array = Array(name=func.name + '_spt', dimensions=[nthreads_dim], dtype=np.int32)
+        offset_array = Array(name=func.name + '_offset', dimensions=[nthreads_dim], dtype=off_t)
+        slices_size = PointerArray(name=func.name + '_slices_size', dimensions=(nthreads_dim, ), 
+                               array=Array(name=func.name + '_slices_size', dimensions=[nthreads_dim], dtype=size_t, ignoreDefinition=True),
                                ignoreDefinition=True)
+        
+        metas_dict.update({func.name: metas_array})
+        spt_dict.update({func.name: spt_array})
+        offset_dict.update({func.name: offset_array})
+        slices_size_dict.update({func.name: slices_size})
+
 
     ######## Build open section ########
-    open_section = open_build(files_dict, counters_dict, metas_array, spt_array, offset_array,
-                             nthreads_dim, nthreads, is_write, i_symbol, ooc_compression, slices_size)
+    open_section = open_build(files_dict, counters_dict, metas_dict, spt_dict, offset_dict,
+                             slices_size_dict, nthreads_dim, nthreads, is_write, i_symbol, ooc_compression)
 
     ######## Build func_size var ########
     float_size = Symbol(name="float_size", dtype=np.uint64)
@@ -393,22 +401,22 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     return iet_body
 
 
-def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, offset_array, nthreads_dim, nthreads, is_write, i_symbol, ooc_compression, slices_size):
+def open_build(files_array_dict, counters_array_dict, metas_dict, spt_dict, offset_dict, slices_size_dict, nthreads_dim, nthreads, is_write, i_symbol, ooc_compression):
     """
     This method builds open section for both Forward and Gradient operators.
     
     Args:
         files_array_dict (Dictionary): dict with files array of each Function
         counters_array_dict (Dictionary): dict with counters array of each Function
-        metas_array (Array): metas array for compression
-        spt_array (Array): slices per thread array, for compression
-        offset_array (Array): offset array, for compression
+        metas_dict (Dictionary): dict with metas array of each Function, for compression
+        spt_dict (Dictionary): dict with slices per thread array of each Function, for compression
+        offset_dict (Dictionary): dict with offset array of each Function, for compression
+        slices_size_dict (PointerArray): dict with 2d-array of slices of each Function, for compression
         nthreads_dim (CustomDimension): dimension from 0 to nthreads 
         nthreads (NThreads): number of threads
         is_write (bool): True for the Forward operator; False for the Gradient operator
         i_symbol (Symbol): iterator symbol
         ooc_compression (CompressionConfig): object representing compression settings
-        slices_size (PointerArray): 2d-array of slices
 
     Returns:
         Section: open section
@@ -421,9 +429,10 @@ def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, of
         arrays.extend(counters_array for counters_array in counters_array_dict.values())
     # Compression Forward or Compression Gradient
     if ooc_compression:
-        arrays.append(metas_array)
+        arrays.extend(metas_array for metas_array in metas_dict.values())
     if ooc_compression and not is_write:
-        arrays.extend([spt_array, offset_array]) 
+        arrays.extend(spt_array for spt_array in spt_dict.values())
+        arrays.extend(offset_array for offset_array in offset_dict.values()) 
 
     arrays_cond = ooc_array_alloc_check(arrays) 
     
@@ -432,7 +441,7 @@ def open_build(files_array_dict, counters_array_dict, metas_array, spt_array, of
     for func_name in files_array_dict:
         func_args = [files_array_dict[func_name], nthreads, String('"{}"'.format(func_name))]
         if ooc_compression:
-            func_args.append(metas_array)
+            func_args.append(metas_dict[func_name])
         open_threads_calls.append(Call(name='open_thread_files_temp', arguments=func_args))
 
     # Open section body
