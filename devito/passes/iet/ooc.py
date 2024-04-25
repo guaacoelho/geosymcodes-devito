@@ -366,6 +366,9 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     float_size = Symbol(name="float_size", dtype=np.uint64)
     float_size_init = Call(name="sizeof", arguments=[String(r"float")], retobj=float_size)
 
+    #TODO: create a DEVITO zfp_type_float to avoid using strings
+    type_var = Symbol(name='type', dtype=zfp_type)
+    
     func_sizes_dict = {}
     func_sizes_symb_dict={}
     for func in funcs:
@@ -377,7 +380,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     if ooc_compression:                     
         ######## Build compress/decompress section ########
         compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, funcs_dict, nthreads,
-                                     time_iterators, spt_dict, offset_dict, ooc_compression, slices_size_dict) 
+                                     time_iterators, spt_dict, offset_dict, ooc_compression, slices_size_dict,type_var) 
     else:
         ######## Build write/read section ########    
         write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_symb_dict, funcs_dict,
@@ -390,6 +393,13 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     #TODO: Generate blank lines between sections
     for size_init in func_sizes_dict.values():
         iet_body.insert(0, size_init)
+        
+    if ooc_compression:
+        type_eq = IREq(type_var, String(r"zfp_type_float"))
+        c_type_eq = ClusterizedEq(type_eq, ispace=None)
+        type_eq = Expression(c_type_eq, None, True)
+        iet_body.insert(0, type_eq)
+           
     iet_body.insert(0, float_size_init)
     iet_body.insert(0, open_section)
     iet_body.append(close_section)
@@ -514,7 +524,7 @@ def func_size_build(func_stencil, func_size, float_size):
     return func_size_exp
 
 
-def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, funcs_dict, nthreads, time_iterators, spt_dict, offset_dict, ooc_compression, slices_dict):
+def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, funcs_dict, nthreads, time_iterators, spt_dict, offset_dict, ooc_compression, slices_dict, type_var):
     """
     This function decides if it is either a compression or a decompression
 
@@ -530,9 +540,8 @@ def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, fun
         offset_dict (Array): dict with arrays of offset
         ooc_compression (CompressionConfig): object with compression settings
         slices_dict (PointerArray): dict with 2d-arrays of slices for compression mode
+        type_var (Symbol): representation of zfp_type_float
     """
-    
-    # TODO: Temporary workaround, while compression mode supports only one Function
     
     sec_name = "compress" if is_write else "decompress"
     pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
@@ -551,21 +560,20 @@ def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, fun
         c_tid_eq = ClusterizedEq(tid_eq, ispace=ispace)
         
         if is_write:
-            type_eq, io_iteration = compress_build(files_dict[func], metas_dict[func], funcs_dict[func], i_symbol, pragma,
-                                         func_size_dim, tid, c_tid_eq, ispace, time_iterators[0], ooc_compression)
+            io_iteration = compress_build(files_dict[func], metas_dict[func], funcs_dict[func], i_symbol, pragma,
+                                         func_size_dim, tid, c_tid_eq, ispace, time_iterators[0], ooc_compression, type_var)
         else:
-            type_eq, io_iteration = decompress_build(files_dict[func], funcs_dict[func], i_symbol, pragma, func_size_dim, tid, c_tid_eq,
-                                ispace, time_iterators[-1], spt_dict[func], offset_dict[func], ooc_compression, slices_dict[func])
+            io_iteration = decompress_build(files_dict[func], funcs_dict[func], i_symbol, pragma, func_size_dim, tid, c_tid_eq,
+                                ispace, time_iterators[-1], spt_dict[func], offset_dict[func], ooc_compression, slices_dict[func], type_var)
         
-        eqs.append(type_eq)
         iterations.append(io_iteration)
-        
-    io_section = Section(sec_name, eqs + iterations)
+    
+    io_section = Section(sec_name, iterations)
 
     ooc_update_iet(iet_body, sec_name + "_temp", io_section)      
     
 
-def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, func_size_dim, tid, c_tid_eq, ispace, t0, ooc_compression):
+def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, func_size_dim, tid, c_tid_eq, ispace, t0, ooc_compression, type_var):
     """
     This function generates compress section.
 
@@ -581,6 +589,7 @@ def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, fun
         ispace (IterationSpace): space of iteration
         t0 (ModuloDimension): time iterator index for compression
         ooc_compression (CompressionConfig): object with compression settings
+        type_var(Symbol): representation of zfp_type_float
 
     Returns:
         Section: compress section
@@ -589,10 +598,6 @@ def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, fun
     func_size1 = func_stencil.symbolic_shape[1]    
     it_nodes=[]
     if_nodes=[]
-    
-    type_var = Symbol(name='type', dtype=zfp_type)
-    type_eq = IREq(type_var, String(r"zfp_type_float"))
-    c_type_eq = ClusterizedEq(type_eq, ispace=ispace)
     
     it_nodes.append(Expression(c_tid_eq, None, True))
     
@@ -623,11 +628,10 @@ def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, fun
     it_nodes.append(Call(name="stream_close", arguments=[stream]))
     it_nodes.append(Call(name="free", arguments=[buffer]))
     
-    type_eq = Expression(c_type_eq, None, True)
     io_iteration = Iteration(it_nodes, func_size_dim, func_size1-1, pragmas=[pragma])
-    return type_eq, io_iteration
+    return io_iteration
 
-def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim, tid, c_tid_eq, ispace, t2, spt_array, offset_array, ooc_compression, slices_size):
+def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim, tid, c_tid_eq, ispace, t2, spt_array, offset_array, ooc_compression, slices_size, type_var):
     """
     This function generates decompress section.
 
@@ -645,6 +649,7 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
         offset_array (Array): array of offset
         ooc_compression (CompressionConfig): object with compression settings
         slices_size (PointerArray): 2d-array of slices
+        type_var(Symbol): representation of zfp_type_float
 
     Returns:
         Section: decompress section
@@ -657,7 +662,6 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
     
     it_nodes.append(Expression(c_tid_eq, None, True))
     
-    type_var = Symbol(name='type', dtype=zfp_type)
     field = Pointer(name="field", dtype=POINTER(zfp_field))
     zfp = Pointer(name="zfp", dtype=POINTER(zfp_stream))
     bufsize = Symbol(name="bufsize", dtype=off_t)
@@ -665,10 +669,6 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
     stream = Pointer(name="stream", dtype=POINTER(bitstream))
     slice_symbol = Symbol(name="slice", dtype=np.int32)
     ret = Symbol(name="ret", dtype=np.int32)
-    
-    # type_eq = IREq(type_var, Symbol(name="zfp_type_float", dtype=ct.c_int))
-    type_eq = IREq(type_var, String(r"zfp_type_float"))
-    c_type_eq = ClusterizedEq(type_eq, ispace=ispace)
     
     it_nodes.append(Call(name="zfp_field_2d", arguments=[func_stencil[t2,i_symbol], type_var, func_stencil.symbolic_shape[2], func_stencil.symbolic_shape[3]], retobj=field))
     it_nodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
@@ -710,10 +710,9 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
     c_new_spt_eq = ClusterizedEq(new_spt_eq, ispace=ispace)
     it_nodes.append(Increment(c_new_spt_eq))
     
-    type_eq = Expression(c_type_eq, None, True)
     io_iteration = Iteration(it_nodes, func_size_dim, func_size1-1, direction=Backward, pragmas=[pragma])
     
-    return type_eq, io_iteration
+    return io_iteration
 
 def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_symb_dict, funcs_dict, t0, counters_dict, is_mpi):
     """
