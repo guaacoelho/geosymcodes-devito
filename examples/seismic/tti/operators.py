@@ -1,5 +1,5 @@
 from devito import (Eq, Operator, Function, TimeFunction, NODE, Inc, solve,
-                    cos, sin, sqrt)
+                    cos, sin, sqrt, OutOfCoreConfig, CompressionConfig)
 from examples.seismic import PointSource, Receiver
 
 
