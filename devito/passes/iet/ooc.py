@@ -182,6 +182,7 @@ def headers_build(is_write, is_compression, is_mpi, ooc_config):
         is_write (bool): True for the write mode; False for read mode
         is_compression (bool): True for the compression operator; False otherwise
         is_mpi (bool): True for MPI execution; False otherwise
+        ooc_config (OutOfCoreConfig): ooc configuration
 
     Returns:
         headers (List) : list with header defines
@@ -313,9 +314,6 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     for func in funcs:
         if func.save:
             raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
-    
-    if is_mpi and len(funcs) > 1:
-        raise ValueError("Multi Function currently does not support multi process")
 
     if is_mpi and ooc_compression:
         raise ValueError("Out of core currently does not support MPI and compression working togheter")
