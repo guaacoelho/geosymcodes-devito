@@ -1,3 +1,5 @@
+import os
+
 from collections.abc import Iterable
 
 from devito.core.autotuning import autotune
@@ -473,12 +475,55 @@ class OutOfCoreConfig(OptOption):
             raise ValueError("Out of core data path must be a string")
         return path
     
+    def _get_env_vars():
+        #OutOfCoreConfig parameters
+        env_mode = os.environ.get('DEVITO_OOC_MODE')
+        
+        env_ndisks = os.environ.get('DEVITO_OOC_NDISKS')
+        if env_ndisks and env_ndisks.isdigit():
+            env_ndisks = int(env_ndisks)
+        
+        env_dps = os.environ.get('DEVITO_OOC_DPS')
+        if env_dps and env_dps.isdigit():
+            env_dps = int(env_dps)
+            
+        env_path = os.environ.get('DEVITO_OOC_PATH')
+        
+        #CompressionConfig parameters
+        env_comp_mode = os.environ.get('DEVITO_OOC_COMPRESSION_MODE')
+        
+        env_comp_rate = os.environ.get('DEVITO_OOC_COMPRESSION_RATE')
+        if env_comp_rate:
+            try:
+                env_comp_rate = float(env_comp_rate)
+            except ValueError:
+                raise ValueError("DEVITO_OOC_COMPRESSION_RATE must be a float-like representation, got %s instead" % env_comp_rate)
+        
+        env_comp_value = os.environ.get('DEVITO_OOC_COMPRESSION_VALUE')
+        if env_comp_value:
+            try:
+                is_set_precision = env_comp_mode and env_comp_mode == "set_precision"
+                env_comp_value = int(env_comp_value) if is_set_precision else float(env_comp_value)
+            except ValueError:
+                raise ValueError("DEVITO_OOC_COMPRESSION_VALUE must be an int (for set_precision mode) or float-like representation, got %s instead"
+                                 % env_comp_value)
+        
+        env_compression_config = CompressionConfig(mode=env_comp_mode, RATE=env_comp_rate, value=env_comp_value) if env_comp_mode else None
+        
+        return env_mode, env_ndisks, env_dps, env_path, env_compression_config
+    
     def __new__(cls, **kwargs):        
         obj = super().__new__(cls)
+        
+        env_mode, env_ndisks, env_dps, env_path, env_compression_config = cls._get_env_vars()
+        
+        kcomp = kwargs.get('compression')
+        comp = kcomp if kcomp is not None else env_compression_config
+        
         obj.functions = cls._validate_functions(kwargs.get('functions'))  
-        obj.mode = cls._validate_mode(kwargs.get('mode'))
-        obj.compression = cls._validate_compression(kwargs.get('compression'))
-        obj.ndisks = cls._validate_ndisks(kwargs.get('ndisks'))
-        obj.dps = cls._validate_dps(kwargs.get('dps'))
-        obj.path = cls._validate_path(kwargs.get('path'))         
+        obj.mode = cls._validate_mode(kwargs.get('mode') or env_mode)
+        obj.compression = cls._validate_compression(comp)
+        obj.ndisks = cls._validate_ndisks(kwargs.get('ndisks') or env_ndisks)
+        obj.dps = cls._validate_dps(kwargs.get('dps') or env_dps)
+        obj.path = cls._validate_path(kwargs.get('path') or env_path)         
         return obj
