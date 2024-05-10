@@ -475,6 +475,9 @@ class OutOfCoreConfig(OptOption):
             raise ValueError("Out of core data path must be a string")
         return path
     
+    def _validade_odirect(odirect):
+        return bool(odirect)
+    
     def _get_env_vars():
         #OutOfCoreConfig parameters
         env_mode = os.environ.get('DEVITO_OOC_MODE')
@@ -488,6 +491,8 @@ class OutOfCoreConfig(OptOption):
             env_dps = int(env_dps)
             
         env_path = os.environ.get('DEVITO_OOC_PATH')
+        
+        env_odirect = os.environ.get('DEVITO_OOC_ODIRECT')
         
         #CompressionConfig parameters
         env_comp_mode = os.environ.get('DEVITO_OOC_COMPRESSION_MODE')
@@ -510,20 +515,24 @@ class OutOfCoreConfig(OptOption):
         
         env_compression_config = CompressionConfig(mode=env_comp_mode, RATE=env_comp_rate, value=env_comp_value) if env_comp_mode else None
         
-        return env_mode, env_ndisks, env_dps, env_path, env_compression_config
+        return env_mode, env_ndisks, env_dps, env_path, env_odirect, env_compression_config
     
     def __new__(cls, **kwargs):        
         obj = super().__new__(cls)
         
-        env_mode, env_ndisks, env_dps, env_path, env_compression_config = cls._get_env_vars()
+        env_mode, env_ndisks, env_dps, env_path, env_odirect, env_compression_config = cls._get_env_vars()
         
         kcomp = kwargs.get('compression')
         comp = kcomp if kcomp is not None else env_compression_config
+        
+        kodirect = kwargs.get('odirect')
+        odirect = kodirect if kodirect is not None else env_odirect
         
         obj.functions = cls._validate_functions(kwargs.get('functions'))  
         obj.mode = cls._validate_mode(kwargs.get('mode') or env_mode)
         obj.compression = cls._validate_compression(comp)
         obj.ndisks = cls._validate_ndisks(kwargs.get('ndisks') or env_ndisks)
         obj.dps = cls._validate_dps(kwargs.get('dps') or env_dps)
-        obj.path = cls._validate_path(kwargs.get('path') or env_path)         
+        obj.path = cls._validate_path(kwargs.get('path') or env_path)
+        obj.odirect = cls._validade_odirect(odirect)         
         return obj

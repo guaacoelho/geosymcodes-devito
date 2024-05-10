@@ -190,15 +190,15 @@ def headers_build(is_write, is_compression, is_mpi, ooc_config):
     """
     ndisks = str(ooc_config.ndisks)
     dps = str(ooc_config.dps)
+    odirect = "O_DIRECT | " if ooc_config.odirect else str()
+    
     _out_of_core_mpi_headers=[(("ifndef", "DPS"), ("DPS", dps))]
     _out_of_core_headers_write=[("_GNU_SOURCE", ""),
                                   (("ifndef", "NDISKS"), ("NDISKS", ndisks)), 
-                                  (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_WRONLY | O_CREAT"), ("else", ),
-                                   ("OPEN_FLAGS", "O_DIRECT | O_WRONLY | O_CREAT"))]
+                                  ("OPEN_FLAGS", odirect + "O_WRONLY | O_CREAT")]
     _out_of_core_headers_read=[("_GNU_SOURCE", ""),
-                                   (("ifndef", "NDISKS"), ("NDISKS", ndisks)), 
-                                   (("ifdef", "CACHE"), ("OPEN_FLAGS", "O_RDONLY"), ("else", ),
-                                    ("OPEN_FLAGS", "O_DIRECT | O_RDONLY"))]
+                                   (("ifndef", "NDISKS"), ("NDISKS", ndisks)),
+                                   ("OPEN_FLAGS", odirect + "O_RDONLY")]
     _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", ndisks)),]
     _out_of_core_includes = ["fcntl.h", "stdio.h", "unistd.h"]
     _out_of_core_mpi_includes = ["mpi.h"]
