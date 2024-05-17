@@ -1,9 +1,12 @@
 import numpy as np
 import cgen
+import os
+import socket as sc
 from sympy import Mod, Not
 from pdb import set_trace
 from ctypes import c_int32, POINTER, c_int, c_void_p
 from functools import reduce 
+from mpi4py import MPI
 
 from devito.tools import timed_pass
 from devito.passes.iet.engine import iet_pass
@@ -44,9 +47,14 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
     it_nodes=[]
     if_nodes=[]
     
-    # TODO: initialize char name[100]
-    nvme_id = Symbol(name="nvme_id", dtype=np.int32)
-    ndisks = Symbol(name="NDISKS", dtype=np.int32, ignoreDefinition=True)
+    pid = os.getppid() if is_mpi else os.getpid()
+    exec_id = os.getlogin() + "_" + str(pid)
+    exec_id_path = f"{io_path}/{exec_id}"
+    
+    rank = MPI.COMM_WORLD.Get_rank() if is_mpi else 0
+    
+    if rank == 0 and not os.path.exists(exec_id_path):
+        os.makedirs(exec_id_path)
 
     name_dim = [CustomDimension(name="name_dim", symbolic_size=100)]
     stencil_name_array = Array(name='stencil', dimensions=name_dim, dtype=np.byte)        
@@ -62,22 +70,16 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
 
         dps = Symbol(name="DPS", dtype=np.int32, ignoreDefinition=True)
         socket = Symbol(name="socket", dtype=np.int32)
-        
-        nvme_id_eq = IREq(nvme_id, Mod(i_symbol, ndisks)+socket)        
+              
         socket_eq = IREq(socket, Mod(myrank, 2) * dps)
-        c_socket_eq = ClusterizedEq(socket_eq, ispace=None)
-        c_nvme_id_eq = ClusterizedEq(nvme_id_eq, ispace=None)                  
+        c_socket_eq = ClusterizedEq(socket_eq, ispace=None)                
          
         it_nodes.append(Expression(ClusterizedEq(mr_eq), None, True))
         it_nodes.append(Call(name="MPI_Comm_rank", arguments=[Macro("MPI_COMM_WORLD"), Byref(myrank)]))
-        it_nodes.append(Expression(c_socket_eq, None, True)) 
-        it_nodes.append(Expression(c_nvme_id_eq, None, True)) 
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/socket_%d_%s_vec_%d.bin\""), nvme_id, myrank, stencil_name_array, i_symbol]))
-    else:
-        nvme_id_eq = IREq(nvme_id, Mod(i_symbol, ndisks))
-        c_nvme_id_eq = ClusterizedEq(nvme_id_eq, ispace=None)        
-        it_nodes.append(Expression(c_nvme_id_eq, None, True))   
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/%s_vec_%d.bin\""), nvme_id, stencil_name_array, i_symbol]))        
+        it_nodes.append(Expression(c_socket_eq, None, True))  
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{exec_id_path}/socket_%d_%s_vec_%d.bin\""), myrank, stencil_name_array, i_symbol]))
+    else:   
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{exec_id_path}/%s_vec_%d.bin\""), stencil_name_array, i_symbol]))        
     
     op_flags = String("OPEN_FLAGS")
     o_flags_comp_write = String("O_WRONLY | O_CREAT | O_TRUNC")
@@ -88,7 +90,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/%s_vec_%d.meta\""), nvme_id, stencil_name_array, i_symbol]))
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{exec_id_path}/%s_vec_%d.meta\""), stencil_name_array, i_symbol]))
         it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
@@ -100,7 +102,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
-        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{io_path}/nvme%d/%s_vec_%d.meta\""), nvme_id, stencil_name_array, i_symbol]))
+        it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{exec_id_path}/%s_vec_%d.meta\""), stencil_name_array, i_symbol]))
         it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
@@ -188,18 +190,12 @@ def headers_build(is_write, is_compression, is_mpi, ooc_config):
         headers (List) : list with header defines
         includes (List): list with includes
     """
-    ndisks = str(ooc_config.ndisks)
-    dps = str(ooc_config.dps)
     odirect = "O_DIRECT | " if ooc_config.odirect else str()
     
-    _out_of_core_mpi_headers=[(("ifndef", "DPS"), ("DPS", dps))]
-    _out_of_core_headers_write=[("_GNU_SOURCE", ""),
-                                  (("ifndef", "NDISKS"), ("NDISKS", ndisks)), 
-                                  ("OPEN_FLAGS", odirect + "O_WRONLY | O_CREAT")]
-    _out_of_core_headers_read=[("_GNU_SOURCE", ""),
-                                   (("ifndef", "NDISKS"), ("NDISKS", ndisks)),
-                                   ("OPEN_FLAGS", odirect + "O_RDONLY")]
-    _out_of_core_compression_headers=[(("ifndef", "NDISKS"), ("NDISKS", ndisks)),]
+    open_flags = "O_WRONLY | O_CREAT" if is_write else "O_RDONLY"
+    
+    _out_of_core_headers=[("_GNU_SOURCE", ""),
+                          ("OPEN_FLAGS", odirect + open_flags)]
     _out_of_core_includes = ["fcntl.h", "stdio.h", "unistd.h"]
     _out_of_core_mpi_includes = ["mpi.h"]
     _out_of_core_compression_includes = ["zfp.h"]
@@ -207,16 +203,8 @@ def headers_build(is_write, is_compression, is_mpi, ooc_config):
 
     # Headers
     headers=[]
-    if is_compression:
-        headers.extend(_out_of_core_compression_headers)
-    else: 
-        if is_write:
-            headers.extend(_out_of_core_headers_write)
-        else:
-            headers.extend(_out_of_core_headers_read)
-
-        if is_mpi:
-            headers.extend(_out_of_core_mpi_headers)
+    if not is_compression: 
+        headers.extend(_out_of_core_headers)
 
     # Includes
     includes=[]

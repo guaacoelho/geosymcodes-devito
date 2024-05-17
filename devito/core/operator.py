@@ -453,20 +453,6 @@ class OutOfCoreConfig(OptOption):
             return cc
         else:
             return False
-        
-    def _validate_ndisks(ndisks):
-        if not ndisks:
-            return 1
-        elif not isinstance(ndisks, int) or ndisks < 1:
-            raise ValueError("Out of core number of disks (ndisks) must be a positive integer")
-        return ndisks
-    
-    def _validate_dps(dps):
-        if not dps:
-            return 1
-        elif not isinstance(dps, int) or dps < 1:
-            raise ValueError("Out of core number of disks per socket (dps) must be a positive integer")
-        return dps
     
     def _validate_path(path):
         if not path:
@@ -481,18 +467,11 @@ class OutOfCoreConfig(OptOption):
     def _get_env_vars():
         #OutOfCoreConfig parameters
         env_mode = os.environ.get('DEVITO_OOC_MODE')
-        
-        env_ndisks = os.environ.get('DEVITO_OOC_NDISKS')
-        if env_ndisks and env_ndisks.isdigit():
-            env_ndisks = int(env_ndisks)
-        
-        env_dps = os.environ.get('DEVITO_OOC_DPS')
-        if env_dps and env_dps.isdigit():
-            env_dps = int(env_dps)
             
         env_path = os.environ.get('DEVITO_OOC_PATH')
         
         env_odirect = os.environ.get('DEVITO_OOC_ODIRECT')
+        
         
         #CompressionConfig parameters
         env_comp_mode = os.environ.get('DEVITO_OOC_COMPRESSION_MODE')
@@ -515,12 +494,12 @@ class OutOfCoreConfig(OptOption):
         
         env_compression_config = CompressionConfig(mode=env_comp_mode, RATE=env_comp_rate, value=env_comp_value) if env_comp_mode else None
         
-        return env_mode, env_ndisks, env_dps, env_path, env_odirect, env_compression_config
+        return env_mode, env_path, env_odirect, env_compression_config
     
     def __new__(cls, **kwargs):        
         obj = super().__new__(cls)
         
-        env_mode, env_ndisks, env_dps, env_path, env_odirect, env_compression_config = cls._get_env_vars()
+        env_mode, env_path, env_odirect, env_compression_config = cls._get_env_vars()
         
         kcomp = kwargs.get('compression')
         comp = kcomp if kcomp is not None else env_compression_config
@@ -531,8 +510,6 @@ class OutOfCoreConfig(OptOption):
         obj.functions = cls._validate_functions(kwargs.get('functions'))  
         obj.mode = cls._validate_mode(kwargs.get('mode') or env_mode)
         obj.compression = cls._validate_compression(comp)
-        obj.ndisks = cls._validate_ndisks(kwargs.get('ndisks') or env_ndisks)
-        obj.dps = cls._validate_dps(kwargs.get('dps') or env_dps)
         obj.path = cls._validate_path(kwargs.get('path') or env_path)
         obj.odirect = cls._validade_odirect(odirect)         
         return obj
