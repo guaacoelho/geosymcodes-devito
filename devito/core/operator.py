@@ -9,7 +9,7 @@ from devito.mpi.routines import mpi_registry
 from devito.parameters import configuration
 from devito.operator import Operator
 from devito.tools import as_tuple, is_integer, timed_pass
-from devito.types import NThreads, TimeFunction
+from devito.types import NThreads, TimeFunction, VectorTimeFunction, TensorTimeFunction
 
 
 __all__ = ['CoreOperator', 'CustomOperator',
@@ -436,11 +436,20 @@ class OutOfCoreConfig(OptOption):
             raise ValueError("Missing functions argument in out of core configuration")
         
         funcs = functions if isinstance(functions, list) else [functions]
+        
+        # Unpack VectorTimeFunction and TensorTimeFunction
+        final_funcs=[]
         for function in funcs:
+            if isinstance(function, (VectorTimeFunction, TensorTimeFunction)):
+                final_funcs.extend(function)
+            else:
+                final_funcs.append(function)
+        
+        for function in final_funcs:
             if not isinstance(function, TimeFunction):
-                raise ValueError("Out of core functions must be TimeFunction, got %s"
-                                % type(function))
-        return funcs
+                raise ValueError("Out of core functions must be TimeFunction instances, got %s instead" % type(function))
+
+        return final_funcs
     
     def _validate_mode(mode):
         if str(mode) != "write" and str(mode) != "read":
