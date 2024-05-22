@@ -13,7 +13,7 @@ def iet_build(stree, **kwargs):
     """
     Construct an Iteration/Expression tree(IET) from a ScheduleTree.
     """
-    ooc = kwargs['options']['out-of-core']
+    dswap = kwargs['options']['disk-swap']
     time_iterators = None
 
     nsections = 0
@@ -22,9 +22,9 @@ def iet_build(stree, **kwargs):
         if i == stree:
             # We hit this handle at the very end of the visit
             iet_body = queues.pop(i)
-            if(ooc):
-                from devito.passes.iet import ooc_build
-                iet_body = ooc_build(iet_body, ooc, kwargs['sregistry'].nthreads, kwargs['options']['mpi'], kwargs['language'], time_iterators)               
+            if(dswap):
+                from devito.passes.iet import disk_swap_build
+                iet_body = disk_swap_build(iet_body, dswap, kwargs['sregistry'].nthreads, kwargs['options']['mpi'], kwargs['language'], time_iterators)               
             return List(body=iet_body)
 
         elif i.is_Exprs:
@@ -41,14 +41,14 @@ def iet_build(stree, **kwargs):
 
         elif i.is_Iteration:
             iteration_nodes = queues.pop(i)
-            if isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'write':
-                if ooc.compression:
+            if isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'write':
+                if dswap.compression:
                     iteration_nodes.append(Section("compress_temp"))
                 else:
                     iteration_nodes.append(Section("write_temp"))
                 time_iterators = i.sub_iterators
-            elif isinstance(i.dim, TimeDimension) and ooc and ooc.mode == 'read':
-                if ooc.compression:
+            elif isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'read':
+                if dswap.compression:
                     # TODO: Move decompress section to the top (idx 0) and test
                     iteration_nodes.append(Section("decompress_temp"))
                 else:

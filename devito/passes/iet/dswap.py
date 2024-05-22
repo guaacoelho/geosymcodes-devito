@@ -16,13 +16,13 @@ from devito.types import (CustomDimension, Array, Symbol, Pointer, TimeDimension
                           NThreads, off_t, zfp_type, size_t, zfp_field, bitstream, zfp_stream, Eq)
 from devito.ir import (Expression, Increment, Iteration, List, Conditional, Call, Conditional, CallableBody, Callable,
                             Section, FindNodes, Transformer, Return, Definition, EntryFunction)
-from devito.ir.iet.utils import ooc_array_alloc_check, ooc_update_iet, ooc_get_compress_mode_function
+from devito.ir.iet.utils import dswap_array_alloc_check, dswap_update_iet, dswap_get_compress_mode_function
 from devito.ir.equations import IREq, LoweredEq, ClusterizedEq
 from devito.ir.support import (Interval, IntervalGroup, IterationSpace, Backward)
 
 
 
-__all__ = ['ooc_build', 'ooc_efuncs']
+__all__ = ['disk_swap_build', 'disk_swap_efuncs']
 
 
 def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_write, is_mpi, is_compression, io_path):
@@ -176,7 +176,7 @@ def get_slices_build(spt_array, nthreads, metas_array, nthreads_dim, i_symbol, s
     
 
 
-def headers_build(is_write, is_compression, is_mpi, ooc_config):
+def headers_build(is_write, is_compression, is_mpi, dswap_config):
     """
     Builds operator's headers
 
@@ -184,40 +184,40 @@ def headers_build(is_write, is_compression, is_mpi, ooc_config):
         is_write (bool): True for the write mode; False for read mode
         is_compression (bool): True for the compression operator; False otherwise
         is_mpi (bool): True for MPI execution; False otherwise
-        ooc_config (OutOfCoreConfig): ooc configuration
+        dswap_config (DiskSwapConfig): dswap configuration
 
     Returns:
         headers (List) : list with header defines
         includes (List): list with includes
     """
-    odirect = "O_DIRECT | " if ooc_config.odirect else str()
+    odirect = "O_DIRECT | " if dswap_config.odirect else str()
     
     open_flags = "O_WRONLY | O_CREAT" if is_write else "O_RDONLY"
     
-    _out_of_core_headers=[("_GNU_SOURCE", ""),
+    _disk_swap_headers=[("_GNU_SOURCE", ""),
                           ("OPEN_FLAGS", odirect + open_flags)]
-    _out_of_core_includes = ["fcntl.h", "stdio.h", "unistd.h"]
-    _out_of_core_mpi_includes = ["mpi.h"]
-    _out_of_core_compression_includes = ["zfp.h"]
+    _disk_swap_includes = ["fcntl.h", "stdio.h", "unistd.h"]
+    _disk_swap_mpi_includes = ["mpi.h"]
+    _disk_swap_compression_includes = ["zfp.h"]
 
 
     # Headers
     headers=[]
     if not is_compression: 
-        headers.extend(_out_of_core_headers)
+        headers.extend(_disk_swap_headers)
 
     # Includes
     includes=[]
-    includes.extend(_out_of_core_includes)
-    if is_mpi: includes.extend(_out_of_core_mpi_includes)
-    if is_compression: includes.extend(_out_of_core_compression_includes)
+    includes.extend(_disk_swap_includes)
+    if is_mpi: includes.extend(_disk_swap_mpi_includes)
+    if is_compression: includes.extend(_disk_swap_compression_includes)
 
     return headers, includes
 
 @iet_pass
-def ooc_efuncs(iet, **kwargs):
+def disk_swap_efuncs(iet, **kwargs):
     """
-    Orchestrates out of core efuncs build
+    Orchestrates disk swap efuncs build
 
     Args:
         iet (IterationTree): Iteration/Expression tree
@@ -226,14 +226,14 @@ def ooc_efuncs(iet, **kwargs):
         iet : transformed Iteration/Expression tree
         object: iet updated attributes 
     """
-    # Out of core built only in the EntryFunction
+    # Disk swap built only in the EntryFunction
     if not isinstance(iet, EntryFunction):
         return iet, {}
     
-    ooc_config = kwargs['options']['out-of-core']
-    is_write = ooc_config.mode == 'write'
+    dswap_config = kwargs['options']['disk-swap']
+    is_write = dswap_config.mode == 'write'
     is_mpi = kwargs['options']['mpi']
-    is_compression = ooc_config.compression
+    is_compression = dswap_config.compression
     efuncs = []
     mapper={}
     calls = FindNodes(Call).visit(iet)
@@ -262,7 +262,7 @@ def ooc_efuncs(iet, **kwargs):
 
     open_threads_callable = open_threads_build(nthreads, files_array, metas_array, i_symbol,
                                              nthreads_dim, name_array, is_write, 
-                                             is_mpi, is_compression, ooc_config.path)
+                                             is_mpi, is_compression, dswap_config.path)
     efuncs.append(open_threads_callable)   
     for call in calls:
         if call.name == 'open_thread_files_temp':
@@ -271,19 +271,19 @@ def ooc_efuncs(iet, **kwargs):
     
     iet = Transformer(mapper).visit(iet)   
     
-    headers, includes = headers_build(is_write, is_compression, is_mpi, ooc_config)
+    headers, includes = headers_build(is_write, is_compression, is_mpi, dswap_config)
     return iet, {'efuncs': efuncs, "headers": headers, "includes": includes}
 
 
 
-@timed_pass(name='ooc_build')
-def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
+@timed_pass(name='disk_swap_build')
+def disk_swap_build(iet_body, dswap, nt, is_mpi, language, time_iterators):
     """
-    This private method builds a iet_body (list) with out-of-core nodes.
+    This private method builds a iet_body (list) with disk-swap nodes.
 
     Args:
         iet_body (List): a list of nodes
-        ooc (Object): out of core parameters
+        dswap (Object): disk swap parameters
         nt (NThreads): symbol representing nthreads parameter of OpenMP
         is_mpi (bool): MPI execution flag
         language (str): language set for the operator (C, openmp or openacc)
@@ -292,22 +292,22 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     Returns:
         List : iet_body is a list of nodes
     """
-    funcs = ooc.functions
-    out_of_core = ooc.mode
-    ooc_compression = ooc.compression    
+    funcs = dswap.functions
+    disk_swap = dswap.mode
+    dswap_compression = dswap.compression    
 
     if language != 'openmp':
-       raise ValueError("Out of core requires OpenMP. Language parameter must be openmp, got %s" % language)
+       raise ValueError("Disk swap requires OpenMP. Language parameter must be openmp, got %s" % language)
     
     for func in funcs:
         if func.save:
-            raise ValueError("Out of core incompatible with TimeFunction save functionality on %s" % func.name)
+            raise ValueError("Disk swap incompatible with TimeFunction save functionality on %s" % func.name)
 
-    if is_mpi and ooc_compression:
-        raise ValueError("Out of core currently does not support MPI and compression working togheter")
+    if is_mpi and dswap_compression:
+        raise ValueError("Disk swap currently does not support MPI and compression working togheter")
     
     funcs_dict = dict((func.name, func) for func in funcs)
-    is_write = out_of_core == 'write'
+    is_write = disk_swap == 'write'
     time_iterator = time_iterators[0]
 
     ######## Dimension and symbol for iteration spaces ########
@@ -346,7 +346,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
 
     ######## Build open section ########
     open_section = open_build(files_dict, counters_dict, metas_dict, spt_dict, offset_dict,
-                             slices_size_dict, nthreads_dim, nthreads, is_write, i_symbol, ooc_compression)
+                             slices_size_dict, nthreads_dim, nthreads, is_write, i_symbol, dswap_compression)
 
     ######## Build func_size var ########
     float_size = Symbol(name="float_size", dtype=np.uint64)
@@ -363,10 +363,10 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
         func_sizes_dict.update({func.name: func_size_exp})
         func_sizes_symb_dict.update({func.name: func_size})
 
-    if ooc_compression:                     
+    if dswap_compression:                     
         ######## Build compress/decompress section ########
         compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, funcs_dict, nthreads,
-                                     time_iterators, spt_dict, offset_dict, ooc_compression, slices_size_dict,type_var) 
+                                     time_iterators, spt_dict, offset_dict, dswap_compression, slices_size_dict,type_var) 
     else:
         ######## Build write/read section ########    
         write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_symb_dict, funcs_dict,
@@ -380,7 +380,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     for size_init in func_sizes_dict.values():
         iet_body.insert(0, size_init)
         
-    if ooc_compression:
+    if dswap_compression:
         type_eq = IREq(type_var, String(r"zfp_type_float"))
         c_type_eq = ClusterizedEq(type_eq, ispace=None)
         type_eq = Expression(c_type_eq, None, True)
@@ -391,7 +391,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     iet_body.append(close_section)
     
     ######## Free slices memory ########
-    if ooc_compression and not is_write:
+    if dswap_compression and not is_write:
         close_slices = close_slices_build(nthreads, i_symbol, slices_size_dict, nthreads_dim)
         iet_body.append(close_slices)
         
@@ -401,7 +401,7 @@ def ooc_build(iet_body, ooc, nt, is_mpi, language, time_iterators):
     return iet_body
 
 
-def open_build(files_array_dict, counters_array_dict, metas_dict, spt_dict, offset_dict, slices_size_dict, nthreads_dim, nthreads, is_write, i_symbol, ooc_compression):
+def open_build(files_array_dict, counters_array_dict, metas_dict, spt_dict, offset_dict, slices_size_dict, nthreads_dim, nthreads, is_write, i_symbol, dswap_compression):
     """
     This method builds open section for both Forward and Gradient operators.
     
@@ -416,7 +416,7 @@ def open_build(files_array_dict, counters_array_dict, metas_dict, spt_dict, offs
         nthreads (NThreads): number of threads
         is_write (bool): True for the Forward operator; False for the Gradient operator
         i_symbol (Symbol): iterator symbol
-        ooc_compression (CompressionConfig): object representing compression settings
+        dswap_compression (CompressionConfig): object representing compression settings
 
     Returns:
         Section: open section
@@ -425,22 +425,22 @@ def open_build(files_array_dict, counters_array_dict, metas_dict, spt_dict, offs
     # Build conditional
     # Regular Forward or Gradient
     arrays = [file_array for file_array in files_array_dict.values()] 
-    if not ooc_compression and not is_write:
+    if not dswap_compression and not is_write:
         arrays.extend(counters_array for counters_array in counters_array_dict.values())
     # Compression Forward or Compression Gradient
-    if ooc_compression:
+    if dswap_compression:
         arrays.extend(metas_array for metas_array in metas_dict.values())
-    if ooc_compression and not is_write:
+    if dswap_compression and not is_write:
         arrays.extend(spt_array for spt_array in spt_dict.values())
         arrays.extend(offset_array for offset_array in offset_dict.values()) 
 
-    arrays_cond = ooc_array_alloc_check(arrays) 
+    arrays_cond = dswap_array_alloc_check(arrays) 
     
     #Call open_thread_files
     open_threads_calls = []
     for func_name in files_array_dict:
         func_args = [files_array_dict[func_name], nthreads, String('"{}"'.format(func_name))]
-        if ooc_compression:
+        if dswap_compression:
             func_args.append(metas_dict[func_name])
         open_threads_calls.append(Call(name='open_thread_files_temp', arguments=func_args))
 
@@ -448,7 +448,7 @@ def open_build(files_array_dict, counters_array_dict, metas_dict, spt_dict, offs
     body = [arrays_cond, *open_threads_calls]
     
     # Additional initialization for Gradient operators
-    if not is_write and not ooc_compression:
+    if not is_write and not dswap_compression:
         # Regular
         counters_init = []
         interval_group = IntervalGroup((Interval(nthreads_dim, 0, nthreads)))
@@ -459,7 +459,7 @@ def open_build(files_array_dict, counters_array_dict, metas_dict, spt_dict, offs
         open_iteration_grad = Iteration(counters_init, nthreads_dim, nthreads-1)
         body.append(open_iteration_grad)
     
-    elif not is_write and ooc_compression:
+    elif not is_write and dswap_compression:
         # Compression
         get_slices_calls=[]
         offset_inits=[]
@@ -510,7 +510,7 @@ def func_size_build(func_stencil, func_size, float_size):
     return func_size_exp
 
 
-def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, funcs_dict, nthreads, time_iterators, spt_dict, offset_dict, ooc_compression, slices_dict, type_var):
+def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, funcs_dict, nthreads, time_iterators, spt_dict, offset_dict, dswap_compression, slices_dict, type_var):
     """
     This function decides if it is either a compression or a decompression
 
@@ -524,7 +524,7 @@ def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, fun
         time_iterators (tuple): time iterator indexes
         spt_dict (Array): dict with arrays of slices per thread
         offset_dict (Array): dict with arrays of offset
-        ooc_compression (CompressionConfig): object with compression settings
+        dswap_compression (CompressionConfig): object with compression settings
         slices_dict (PointerArray): dict with 2d-arrays of slices for compression mode
         type_var (Symbol): representation of zfp_type_float
     """
@@ -547,19 +547,19 @@ def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, fun
         
         if is_write:
             io_iteration = compress_build(files_dict[func], metas_dict[func], funcs_dict[func], i_symbol, pragma,
-                                         func_size_dim, tid, c_tid_eq, ispace, time_iterators[0], ooc_compression, type_var)
+                                         func_size_dim, tid, c_tid_eq, ispace, time_iterators[0], dswap_compression, type_var)
         else:
             io_iteration = decompress_build(files_dict[func], funcs_dict[func], i_symbol, pragma, func_size_dim, tid, c_tid_eq,
-                                ispace, time_iterators[-1], spt_dict[func], offset_dict[func], ooc_compression, slices_dict[func], type_var)
+                                ispace, time_iterators[-1], spt_dict[func], offset_dict[func], dswap_compression, slices_dict[func], type_var)
         
         iterations.append(io_iteration)
     
     io_section = Section(sec_name, iterations)
 
-    ooc_update_iet(iet_body, sec_name + "_temp", io_section)      
+    dswap_update_iet(iet_body, sec_name + "_temp", io_section)      
     
 
-def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, func_size_dim, tid, c_tid_eq, ispace, t0, ooc_compression, type_var):
+def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, func_size_dim, tid, c_tid_eq, ispace, t0, dswap_compression, type_var):
     """
     This function generates compress section.
 
@@ -574,7 +574,7 @@ def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, fun
         c_tid_eq (ClusterizedEq): expression that defines tid --> int tid = i%nthreads
         ispace (IterationSpace): space of iteration
         t0 (ModuloDimension): time iterator index for compression
-        ooc_compression (CompressionConfig): object with compression settings
+        dswap_compression (CompressionConfig): object with compression settings
         type_var(Symbol): representation of zfp_type_float
 
     Returns:
@@ -596,7 +596,7 @@ def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, fun
     
     it_nodes.append(Call(name="zfp_field_2d", arguments=[func_stencil[t0,i_symbol], type_var, func_stencil.symbolic_shape[2], func_stencil.symbolic_shape[3]], retobj=field))
     it_nodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
-    it_nodes.append(ooc_get_compress_mode_function(ooc_compression, zfp, field, type_var))
+    it_nodes.append(dswap_get_compress_mode_function(dswap_compression, zfp, field, type_var))
     it_nodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
     it_nodes.append(Call(name="malloc", arguments=[bufsize], retobj=buffer))
     it_nodes.append(Call(name="stream_open", arguments=[buffer, bufsize], retobj=stream))
@@ -617,7 +617,7 @@ def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, fun
     io_iteration = Iteration(it_nodes, func_size_dim, func_size1-1, pragmas=[pragma])
     return io_iteration
 
-def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim, tid, c_tid_eq, ispace, t2, spt_array, offset_array, ooc_compression, slices_size, type_var):
+def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim, tid, c_tid_eq, ispace, t2, spt_array, offset_array, dswap_compression, slices_size, type_var):
     """
     This function generates decompress section.
 
@@ -633,7 +633,7 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
         t2 (ModuloDimension): time iterator index for compression
         spt_array (Array): array of slices per thread
         offset_array (Array): array of offset
-        ooc_compression (CompressionConfig): object with compression settings
+        dswap_compression (CompressionConfig): object with compression settings
         slices_size (PointerArray): 2d-array of slices
         type_var(Symbol): representation of zfp_type_float
 
@@ -658,7 +658,7 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
     
     it_nodes.append(Call(name="zfp_field_2d", arguments=[func_stencil[t2,i_symbol], type_var, func_stencil.symbolic_shape[2], func_stencil.symbolic_shape[3]], retobj=field))
     it_nodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
-    it_nodes.append(ooc_get_compress_mode_function(ooc_compression, zfp, field, type_var))
+    it_nodes.append(dswap_get_compress_mode_function(dswap_compression, zfp, field, type_var))
     it_nodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
     it_nodes.append(Call(name="malloc", arguments=[bufsize], retobj=buffer))
     it_nodes.append(Call(name="stream_open", arguments=[buffer, bufsize], retobj=stream))
@@ -702,7 +702,7 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
 
 def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_symb_dict, funcs_dict, t0, counters_dict, is_mpi):
     """
-    Builds the read or write section of the operator, depending on the out_of_core mode.
+    Builds the read or write section of the operator, depending on the disk_swap mode.
     Replaces the temporary section at the end of the time iteration by the read or write section.   
 
     Args:
@@ -733,7 +733,7 @@ def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_sym
             io_body.append(func_read)
           
     io_section = Section(name, io_body)
-    ooc_update_iet(iet_body, temp_name, io_section)     
+    dswap_update_iet(iet_body, temp_name, io_section)     
 
 
 def write_build(nthreads, files_array, func_size, func_stencil, t0, is_mpi):

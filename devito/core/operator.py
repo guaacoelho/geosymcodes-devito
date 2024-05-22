@@ -14,7 +14,7 @@ from devito.types import NThreads, TimeFunction, VectorTimeFunction, TensorTimeF
 
 __all__ = ['CoreOperator', 'CustomOperator',
            # Optimization options
-           'ParTile', 'OutOfCoreConfig', 'CompressionConfig']
+           'ParTile', 'DiskSwapConfig', 'CompressionConfig']
 
 
 class BasicOperator(Operator):
@@ -430,10 +430,10 @@ class CompressionConfig(OptOption):
         obj.mode = mode
         return obj
 
-class OutOfCoreConfig(OptOption):
+class DiskSwapConfig(OptOption):
     def _validate_functions(functions):
         if not functions:
-            raise ValueError("Missing functions argument in out of core configuration")
+            raise ValueError("Missing functions argument in disk swap configuration")
         
         funcs = functions if isinstance(functions, list) else [functions]
         
@@ -447,13 +447,13 @@ class OutOfCoreConfig(OptOption):
         
         for function in final_funcs:
             if not isinstance(function, TimeFunction):
-                raise ValueError("Out of core functions must be TimeFunction instances, got %s instead" % type(function))
+                raise ValueError("Disk swap functions must be TimeFunction instances, got %s instead" % type(function))
 
         return final_funcs
     
     def _validate_mode(mode):
         if str(mode) != "write" and str(mode) != "read":
-            raise ValueError("Out of core mode must be write or read")
+            raise ValueError("Disk swap mode must be write or read")
 
         return mode
     
@@ -465,40 +465,40 @@ class OutOfCoreConfig(OptOption):
     
     def _validate_path(path):
         if not path:
-             raise ValueError("Out of core data path must be provided")
+             raise ValueError("Disk swap data path must be provided")
         elif not isinstance(path, str):
-            raise ValueError("Out of core data path must be a string")
+            raise ValueError("Disk swap data path must be a string")
         return path
     
     def _validade_odirect(odirect):
         return bool(odirect)
     
     def _get_env_vars():
-        #OutOfCoreConfig parameters
-        env_mode = os.environ.get('DEVITO_OOC_MODE')
+        #DiskSwapConfig parameters
+        env_mode = os.environ.get('DEVITO_DSWAP_MODE')
             
-        env_path = os.environ.get('DEVITO_OOC_PATH')
+        env_path = os.environ.get('DEVITO_DSWAP_PATH')
         
-        env_odirect = os.environ.get('DEVITO_OOC_ODIRECT')
+        env_odirect = os.environ.get('DEVITO_DSWAP_ODIRECT')
         
         
         #CompressionConfig parameters
-        env_comp_mode = os.environ.get('DEVITO_OOC_COMPRESSION_MODE')
+        env_comp_mode = os.environ.get('DEVITO_DSWAP_COMPRESSION_MODE')
         
-        env_comp_rate = os.environ.get('DEVITO_OOC_COMPRESSION_RATE')
+        env_comp_rate = os.environ.get('DEVITO_DSWAP_COMPRESSION_RATE')
         if env_comp_rate:
             try:
                 env_comp_rate = float(env_comp_rate)
             except ValueError:
-                raise ValueError("DEVITO_OOC_COMPRESSION_RATE must be a float-like representation, got %s instead" % env_comp_rate)
+                raise ValueError("DEVITO_DSWAP_COMPRESSION_RATE must be a float-like representation, got %s instead" % env_comp_rate)
         
-        env_comp_value = os.environ.get('DEVITO_OOC_COMPRESSION_VALUE')
+        env_comp_value = os.environ.get('DEVITO_DSWAP_COMPRESSION_VALUE')
         if env_comp_value:
             try:
                 is_set_precision = env_comp_mode and env_comp_mode == "set_precision"
                 env_comp_value = int(env_comp_value) if is_set_precision else float(env_comp_value)
             except ValueError:
-                raise ValueError("DEVITO_OOC_COMPRESSION_VALUE must be an int (for set_precision mode) or float-like representation, got %s instead"
+                raise ValueError("DEVITO_DSWAP_COMPRESSION_VALUE must be an int (for set_precision mode) or float-like representation, got %s instead"
                                  % env_comp_value)
         
         env_compression_config = CompressionConfig(mode=env_comp_mode, RATE=env_comp_rate, value=env_comp_value) if env_comp_mode else None

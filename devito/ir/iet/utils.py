@@ -5,7 +5,7 @@ from devito.types import Global, SpaceDimension, TimeDimension
 from sympy import Or
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias', 'ooc_array_alloc_check', 'get_first_space_dim_index', 'ooc_update_iet', 'ooc_get_compress_mode_function']
+           'maybe_alias', 'dswap_array_alloc_check', 'get_first_space_dim_index', 'dswap_update_iet', 'dswap_get_compress_mode_function']
 
 
 class IterationTree(tuple):
@@ -157,9 +157,9 @@ def maybe_alias(obj, candidate):
 
     return False
 
-def ooc_array_alloc_check(arrays):
+def dswap_array_alloc_check(arrays):
     """
-    Checks wether malloc worked for array allocation in ooc build.
+    Checks wether malloc worked for array allocation in disk swap build.
 
     Args:
         arrays (list): list of Array (files or counters)
@@ -199,26 +199,26 @@ def get_first_space_dim_index(dimensions):
     
     return first_space_dim_index
 
-def ooc_update_iet(iet_body, temp_name, ooc_section):
+def dswap_update_iet(iet_body, temp_name, dswap_section):
     """
     This function substitute a temp section by a definitive section.
 
     Args:
         iet_body (List): IET body nodes
         temp_name (string): temp section name
-        ooc_section (Section): Read/Decompress or Write/Compress section
+        dswap_section (Section): Read/Decompress or Write/Compress section
     """
     
     sections = FindNodes(Section).visit(iet_body)
     temp_sec = next((section for section in sections if section.name == temp_name), None)
-    mapper={temp_sec: ooc_section}
+    mapper={temp_sec: dswap_section}
 
     time_index = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration)
                        and isinstance(node.dim, TimeDimension)), None)
     transformed_iet = Transformer(mapper).visit(iet_body[time_index])
     iet_body[time_index] = transformed_iet 
 
-def ooc_get_compress_mode_function(compress_config, zfp, field, type_symbol):
+def dswap_get_compress_mode_function(compress_config, zfp, field, type_symbol):
     """
     Returns the propper compress function according to a specific compress mode
     Args:

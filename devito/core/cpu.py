@@ -1,13 +1,13 @@
 from functools import partial
 
-from devito.core.operator import CoreOperator, CustomOperator, ParTile, OutOfCoreConfig
+from devito.core.operator import CoreOperator, CustomOperator, ParTile
 from devito.exceptions import InvalidOperator
 from devito.passes.equations import collect_derivatives
 from devito.passes.clusters import (Lift, blocking, buffering, cire, cse,
                                     factorize, fission, fuse, optimize_pows,
                                     optimize_hyperplanes)
 from devito.passes.iet import (CTarget, OmpTarget, avoid_denormals, linearize, mpiize,
-                               hoist_prodders, relax_incr_dimensions, ooc_efuncs)
+                               hoist_prodders, relax_incr_dimensions, disk_swap_efuncs)
 from devito.tools import timed_pass
 
 __all__ = ['Cpu64NoopCOperator', 'Cpu64NoopOmpOperator', 'Cpu64AdvCOperator',
@@ -27,7 +27,7 @@ class Cpu64OperatorMixin(object):
         o['mpi'] = oo.pop('mpi')
         o['parallel'] = o['openmp']  # Backwards compatibility
 
-        o['out-of-core'] = oo.pop('out-of-core', None)
+        o['disk-swap'] = oo.pop('disk-swap', None)
 
         # Buffering
         o['buf-async-degree'] = oo.pop('buf-async-degree', None)
@@ -173,9 +173,9 @@ class Cpu64AdvOperator(Cpu64OperatorMixin, CoreOperator):
         # Distributed-memory parallelism
         mpiize(graph, **kwargs)
 
-        # Out of Core
-        if kwargs['options']['out-of-core']:
-            ooc_efuncs(graph, **kwargs)
+        # Disk swap
+        if kwargs['options']['disk-swap']:
+            disk_swap_efuncs(graph, **kwargs)
 
         # Lower BlockDimensions so that blocks of arbitrary shape may be used
         relax_incr_dimensions(graph, **kwargs)

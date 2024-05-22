@@ -177,8 +177,8 @@ class Operator(Callable):
         # Python- (i.e., compile-) and C-level (i.e., run-time) performance
         profiler = create_profile('timers')
 
-        out_of_core = kwargs['options']['out-of-core']
-        if out_of_core: is_compression = out_of_core.compression 
+        disk_swap = kwargs['options']['disk-swap']
+        if disk_swap: is_compression = disk_swap.compression 
         else: is_compression = False
         is_mpi = kwargs['options']['mpi']
 
@@ -1015,7 +1015,7 @@ rcompile_registry = {
     'mpi': False,
     'linearize': False,
     'place-transfers': False,
-    'out-of-core': False
+    'disk-swap': False
 }
 
 
