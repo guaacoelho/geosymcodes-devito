@@ -115,7 +115,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
     if is_compression:            
         func_args.append(metas_array)
     
-    open_iteration = Iteration(it_nodes, nthreads_dim, nthreads)
+    open_iteration = Iteration(it_nodes, nthreads_dim, nthreads-1)
     
     body = CallableBody(open_iteration)
 
