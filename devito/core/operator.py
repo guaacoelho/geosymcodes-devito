@@ -469,9 +469,18 @@ class DiskSwapConfig(OptOption):
     def _validate_path(path):
         if not path:
              raise ValueError("Disk swap data path must be provided")
-        elif not isinstance(path, str):
-            raise ValueError("Disk swap data path must be a string")
-        return path
+        elif isinstance(path, str):
+            return path
+        else:
+            raise ValueError("Disk swap data path must be a string, got %s instead" % type(path))
+        
+    def _validate_folder(folder):
+        if not folder:
+             return None
+        elif isinstance(folder, str):
+            return folder
+        else:
+            raise ValueError("Disk swap data folder must be a string, got %s instead" % type(folder))
     
     def _validade_odirect(odirect):
         return bool(odirect)
@@ -481,6 +490,8 @@ class DiskSwapConfig(OptOption):
         env_mode = os.environ.get('DEVITO_DSWAP_MODE')
             
         env_path = os.environ.get('DEVITO_DSWAP_PATH')
+        
+        env_folder = os.environ.get('DEVITO_DSWAP_FOLDER')
         
         env_odirect = os.environ.get('DEVITO_DSWAP_ODIRECT')
         
@@ -506,12 +517,12 @@ class DiskSwapConfig(OptOption):
         
         env_compression_config = CompressionConfig(mode=env_comp_mode, RATE=env_comp_rate, value=env_comp_value) if env_comp_mode else None
         
-        return env_mode, env_path, env_odirect, env_compression_config
+        return env_mode, env_path, env_folder, env_odirect, env_compression_config
     
     def __new__(cls, **kwargs):        
         obj = super().__new__(cls)
         
-        env_mode, env_path, env_odirect, env_compression_config = cls._get_env_vars()
+        env_mode, env_path, env_folder, env_odirect, env_compression_config = cls._get_env_vars()
         
         kcomp = kwargs.get('compression')
         comp = kcomp if kcomp is not None else env_compression_config
@@ -523,5 +534,6 @@ class DiskSwapConfig(OptOption):
         obj.mode = cls._validate_mode(kwargs.get('mode') or env_mode)
         obj.compression = cls._validate_compression(comp)
         obj.path = cls._validate_path(kwargs.get('path') or env_path)
+        obj.folder = cls._validate_folder(kwargs.get('folder') or env_folder)
         obj.odirect = cls._validade_odirect(odirect)         
         return obj

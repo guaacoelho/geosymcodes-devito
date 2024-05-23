@@ -25,7 +25,7 @@ from devito.ir.support import (Interval, IntervalGroup, IterationSpace, Backward
 __all__ = ['disk_swap_build', 'disk_swap_efuncs']
 
 
-def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_write, is_mpi, is_compression, io_path):
+def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_write, is_mpi, is_compression, io_path, io_folder):
     """
     This method generates the function open_thread_files according to the operator used.
 
@@ -47,9 +47,15 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
     it_nodes=[]
     if_nodes=[]
     
-    pid = os.getppid() if is_mpi else os.getpid()
-    exec_id = os.getlogin() + "_" + str(pid)
-    exec_id_path = f"{io_path}/{exec_id}"
+    if io_folder:
+        exec_id_path = f"{io_path}/{io_folder}"
+    else:
+        try:
+            pid = os.getppid() if is_mpi else os.getpid()
+            exec_id = os.getlogin() + "_" + str(pid)
+            exec_id_path = f"{io_path}/{exec_id}"
+        except:
+            raise ValueError("Unable to get operating system login (os.getlogin()) or pid (os.getpid()) during folder creation. Please, provide a folder name for the output files.")
     
     rank = MPI.COMM_WORLD.Get_rank() if is_mpi else 0
     
@@ -262,7 +268,7 @@ def disk_swap_efuncs(iet, **kwargs):
 
     open_threads_callable = open_threads_build(nthreads, files_array, metas_array, i_symbol,
                                              nthreads_dim, name_array, is_write, 
-                                             is_mpi, is_compression, dswap_config.path)
+                                             is_mpi, is_compression, dswap_config.path, dswap_config.folder)
     efuncs.append(open_threads_callable)   
     for call in calls:
         if call.name == 'open_thread_files_temp':
