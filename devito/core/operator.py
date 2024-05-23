@@ -401,10 +401,10 @@ class CompressionConfig(OptOption):
     This class receives RATE, value and mode.
     
     mode must be one of the following options:
-        - set_rate: in this case, you must give RATE
-        - set_reversible
-        - set_accuracy: in this case you must give value as a tolerance
-        - set_precision: in this case, you must give value as a precision
+        - rate: in this case, you must give RATE
+        - lossless;
+        - accuracy: in this case you must give value as a tolerance
+        - precision: in this case, you must give value as a precision
     """
     
     from typing import Union
@@ -430,7 +430,7 @@ class CompressionConfig(OptOption):
         obj = super().__new__(cls)
         obj.rate = RATE
         obj.value = value
-        obj.mode = cls._methods_[method]
+        obj.method = cls._methods_[method]
         return obj
 
 class DiskSwapConfig(OptOption):

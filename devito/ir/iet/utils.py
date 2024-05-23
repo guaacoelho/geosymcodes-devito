@@ -232,9 +232,9 @@ def dswap_get_compress_mode_function(compress_config, zfp, field, type_symbol):
     """
     
     arguments = [zfp]
-    if compress_config.mode == "set_rate":
+    if compress_config.method == "set_rate":
         arguments += [compress_config.rate, type_symbol, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
-    elif compress_config.mode == "set_accuracy" or compress_config.mode == "set_precision":
+    elif compress_config.method == "set_accuracy" or compress_config.method == "set_precision":
         arguments.append(compress_config.value)     
         
-    return Call(name="zfp_stream_"+compress_config.mode, arguments=arguments)
+    return Call(name="zfp_stream_"+compress_config.method, arguments=arguments)
