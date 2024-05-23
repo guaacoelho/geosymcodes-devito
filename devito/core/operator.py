@@ -408,26 +408,29 @@ class CompressionConfig(OptOption):
     """
     
     from typing import Union
-    _modes_ = ('set_reversible', 'set_rate', 'set_precision', 'set_accuracy')
+    _methods_ = {'lossless': 'set_reversible', 'rate': 'set_rate', 'precision': 'set_precision', 'accuracy': 'set_accuracy'}
     
-    def __new__(cls, mode: str, RATE: Union[float, int, None]=None, value: Union[float, int, None]=None):
+    @classmethod
+    def _validate_params(cls, method, RATE, value):
+        if method not in cls._methods_:
+            raise Exception(f"mode must be one of the string options: {cls._methods_}")
+        else:
+            if method == 'rate' and (not isinstance(RATE, float) and not isinstance(RATE, int)):
+                raise TypeError("In case of rate method, RATE must be either float or int")
+            elif method == 'accuracy' and (not isinstance(value, float) and not isinstance(value, int)):
+                raise TypeError("In case of accuracy method, value must be float or int")
+            elif method == 'precision' and (not isinstance(value, int) or value <= 0):
+                raise TypeError("In case of precision method, value must be a positive int")
+    
+    def __new__(cls, method: str, RATE: Union[float, int, None]=None, value: Union[float, int, None]=None):
         
         # Error handling
-        if mode not in cls._modes_:
-            raise Exception(f"mode must be one of the string options: {cls._modes_}")
-        else:
-            if mode == 'set_rate' and (not isinstance(RATE, float) and not isinstance(RATE, int)):
-                raise TypeError("In case of set_rate, RATE must be either float or int")
-            elif mode == 'set_accuracy' and (not isinstance(value, float) and not isinstance(value, int)):
-                raise TypeError("In case of set_accuracy, value must be float or int")
-            elif mode == 'set_precision' and (not isinstance(value, int) or value <= 0):
-                raise TypeError("In case of set_precision, value must be a positive int")
-        # End error handling
+        cls._validate_params(method, RATE, value)
         
         obj = super().__new__(cls)
         obj.rate = RATE
         obj.value = value
-        obj.mode = mode
+        obj.mode = cls._methods_[method]
         return obj
 
 class DiskSwapConfig(OptOption):
