@@ -6,8 +6,9 @@ from devito.passes.equations import collect_derivatives
 from devito.passes.clusters import (Lift, blocking, buffering, cire, cse,
                                     factorize, fission, fuse, optimize_pows,
                                     optimize_hyperplanes)
-from devito.passes.iet import (CTarget, OmpTarget, avoid_denormals, linearize, mpiize,
-                               hoist_prodders, relax_incr_dimensions, disk_swap_efuncs)
+from devito.passes.iet import (CTarget, OmpTarget, avoid_denormals, linearize,
+                               mpiize, hoist_prodders, relax_incr_dimensions,
+                               disk_swap_efuncs, check_stability)
 from devito.tools import timed_pass
 
 __all__ = ['Cpu64NoopCOperator', 'Cpu64NoopOmpOperator', 'Cpu64AdvCOperator',
@@ -45,7 +46,9 @@ class Cpu64OperatorMixin(object):
         o['blocklazy'] = oo.pop('blocklazy', not o['blockeager'])
         o['blockrelax'] = oo.pop('blockrelax', cls.BLOCK_RELAX)
         o['skewing'] = oo.pop('skewing', False)
-        o['par-tile'] = ParTile(oo.pop('par-tile', False), default=16)
+        o['par-tile'] = ParTile(oo.pop('par-tile', False), default=16,
+                                sparse=oo.pop('par-tile-sparse', None),
+                                reduce=oo.pop('par-tile-reduce', None))
 
         # CIRE
         o['min-storage'] = oo.pop('min-storage', False)
@@ -65,13 +68,18 @@ class Cpu64OperatorMixin(object):
         # Distributed parallelism
         o['dist-drop-unwritten'] = oo.pop('dist-drop-unwritten', cls.DIST_DROP_UNWRITTEN)
 
-        # Misc
+        # Code generation options for derivatives
         o['expand'] = oo.pop('expand', cls.EXPAND)
-        o['optcomms'] = oo.pop('optcomms', True)
+        o['deriv-schedule'] = oo.pop('deriv-schedule', cls.DERIV_SCHEDULE)
+        o['deriv-unroll'] = oo.pop('deriv-unroll', False)
+
+        # Misc
+        o['opt-comms'] = oo.pop('opt-comms', True)
         o['linearize'] = oo.pop('linearize', False)
         o['mapify-reduce'] = oo.pop('mapify-reduce', cls.MAPIFY_REDUCE)
         o['index-mode'] = oo.pop('index-mode', cls.INDEX_MODE)
         o['place-transfers'] = oo.pop('place-transfers', True)
+        o['errctl'] = oo.pop('errctl', cls.ERRCTL)
 
         # Recognised but unused by the CPU backend
         oo.pop('par-disabled', None)
@@ -102,7 +110,6 @@ class Cpu64NoopOperator(Cpu64OperatorMixin, CoreOperator):
 
         # Distributed-memory parallelism
         mpiize(graph, **kwargs)
-        
         # Shared-memory parallelism
         if options['openmp']:
             parizer = cls._Target.Parizer(sregistry, options, platform, compiler)
@@ -168,7 +175,7 @@ class Cpu64AdvOperator(Cpu64OperatorMixin, CoreOperator):
         sregistry = kwargs['sregistry']
 
         # Flush denormal numbers
-        avoid_denormals(graph, platform=platform)
+        avoid_denormals(graph, **kwargs)
 
         # Distributed-memory parallelism
         mpiize(graph, **kwargs)
@@ -188,6 +195,9 @@ class Cpu64AdvOperator(Cpu64OperatorMixin, CoreOperator):
 
         # Misc optimizations
         hoist_prodders(graph)
+
+        # Perform error checking
+        check_stability(graph, **kwargs)
 
         # Symbol definitions
         cls._Target.DataManager(**kwargs).process(graph)
@@ -266,7 +276,7 @@ class Cpu64CustomOperator(Cpu64OperatorMixin, CustomOperator):
         parizer = cls._Target.Parizer(sregistry, options, platform, compiler)
 
         return {
-            'denormals': avoid_denormals,
+            'denormals': partial(avoid_denormals, **kwargs),
             'blocking': partial(relax_incr_dimensions, **kwargs),
             'parallel': parizer.make_parallel,
             'openmp': parizer.make_parallel,

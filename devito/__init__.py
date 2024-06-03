@@ -1,4 +1,5 @@
 from itertools import product
+from . import _version
 
 # Import the global `configuration` dict
 from devito.parameters import *  # noqa
@@ -22,7 +23,7 @@ from devito.operator import Operator  # noqa
 from devito.builtins import *  # noqa
 from devito.data.allocators import *  # noqa
 from devito.logger import error, warning, info, set_log_level  # noqa
-from devito.mpi import MPI  # noqa
+from devito.mpi import MPI, CustomTopology  # noqa
 try:
     from devito.checkpointing import DevitoCheckpoint, CheckpointOperator  # noqa
     from pyrevolve import Revolver
@@ -38,6 +39,9 @@ from devito.logger import logger_registry, _set_log_level  # noqa
 from devito.mpi.routines import mpi_registry
 from devito.operator import profiler_registry, operator_registry
 
+# Apply monkey-patching while we wait for our patches to be upstreamed and released
+from devito.mpatches import *  # noqa
+
 
 from ._version import get_versions  # noqa
 __version__ = get_versions()['version']
@@ -50,6 +54,7 @@ def reinit_compiler(val):
     """
     configuration['compiler'].__init__(suffix=configuration['compiler'].suffix,
                                        mpi=configuration['mpi'])
+    return val
 
 
 # Setup target platform and compiler
@@ -95,6 +100,9 @@ configuration.add('safe-math', 0, [0, 1], preprocessor=bool, callback=reinit_com
 # Enable/disable automatic padding for allocated data
 configuration.add('autopadding', False, [False, True])
 
+# Select target device
+configuration.add('deviceid', -1, preprocessor=int, impacts_jit=False)
+
 
 def autotune_callback(val):  # noqa
     if isinstance(val, str):
@@ -114,9 +122,10 @@ configuration.add('autotuning', 'off', accepted, callback=autotune_callback,
                   impacts_jit=False)
 
 # In develop-mode:
-# - Some optimizations may not be applied to the generated code.
-# - The compiler performs more type and value checking
-configuration.add('develop-mode', True, [False, True])
+# - The ALLOC_GUARD data allocator is used. This will trigger segfaults as soon
+#   as an out-of-bounds memory access is performed
+# - Some autoi-tuning optimizations are disabled
+configuration.add('develop-mode', False, [False, True])
 
 # Setup optimization level
 configuration.add('opt', 'advanced', list(operator_registry._accepted), deprecate='dle')
@@ -148,3 +157,6 @@ def mode_performance():
     # With the autotuner in `aggressive` mode, a more aggressive blocking strategy
     # which also tiles the innermost loop) is beneficial
     configuration['opt-options']['blockinner'] = True
+
+
+__version__ = _version.get_versions()['version']

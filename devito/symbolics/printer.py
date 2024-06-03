@@ -12,8 +12,9 @@ from sympy.printing.precedence import PRECEDENCE_VALUES, precedence
 from sympy.printing.c import C99CodePrinter
 
 from devito.arch.compiler import AOMPCompiler
-from devito.symbolics.inspection import has_integer_args
+from devito.symbolics.inspection import has_integer_args, sympy_dtype
 from devito.types import Array
+from devito.types.basic import AbstractFunction
 
 __all__ = ['ccode']
 
@@ -45,10 +46,12 @@ class CodePrinter(C99CodePrinter):
         return super().parenthesize(item, level, strict=strict)
 
     def _print_Function(self, expr):
-        # There exist no unknown Functions
-        if expr.func.__name__ not in self.known_functions:
-            self.known_functions[expr.func.__name__] = expr.func.__name__
-        return super()._print_Function(expr)
+        if isinstance(expr, AbstractFunction):
+            return str(expr)
+        else:
+            if expr.func.__name__ not in self.known_functions:
+                self.known_functions[expr.func.__name__] = expr.func.__name__
+            return super()._print_Function(expr)
 
     def _print_CondEq(self, expr):
         lhs = expr.lhs if not isinstance(expr.lhs, Array) else expr.lhs._C_name
@@ -89,6 +92,25 @@ class CodePrinter(C99CodePrinter):
         else:
             return '%d.0F/%d.0F' % (p, q)
 
+    def _print_math_func(self, expr, nest=False, known=None):
+        cls = type(expr)
+        name = cls.__name__
+        if name not in self._prec_funcs:
+            return super()._print_math_func(expr, nest=nest, known=known)
+
+        try:
+            cname = self.known_functions[name]
+        except KeyError:
+            return super()._print_math_func(expr, nest=nest, known=known)
+
+        dtype = sympy_dtype(expr)
+        if dtype is np.float32:
+            cname += 'f'
+
+        args = ', '.join((self._print(arg) for arg in expr.args))
+
+        return '%s(%s)' % (cname, args)
+
     def _print_Pow(self, expr):
         # Need to override because of issue #1627
         # E.g., (Pow(h_x, -1) AND h_x.dtype == np.float32) => 1.0F/h_x
@@ -104,6 +126,10 @@ class CodePrinter(C99CodePrinter):
         """Print a Mod as a C-like %-based operation."""
         args = ['(%s)' % self._print(a) for a in expr.args]
         return '%'.join(args)
+
+    def _print_Mul(self, expr):
+        term = super()._print_Mul(expr)
+        return term.replace("(-1)*", "-")
 
     def _print_Min(self, expr):
         if has_integer_args(*expr.args) and len(expr.args) == 2:
@@ -183,6 +209,10 @@ class CodePrinter(C99CodePrinter):
         indices = [self._print(i) for i in expr.params]
         return "%s->%s(%s)" % (expr.pointer, expr.call, ', '.join(indices))
 
+    def _print_CallFromComposite(self, expr):
+        indices = [self._print(i) for i in expr.params]
+        return "%s.%s(%s)" % (expr.pointer, expr.call, ', '.join(indices))
+
     def _print_FieldFromPointer(self, expr):
         return "%s->%s" % (expr.pointer, expr.field)
 
@@ -225,15 +255,31 @@ class CodePrinter(C99CodePrinter):
             func_name += 'f'
         return '%s(%s)' % (func_name, self._print(*expr.args))
 
+    def _print_DefFunction(self, expr):
+        arguments = [self._print(i) for i in expr.arguments]
+        if expr.template:
+            template = '<%s>' % ','.join([str(i) for i in expr.template])
+        else:
+            template = ''
+        return "%s%s(%s)" % (expr.name, template, ','.join(arguments))
+
+    _print_MathFunction = _print_DefFunction
+
     def _print_Fallback(self, expr):
         return expr.__str__()
 
-    _print_DefFunction = _print_Fallback
+    _print_Namespace = _print_Fallback
+    _print_Rvalue = _print_Fallback
     _print_MacroArgument = _print_Fallback
     _print_IndexedBase = _print_Fallback
     _print_IndexSum = _print_Fallback
-    _print_Keyword = _print_Fallback
+    _print_ReservedWord = _print_Fallback
     _print_Basic = _print_Fallback
+
+
+# Lifted from SymPy so that we go through our own `_print_math_func`
+for k in ('exp log sin cos tan ceiling floor').split():
+    setattr(CodePrinter, '_print_%s' % k, CodePrinter._print_math_func)
 
 
 # Always parenthesize IntDiv and InlineIf within expressions

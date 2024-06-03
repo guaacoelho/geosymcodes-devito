@@ -51,7 +51,8 @@ def autotune(operator, args, level, mode):
         # WARNING: `copies` keeps references to numpy arrays, which is required
         # to avoid garbage collection to kick in during autotuning and prematurely
         # free the shadow copies handed over to C-land
-        at_args.update({k: writes[k]._C_make_dataobj(v) for k, v in copies.items()})
+        at_args.update({k: writes[k]._C_make_dataobj(alias=writes[k], **copies)
+                        for k in copies})
 
     # Disable halo exchanges through MPI_PROC_NULL
     if mode in ['preemptive', 'destructive']:
@@ -122,7 +123,8 @@ def autotune(operator, args, level, mode):
             at_args.update(dict(run))
 
             # Drop run if not at least one block per thread
-            if not configuration['develop-mode'] and nblocks_per_thread.subs(at_args) < 1:
+            if not configuration['develop-mode'] and \
+                    nblocks_per_thread.subs(normalize_args(at_args)) < 1:
                 continue
 
             # Run the Operator
@@ -208,8 +210,9 @@ def init_time_bounds(stepper, at_args, args):
     else:
         at_args[dim.max_name] = at_args[dim.min_name] + options['squeezer']
         if dim.size_name in args:
-            # May need to shrink to avoid OOB accesses
-            at_args[dim.max_name] = min(at_args[dim.max_name], args[dim.max_name])
+            if not isinstance(args[dim.size_name], range):
+                # May need to shrink to avoid OOB accesses
+                at_args[dim.max_name] = min(at_args[dim.max_name], args[dim.max_name])
         if at_args[dim.min_name] > at_args[dim.max_name]:
             warning("too few time iterations; skipping")
             return False

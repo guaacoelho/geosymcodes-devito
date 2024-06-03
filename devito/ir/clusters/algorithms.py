@@ -6,15 +6,18 @@ import numpy as np
 import sympy
 
 from devito.exceptions import InvalidOperator
-from devito.ir.support import (Any, Backward, Forward, IterationSpace,
-                               PARALLEL_IF_ATOMIC, pull_dims)
+from devito.finite_differences.elementary import Max, Min
+from devito.ir.support import (Any, Backward, Forward, IterationSpace, erange,
+                               pull_dims)
+from devito.ir.equations import OpMin, OpMax
 from devito.ir.clusters.analysis import analyze
 from devito.ir.clusters.cluster import Cluster, ClusterGroup
 from devito.ir.clusters.visitors import Queue, QueueStateful, cluster_pass
 from devito.mpi.halo_scheme import HaloScheme, HaloTouch
-from devito.symbolics import retrieve_indexed, uxreplace, xreplace_indices
+from devito.symbolics import (limits_mapper, retrieve_indexed, uxreplace,
+                              xreplace_indices)
 from devito.tools import (DefaultOrderedDict, Stamp, as_mapper, flatten,
-                          is_integer, timed_pass)
+                          is_integer, timed_pass, toposort)
 from devito.types import Array, Eq, Symbol
 from devito.types.dimension import BOTTOM, ModuloDimension
 
@@ -29,6 +32,7 @@ def clusterize(exprs, **kwargs):
     clusters = [Cluster(e, e.ispace) for e in exprs]
 
     # Setup the IterationSpaces based on data dependence analysis
+    clusters = impose_total_ordering(clusters)
     clusters = Schedule().process(clusters)
 
     # Handle SteppingDimensions
@@ -40,13 +44,36 @@ def clusterize(exprs, **kwargs):
     # Determine relevant computational properties (e.g., parallelism)
     clusters = analyze(clusters)
 
-    # Input normalization (e.g., SSA)
+    # Input normalization
     clusters = normalize(clusters, **kwargs)
 
     # Derive the necessary communications for distributed-memory parallelism
     clusters = Communications().process(clusters)
 
     return ClusterGroup(clusters)
+
+
+def impose_total_ordering(clusters):
+    """
+    Create a new sequence of Clusters whose IterationSpaces are totally ordered
+    according to a global set of relations.
+    """
+    global_relations = set().union(*[c.ispace.relations for c in clusters])
+    ordering = toposort(global_relations)
+
+    processed = []
+    for c in clusters:
+        key = lambda d: ordering.index(d)
+        try:
+            relations = {tuple(sorted(c.ispace.itdims, key=key))}
+        except ValueError:
+            # See issue #2204
+            relations = c.ispace.relations
+        ispace = c.ispace.reorder(relations=relations, mode='total')
+
+        processed.append(c.rebuild(ispace=ispace))
+
+    return processed
 
 
 class Schedule(QueueStateful):
@@ -121,10 +148,12 @@ class Schedule(QueueStateful):
             require_break = scope.d_flow.cause & maybe_break
             if require_break:
                 backlog = [clusters[-1]] + backlog
-                # Try with increasingly smaller ClusterGroups until the ambiguity is gone
+                # Try with increasingly smaller ClusterGroups until the
+                # ambiguity is gone
                 return self.callback(clusters[:-1], prefix, backlog, require_break)
 
-        # Schedule Clusters over different IterationSpaces if this increases parallelism
+        # Schedule Clusters over different IterationSpaces if this increases
+        # parallelism
         for i in range(1, len(clusters)):
             if self._break_for_parallelism(scope, candidates, i):
                 return self.callback(clusters[:i], prefix, clusters[i:] + backlog,
@@ -146,8 +175,8 @@ class Schedule(QueueStateful):
         if not backlog:
             return processed
 
-        # Handle the backlog -- the Clusters characterized by flow- and anti-dependences
-        # along one or more Dimensions
+        # Handle the backlog -- the Clusters characterized by flow- and
+        # anti-dependences along one or more Dimensions
         idir = {d: Any for d in known_break}
         stamp = Stamp()
         for i, c in enumerate(list(backlog)):
@@ -209,7 +238,7 @@ def guard(clusters):
                 if cd._factor is not None:
                     k = d
                 else:
-                    dims = pull_dims(cd.condition)
+                    dims = pull_dims(cd.condition, flag=False)
                     k = max(dims, default=d, key=lambda i: c.ispace.index(i))
 
                 # Pull `cd` from any expr
@@ -278,7 +307,11 @@ class Stepper(Queue):
                 size = i.function.shape_allocated[d]
                 assert is_integer(size)
 
-                mapper[size][si].add(iaf)
+                # Resolve StencilDimensions in case of unexpanded expressions
+                # E.g. `i0 + t` -> `(t - 1, t, t + 1)`
+                iafs = erange(iaf)
+
+                mapper[size][si].update(iafs)
 
         # Construct the ModuloDimensions
         mds = []
@@ -288,7 +321,8 @@ class Stepper(Queue):
                 # SymPy's index ordering (t, t-1, t+1) afer modulo replacement so
                 # that associativity errors are consistent. This corresponds to
                 # sorting offsets {-1, 0, 1} as {0, -1, 1} assigning -inf to 0
-                siafs = sorted(iafs, key=lambda i: -np.inf if i - si == 0 else (i - si))
+                key = lambda i: -np.inf if i - si == 0 else (i - si)
+                siafs = sorted(iafs, key=key)
 
                 for iaf in siafs:
                     name = '%s%d' % (si.name, len(mds))
@@ -343,54 +377,55 @@ class Communications(Queue):
 
     B = Symbol(name='⊥')
 
-    @timed_pass(name='schedule')
+    @timed_pass(name='communications')
     def process(self, clusters):
         return self._process_fatd(clusters, 1, seen=set())
 
     def callback(self, clusters, prefix, seen=None):
-        if seen.issuperset(clusters):
+        if not prefix:
             return clusters
 
         d = prefix[-1].dim
 
-        # Construct the mock exprs representing the halo accesses
-        exprs = []
+        # Construct a representation of the halo accesses
+        processed = []
         for c in clusters:
-            if c.properties.is_sequential(d):
+            if c.properties.is_sequential(d) or \
+               c in seen:
                 continue
 
-            halo_scheme = HaloScheme(c.exprs, c.ispace)
+            hs = HaloScheme(c.exprs, c.ispace)
+            if hs.is_void or \
+               not d._defines & hs.distributed_aindices:
+                continue
 
-            if not halo_scheme.is_void and \
-               c.properties.is_parallel_relaxed(d):
-                points = set()
-                for f in halo_scheme.fmapper:
-                    for a in c.scope.getreads(f):
-                        points.add(a.access)
+            points = set()
+            for f in hs.fmapper:
+                for a in c.scope.getreads(f):
+                    points.add(a.access)
 
-                # We also add all written symbols to ultimately create mock WARs
-                # with `c`, which will prevent the newly created HaloTouch to ever
-                # be rescheduled after `c` upon topological sorting
-                points.update(a.access for a in c.scope.accesses if a.is_write)
+            # We also add all written symbols to ultimately create mock WARs
+            # with `c`, which will prevent the newly created HaloTouch to ever
+            # be rescheduled after `c` upon topological sorting
+            points.update(a.access for a in c.scope.accesses if a.is_write)
 
-                # Sort for determinism
-                # NOTE: not sorting might impact code generation. The order of
-                # the args is important because that's what search functions honor!
-                points = sorted(points, key=str)
+            # Sort for determinism
+            # NOTE: not sorting might impact code generation. The order of
+            # the args is important because that's what search functions honor!
+            points = sorted(points, key=str)
 
-                rhs = HaloTouch(*points, halo_scheme=halo_scheme)
+            # Construct the HaloTouch Cluster
+            expr = Eq(self.B, HaloTouch(*points, halo_scheme=hs))
 
-                # Insert only if not redundant, to avoid useless pollution
-                if not any(rhs == e.rhs for e in exprs):
-                    exprs.append(Eq(self.B, rhs))
+            key = lambda i: i in prefix[:-1] or i in hs.loc_indices
+            ispace = c.ispace.project(key)
+            # HaloTOuch are not parallel
+            properties = c.properties.sequentialize()
 
-        processed = []
-        if exprs:
-            ispace = prefix[:prefix.index(d)]
-            properties = prefix.properties.drop(d)
+            halo_touch = c.rebuild(exprs=expr, ispace=ispace, properties=properties)
 
-            processed.append(Cluster(exprs, ispace, c.guards, properties))
-            seen.update(clusters)
+            processed.append(halo_touch)
+            seen.update({halo_touch, c})
 
         processed.extend(clusters)
 
@@ -402,7 +437,11 @@ def normalize(clusters, **kwargs):
     sregistry = kwargs['sregistry']
 
     clusters = normalize_nested_indexeds(clusters, sregistry)
-    clusters = normalize_reductions(clusters, sregistry, options)
+    if options['mapify-reduce']:
+        clusters = normalize_reductions_dense(clusters, sregistry)
+    else:
+        clusters = normalize_reductions_minmax(clusters)
+    clusters = normalize_reductions_sparse(clusters, sregistry)
 
     return clusters
 
@@ -444,21 +483,103 @@ def normalize_nested_indexeds(cluster, sregistry):
     return cluster.rebuild(processed)
 
 
-@cluster_pass(mode='all')
-def normalize_reductions(cluster, sregistry, options):
+@cluster_pass(mode='dense')
+def normalize_reductions_minmax(cluster):
+    """
+    Initialize the reduction variables to their neutral element and use them
+    to compute the reduction.
+    """
+    dims = [d for d in cluster.ispace.itdims
+            if cluster.properties.is_parallel_atomic(d)]
+    if not dims:
+        return cluster
+
+    init = []
+    processed = []
+    for e in cluster.exprs:
+        lhs, rhs = e.args
+        f = lhs.function
+
+        if e.operation is OpMin:
+            if not f.is_Input:
+                expr = Eq(lhs, limits_mapper[lhs.dtype].max)
+                ispace = cluster.ispace.project(lambda i: i not in dims)
+                init.append(cluster.rebuild(exprs=expr, ispace=ispace))
+
+            processed.append(e.func(lhs, Min(lhs, rhs)))
+
+        elif e.operation is OpMax:
+            if not f.is_Input:
+                expr = Eq(lhs, limits_mapper[lhs.dtype].min)
+                ispce = cluster.ispace.project(lambda i: i not in dims)
+                init.append(cluster.rebuild(exprs=expr, ispace=ispce))
+
+            processed.append(e.func(lhs, Max(lhs, rhs)))
+
+        else:
+            processed.append(e)
+
+    return init + [cluster.rebuild(processed)]
+
+
+def normalize_reductions_dense(cluster, sregistry):
     """
     Extract the right-hand sides of reduction Eq's in to temporaries.
     """
-    opt_mapify_reduce = options['mapify-reduce']
+    return _normalize_reductions_dense(cluster, sregistry, {})
 
-    dims = [d for d, v in cluster.properties.items() if PARALLEL_IF_ATOMIC in v]
 
+@cluster_pass(mode='dense')
+def _normalize_reductions_dense(cluster, sregistry, mapper):
+    dims = [d for d in cluster.ispace.itdims
+            if cluster.properties.is_parallel_atomic(d)]
     if not dims:
         return cluster
 
     processed = []
     for e in cluster.exprs:
-        if e.is_Reduction and e.lhs.is_Indexed and cluster.is_sparse:
+        if e.is_Reduction:
+            # Transform `e` into what is in essence an explicit map-reduce
+            # For example, turn:
+            # `s += f(u[x], v[x], ...)`
+            # into
+            # `r[x] = f(u[x], v[x], ...)`
+            # `s += r[x]`
+            # This makes it much easier to parallelize the map part regardless
+            # of the target backend
+            lhs, rhs = e.args
+
+            if lhs.function.is_Array:
+                # Probably a compiler-generated reduction, e.g. via
+                # recursive compilation; it's an Array already, so nothing to do
+                processed.append(e)
+            elif rhs in mapper:
+                # Seen this RHS already, so reuse the Array that was created for it
+                processed.append(e.func(lhs, mapper[rhs].indexify()))
+            else:
+                # Here the LHS could be a Symbol or a user-level Function
+                # In the latter case we copy the data into a temporary Array
+                # because the Function might be padded, and reduction operations
+                # require, in general, the data values to be contiguous
+                name = sregistry.make_name()
+                a = mapper[rhs] = Array(name=name, dtype=e.dtype, dimensions=dims)
+
+                processed.extend([Eq(a.indexify(), rhs),
+                                  e.func(lhs, a.indexify())])
+        else:
+            processed.append(e)
+
+    return cluster.rebuild(processed)
+
+
+@cluster_pass(mode='sparse')
+def normalize_reductions_sparse(cluster, sregistry):
+    """
+    Extract the right-hand sides of reduction Eq's in to temporaries.
+    """
+    processed = []
+    for e in cluster.exprs:
+        if e.is_Reduction and e.lhs.is_Indexed:
             # Transform `e` such that we reduce into a scalar (ultimately via
             # atomic ops, though this part is carried out by a much later pass)
             # For example, given `i = m[p_src]` (i.e., indirection array), turn:
@@ -470,21 +591,6 @@ def normalize_reductions(cluster, sregistry, options):
             v = Symbol(name=name, dtype=e.dtype)
             processed.extend([e.func(v, e.rhs, operation=None),
                               e.func(e.lhs, v)])
-
-        elif e.is_Reduction and e.lhs.is_Symbol and opt_mapify_reduce:
-            # Transform `e` into what is in essence an explicit map-reduce
-            # For example, turn:
-            # `s += f(u[x], v[x], ...)`
-            # into
-            # `r[x] = f(u[x], v[x], ...)`
-            # `s += r[x]`
-            # This makes it much easier to parallelize the map part regardless
-            # of the target backend
-            name = sregistry.make_name()
-            a = Array(name=name, dtype=e.dtype, dimensions=dims)
-            processed.extend([Eq(a.indexify(), e.rhs),
-                              e.func(e.lhs, a.indexify())])
-
         else:
             processed.append(e)
 

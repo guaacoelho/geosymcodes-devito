@@ -1,4 +1,5 @@
-from cached_property import cached_property
+from functools import cached_property
+
 import sympy
 
 from devito.ir.equations.algorithms import dimension_sort, lower_exprs
@@ -72,6 +73,14 @@ class IREq(sympy.Eq, Pickable):
         kwargs = dict(self.state)
         kwargs['conditionals'] = {k: func(v) for k, v in self.conditionals.items()}
         return self.func(*args, **kwargs)
+
+    def __repr__(self):
+        if not self.is_Reduction:
+            return super().__repr__()
+        elif self.operation is OpInc:
+            return '%s += %s' % (self.lhs, self.rhs)
+        else:
+            return '%s = %s(%s)' % (self.lhs, self.operation, self.rhs)
 
     # Pickling support
     __reduce_ex__ = Pickable.__reduce_ex__
@@ -170,8 +179,8 @@ class LoweredEq(IREq):
                 iterators.setdefault(d, set())
 
         # Construct the IterationSpace
-        intervals = IntervalGroup([Interval(d, 0, 0) for d in iterators],
-                                  relations=ordering.relations)
+        intervals = IntervalGroup([Interval(d) for d in iterators],
+                                  relations=ordering.relations, mode='partial')
         ispace = IterationSpace(intervals, iterators)
 
         # Construct the conditionals and replace the ConditionalDimensions in `expr`
@@ -191,7 +200,7 @@ class LoweredEq(IREq):
         rhs = diff2sympy(expr.rhs)
 
         # Finally create the LoweredEq with all metadata attached
-        expr = super(LoweredEq, cls).__new__(cls, expr.lhs, rhs, evaluate=False)
+        expr = super().__new__(cls, expr.lhs, rhs, evaluate=False)
 
         expr._ispace = ispace
         expr._conditionals = conditionals

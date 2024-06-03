@@ -1,23 +1,24 @@
 from collections import ChainMap
 from itertools import product
-from functools import singledispatch
+from functools import singledispatch, cached_property
 
-from cached_property import cached_property
 import numpy as np
 import sympy
 from sympy.core.add import _addsort
 from sympy.core.mul import _keep_coeff, _mulsort
+from sympy.core.core import ordering_of_classes
 from sympy.core.decorators import call_highest_priority
 from sympy.core.evalf import evalf_table
 
-from devito.finite_differences.tools import make_shift_x0
+from devito.finite_differences.tools import make_shift_x0, coeff_priority
 from devito.logger import warning
 from devito.tools import (as_tuple, filter_ordered, flatten, frozendict,
                           infer_dtype, is_integer, split)
-from devito.types import (Array, DimensionTuple, Evaluable, Indexed, Spacing,
+from devito.types import (Array, DimensionTuple, Evaluable, Indexed,
                           StencilDimension)
 
-__all__ = ['Differentiable', 'IndexDerivative', 'EvalDerivative', 'Weights']
+__all__ = ['Differentiable', 'DiffDerivative', 'IndexDerivative', 'EvalDerivative',
+           'Weights']
 
 
 class Differentiable(sympy.Expr, Evaluable):
@@ -104,15 +105,46 @@ class Differentiable(sympy.Expr, Evaluable):
 
     @cached_property
     def _fd(self):
-        return dict(ChainMap(*[getattr(i, '_fd', {}) for i in self._args_diff]))
+        # Filter out all args with fd order too high
+        fd_args = []
+        for f in self._args_diff:
+            try:
+                if f.space_order <= self.space_order and \
+                        (not f.is_TimeDependent or f.time_order <= self.time_order):
+                    fd_args.append(f)
+            except AttributeError:
+                pass
+        return dict(ChainMap(*[getattr(i, '_fd', {}) for i in fd_args]))
 
     @cached_property
     def _symbolic_functions(self):
         return frozenset([i for i in self._functions if i.coefficients == 'symbolic'])
 
     @cached_property
+    def function(self):
+        if len(self._functions) == 1:
+            return self._functions.pop()
+        else:
+            return None
+
+    @cached_property
     def _uses_symbolic_coefficients(self):
         return bool(self._symbolic_functions)
+
+    @cached_property
+    def coefficients(self):
+        coefficients = {f.coefficients for f in self._functions}
+        # If there is multiple ones, we have to revert to the highest priority
+        # i.e we have to remove symbolic
+        key = lambda x: coeff_priority[x]
+        return sorted(coefficients, key=key, reverse=True)[0]
+
+    @cached_property
+    def _coeff_symbol(self, *args, **kwargs):
+        if self._uses_symbolic_coefficients:
+            return W
+        else:
+            raise ValueError("Couldn't find any symbolic coefficients")
 
     def _eval_at(self, func):
         if not func.is_Staggered:
@@ -121,9 +153,9 @@ class Differentiable(sympy.Expr, Evaluable):
         return self.func(*[getattr(a, '_eval_at', lambda x: a)(func) for a in self.args])
 
     def _subs(self, old, new, **hints):
-        if old is self:
+        if old == self:
             return new
-        if old is new:
+        if old == new:
             return self
         args = list(self.args)
         for i, arg in enumerate(args):
@@ -142,7 +174,7 @@ class Differentiable(sympy.Expr, Evaluable):
         return .75 if self.is_TimeDependent else .5
 
     def __hash__(self):
-        return super(Differentiable, self).__hash__()
+        return super().__hash__()
 
     def __getattr__(self, name):
         """
@@ -228,12 +260,21 @@ class Differentiable(sympy.Expr, Evaluable):
         return Mul(sympy.S.NegativeOne, self)
 
     def __eq__(self, other):
-        ret = super(Differentiable, self).__eq__(other)
+        ret = super().__eq__(other)
         if ret is NotImplemented or not ret:
             # Non comparable or not equal as sympy objects
             return False
+
         return all(getattr(self, i, None) == getattr(other, i, None)
                    for i in self.__rkwargs__)
+
+    def _hashable_content(self):
+        # SymPy computes the hash of all Basic objects as:
+        # `hash((type(self).__name__,) + self._hashable_content())`
+        # However, our subclasses will be named after the main SymPy classes,
+        # for example sympy.Add -> differentiable.Add, so we need to override
+        # the hashable content to specify it's our own subclasses
+        return super()._hashable_content() + ('differentiable',)
 
     @property
     def name(self):
@@ -252,21 +293,80 @@ class Differentiable(sympy.Expr, Evaluable):
         Generates a symbolic expression for the Laplacian, the second
         derivative w.r.t all spatial Dimensions.
         """
-        space_dims = [d for d in self.dimensions if d.is_Space]
-        derivs = tuple('d%s2' % d.name for d in space_dims)
-        return Add(*[getattr(self, d) for d in derivs])
+        return self.laplacian()
 
-    def div(self, shift=None):
+    def laplacian(self, shift=None, order=None):
+        """
+        Laplacian of the Differentiable with shifted derivatives and custom
+        FD order.
+
+        Each second derivative is left-right (i.e D^T D with D the first derivative ):
+        `(self.dx(x0=dim+shift*dim.spacing,
+                  fd_order=order)).dx(x0=dim-shift*dim.spacing, fd_order=order)`
+
+        Parameters
+        ----------
+        shift: Number, optional, default=None
+            Shift for the center point of the derivative in number of gridpoints
+        order: int, optional, default=None
+            Discretization order for the finite differences.
+            Uses `func.space_order` when not specified
+        """
+        order = order or self.space_order
         space_dims = [d for d in self.dimensions if d.is_Space]
         shift_x0 = make_shift_x0(shift, (len(space_dims),))
-        return Add(*[getattr(self, 'd%s' % d.name)(x0=shift_x0(shift, d, None, i))
+        derivs = tuple('d%s2' % d.name for d in space_dims)
+        return Add(*[getattr(self, d)(x0=shift_x0(shift, space_dims[i], None, i),
+                                      fd_order=order)
+                     for i, d in enumerate(derivs)])
+
+    def div(self, shift=None, order=None, method='FD'):
+        """
+        Divergence of the input Function.
+
+        Parameters
+        ----------
+        func : Function or TensorFunction
+            Function to take the divergence of
+        shift: Number, optional, default=None
+            Shift for the center point of the derivative in number of gridpoints
+        order: int, optional, default=None
+            Discretization order for the finite differences.
+            Uses `func.space_order` when not specified
+        method: str, optional, default='FD'
+            Discretization method. Options are 'FD' (default) and
+            'RSFD' (rotated staggered grid finite-difference).
+        """
+        space_dims = [d for d in self.dimensions if d.is_Space]
+        shift_x0 = make_shift_x0(shift, (len(space_dims),))
+        order = order or self.space_order
+        return Add(*[getattr(self, 'd%s' % d.name)(x0=shift_x0(shift, d, None, i),
+                                                   fd_order=order, method=method)
                      for i, d in enumerate(space_dims)])
 
-    def grad(self, shift=None):
+    def grad(self, shift=None, order=None, method='FD'):
+        """
+        Gradient of the input Function.
+
+        Parameters
+        ----------
+        func : Function or TensorFunction
+            Function to take the gradient of
+        shift: Number, optional, default=None
+            Shift for the center point of the derivative in number of gridpoints
+        order: int, optional, default=None
+            Discretization order for the finite differences.
+            Uses `func.space_order` when not specified
+        method: str, optional, default='FD'
+            Discretization method. Options are 'FD' (default) and
+            'RSFD' (rotated staggered grid finite-difference).
+        """
         from devito.types.tensor import VectorFunction, VectorTimeFunction
         space_dims = [d for d in self.dimensions if d.is_Space]
         shift_x0 = make_shift_x0(shift, (len(space_dims),))
-        comps = [getattr(self, 'd%s' % d.name)(x0=shift_x0(shift, d, None, i))
+        order = order or self.space_order
+        comps = [getattr(self, 'd%s' % d.name)(x0=shift_x0(shift, d, None, i),
+                                               fd_order=order, method=method)
                  for i, d in enumerate(space_dims)]
         vec_func = VectorTimeFunction if self.is_TimeDependent else VectorFunction
         return vec_func(name='grad_%s' % self.name, time_order=self.time_order,
@@ -324,6 +424,10 @@ class Differentiable(sympy.Expr, Evaluable):
 def highest_priority(DiffOp):
     prio = lambda x: getattr(x, '_fd_priority', 0)
     return sorted(DiffOp._args_diff, key=prio, reverse=True)[0]
+
+
+# Abstract symbol representing a symbolic coefficient
+W = sympy.Function('W')
 
 
 class DifferentiableOp(Differentiable):
@@ -507,7 +611,7 @@ class Mod(DifferentiableOp, sympy.Mod):
     __sympy_class__ = sympy.Mod
 
 
-class IndexSum(DifferentiableOp):
+class IndexSum(sympy.Expr, Evaluable):
 
     """
     Represent the summation over a multiindex, that is a collection of
@@ -556,6 +660,9 @@ class IndexSum(DifferentiableOp):
 
     __str__ = __repr__
 
+    def _sympystr(self, printer):
+        return str(self)
+
     def _hashable_content(self):
         return super()._hashable_content() + (self.dimensions,)
 
@@ -571,7 +678,7 @@ class IndexSum(DifferentiableOp):
         expr = self.expr._evaluate(**kwargs)
 
         if not kwargs.get('expand', True):
-            return self.func(expr, self.dimensions)
+            return self._rebuild(expr)
 
         values = product(*[list(d.range) for d in self.dimensions])
         terms = []
@@ -602,36 +709,65 @@ class Weights(Array):
         assert isinstance(d, StencilDimension) and d.symbolic_size == len(weights)
         assert isinstance(weights, (list, tuple, np.ndarray))
 
-        try:
-            self._spacings = set().union(*[i.find(Spacing) for i in weights])
-        except AttributeError:
-            self._spacing = set()
+        # Normalize `weights`
+        from devito.symbolics import pow_to_mul  # noqa, sigh
+        weights = tuple(pow_to_mul(sympy.sympify(i)) for i in weights)
 
-        kwargs['scope'] = 'constant'
+        kwargs['scope'] = kwargs.get('scope', 'stack')
+        kwargs['initvalue'] = weights
 
         super().__init_finalize__(*args, **kwargs)
 
     def __eq__(self, other):
         return (isinstance(other, Weights) and
-                self.dimension is other.dimension and
                 self.name == other.name and
+                self.dimension == other.dimension and
                 self.indices == other.indices and
                 self.weights == other.weights)
 
     __hash__ = sympy.Basic.__hash__
 
     def _hashable_content(self):
-        return super()._hashable_content() + (self.name,) + tuple(self.weights)
+        return (self.name, self.dimension, str(self.weights), self.scope)
 
     @property
     def dimension(self):
         return self.dimensions[0]
 
-    @property
-    def spacings(self):
-        return self._spacings
-
     weights = Array.initvalue
+
+    def _xreplace(self, rule):
+        if self in rule:
+            return rule[self], True
+        elif not rule:
+            return self, False
+        else:
+            try:
+                weights, flags = zip(*[i._xreplace(rule) for i in self.weights])
+                if any(flags):
+                    return self.func(initvalue=weights, function=None), True
+            except AttributeError:
+                # `float` weights
+                pass
+            return super()._xreplace(rule)
+
+    @cached_property
+    def _npweights(self):
+        # NOTE: `self.weights` cannot just be an array or SymPy will fail
+        # internally at `__eq__` since numpy arrays requite .all, not ==,
+        # for equality comparison
+        return np.array(self.weights)
+
+    def value(self, idx):
+        try:
+            v = self.weights[idx]
+        except TypeError:
+            # E.g., `idx` is a tuple
+            v = self._npweights[idx]
+        if v.is_Number or v.is_Indexed:
+            return sympy.sympify(v)
+        else:
+            return self[idx]
 
 
 class IndexDerivative(IndexSum):
@@ -639,7 +775,7 @@ class IndexDerivative(IndexSum):
     __rargs__ = ('expr', 'mapper')
 
     def __new__(cls, expr, mapper, **kwargs):
-        dimensions = as_tuple(mapper.values())
+        dimensions = as_tuple(set(mapper.values()))
 
         # Detect the Weights among the arguments
         weightss = []
@@ -664,6 +800,20 @@ class IndexDerivative(IndexSum):
 
     def _hashable_content(self):
         return super()._hashable_content() + (self.mapper,)
+
+    def compare(self, other):
+        if self is other:
+            return 0
+        n1 = self.__class__
+        n2 = other.__class__
+        if n1.__name__ == n2.__name__:
+            return self.base.compare(other.base)
+        else:
+            return super().compare(other)
+
+    @cached_property
+    def base(self):
+        return self.expr.func(*[a for a in self.expr.args if a is not self.weights])
 
     @property
     def weights(self):
@@ -690,7 +840,16 @@ class IndexDerivative(IndexSum):
         mapper = {w.subs(d, i): f.weights[n] for n, i in enumerate(d.range)}
         expr = expr.xreplace(mapper)
 
-        return expr
+        return EvalDerivative(*expr.args, base=self.base)
+
+
+class DiffDerivative(IndexDerivative, DifferentiableOp):
+    pass
+
+
+# SymPy args ordering is the same for Derivatives and IndexDerivatives
+for i in ('DiffDerivative', 'IndexDerivative'):
+    ordering_of_classes.insert(ordering_of_classes.index('Derivative') + 1, i)
 
 
 class EvalDerivative(DifferentiableOp, sympy.Add):
@@ -723,6 +882,11 @@ class EvalDerivative(DifferentiableOp, sympy.Add):
         return obj
 
     func = DifferentiableOp._rebuild
+
+    # Since obj.base = base, then Differentiable.__eq__ leads to infinite recursion
+    # as it checks obj.base == other.base
+    __eq__ = sympy.Add.__eq__
+    __hash__ = sympy.Add.__hash__
 
     def _new_rawargs(self, *args, **kwargs):
         kwargs.pop('is_commutative', None)
@@ -802,6 +966,12 @@ def diff2sympy(expr):
             ax, af = _diff2sympy(a)
             args.append(ax)
             flag |= af
+
+        # Handle special objects
+        if isinstance(obj, DiffDerivative):
+            return IndexDerivative(*args, obj.mapper), True
+
+        # Handle generic objects such as arithmetic operations
         try:
             return obj.__sympy_class__(*args, evaluate=False), True
         except AttributeError:

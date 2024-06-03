@@ -31,8 +31,8 @@ def norm(f, order=2):
     ----------
     f : Function
         Input Function.
-    order : int, optional
-        The order of the norm. Defaults to 2.
+    order : int, default=2
+        The order of the norm.
     """
     Pow = dv.finite_differences.differentiable.Pow
     kwargs = {}
@@ -83,7 +83,9 @@ def sum(f, dims=None):
     elif f.is_SparseTimeFunction:
         if f.time_dim in dims:
             # Sum over time -> SparseFunction
-            new_coords = f.coordinates._rebuild(name="%ssum_coords" % f.name)
+            new_coords = f.coordinates._rebuild(
+                name="%ssum_coords" % f.name, initializer=f.coordinates.initializer
+            )
             out = dv.SparseFunction(name="%ssum" % f.name, grid=f.grid,
                                     dimensions=new_dims, npoint=f.shape[1],
                                     coordinates=new_coords)

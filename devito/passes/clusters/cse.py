@@ -2,19 +2,25 @@ from collections import Counter, OrderedDict
 from functools import singledispatch
 
 from sympy import Add, Function, Indexed, Mul, Pow
+from sympy.core.core import ordering_of_classes
 
 from devito.finite_differences.differentiable import IndexDerivative
 from devito.ir import Cluster, Scope, cluster_pass
 from devito.passes.clusters.utils import makeit_ssa
 from devito.symbolics import estimate_cost, q_leaf
 from devito.symbolics.manipulation import _uxreplace
-from devito.types import Eq, Temp as Temp0
+from devito.tools import as_list
+from devito.types import Eq, Symbol, Temp
 
 __all__ = ['cse']
 
 
-class Temp(Temp0):
-    pass
+class CTemp(Temp):
+
+    """
+    A cluster-level Temp, similar to Temp, ensured to have different priority
+    """
+    ordering_of_classes.insert(ordering_of_classes.index('Temp') + 1, 'CTemp')
 
 
 @cluster_pass
@@ -22,7 +28,7 @@ def cse(cluster, sregistry, options, *args):
     """
     Common sub-expressions elimination (CSE).
     """
-    make = lambda: Temp(name=sregistry.make_name(), dtype=cluster.dtype)
+    make = lambda: CTemp(name=sregistry.make_name(), dtype=cluster.dtype)
     exprs = _cse(cluster, make, min_cost=options['cse-min-cost'])
 
     return cluster.rebuild(exprs=exprs)
@@ -52,13 +58,18 @@ def _cse(maybe_exprs, make, min_cost=1, mode='default'):
     # also ensuring some form of post-processing
     assert mode == 'default'  # Only supported mode ATM
 
-    # Just for flexibility, accept either Clusters or exprs
+    # Accept Clusters, Eqs or even just exprs
     if isinstance(maybe_exprs, Cluster):
         processed = list(maybe_exprs.exprs)
         scope = maybe_exprs.scope
     else:
-        processed = list(maybe_exprs)
-        scope = Scope(maybe_exprs)
+        maybe_exprs = as_list(maybe_exprs)
+        if all(e.is_Equality for e in maybe_exprs):
+            processed = maybe_exprs
+            scope = Scope(maybe_exprs)
+        else:
+            processed = [Eq(make(), e) for e in maybe_exprs]
+            scope = Scope([])
 
     # Some sub-expressions aren't really "common" -- that's the case of Dimension-
     # independent data dependences. For example:
@@ -124,7 +135,7 @@ def _compact_temporaries(exprs, exclude):
     # safely be compacted; a generic Symbol could instead be accessed in a subsequent
     # Cluster, for example: `for (i = ...) { a = b; for (j = a ...) ...`
     mapper = {e.lhs: e.rhs for e in exprs
-              if isinstance(e.lhs, Temp) and q_leaf(e.rhs) and e.lhs not in exclude}
+              if isinstance(e.lhs, CTemp) and q_leaf(e.rhs) and e.lhs not in exclude}
 
     processed = []
     for e in exprs:
@@ -158,13 +169,23 @@ def _(exprs):
     return mapper
 
 
-@count.register(IndexDerivative)
 @count.register(Indexed)
+@count.register(Symbol)
 def _(expr):
     """
     Handler for objects preventing CSE to propagate through their arguments.
     """
     return Counter()
+
+
+@count.register(IndexDerivative)
+def _(expr):
+    """
+    Handler for symbol-binding objects. There can be many of them and therefore
+    they should be detected as common subexpressions, but it's either pointless
+    or forbidden to look inside them.
+    """
+    return Counter([expr])
 
 
 @count.register(Add)

@@ -3,7 +3,7 @@ from collections.abc import Iterable
 
 from itertools import groupby
 
-from devito.ir.support import IterationSpace, Scope
+from devito.ir.support import IterationSpace, Scope, null_ispace
 from devito.tools import as_tuple, flatten, timed_pass
 
 __all__ = ['Queue', 'QueueStateful', 'cluster_pass']
@@ -50,7 +50,7 @@ class Queue(object):
             guards = None
 
         if self._q_properties_in_key:
-            properties = cluster.properties.drop(cluster.ispace[level:].itdimensions)
+            properties = cluster.properties.drop(cluster.ispace[level:].itdims)
         else:
             properties = None
 
@@ -73,12 +73,10 @@ class Queue(object):
     def _make_key_hook(self, cluster, level):
         return ()
 
-    def _process_fdta(self, clusters, level, prefix=None, **kwargs):
+    def _process_fdta(self, clusters, level, prefix=null_ispace, **kwargs):
         """
         fdta -> First Divide Then Apply
         """
-        prefix = prefix or IterationSpace([])
-
         # Divide part
         processed = []
         for k, g in groupby(clusters, key=lambda i: self._make_key(i, level)):
@@ -129,7 +127,7 @@ class QueueStateful(Queue):
             self.scopes = {}
 
     def __init__(self, state=None):
-        super(QueueStateful, self).__init__()
+        super().__init__()
         self.state = state or QueueStateful.State()
 
     def _fetch_scope(self, clusters):
@@ -200,9 +198,9 @@ class cluster_pass(object):
         self.func = func
 
         if mode == 'dense':
-            self.cond = lambda c: c.is_dense
+            self.cond = lambda c: (c.is_dense or not c.is_sparse) and not c.is_wild
         elif mode == 'sparse':
-            self.cond = lambda c: not c.is_dense
+            self.cond = lambda c: c.is_sparse and not c.is_wild
         else:
             self.cond = lambda c: True
 

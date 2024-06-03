@@ -2,7 +2,7 @@
 
 from subprocess import PIPE, Popen, DEVNULL, run
 
-from cached_property import cached_property
+from functools import cached_property
 import cpuinfo
 import ctypes
 import numpy as np
@@ -10,6 +10,7 @@ import psutil
 import re
 import os
 import sys
+import json
 
 from devito.logger import warning
 from devito.tools import as_tuple, all_equal, memoized_func
@@ -18,15 +19,17 @@ __all__ = ['platform_registry', 'get_cpu_info', 'get_gpu_info', 'get_nvidia_cc',
            'get_cuda_path', 'get_hip_path', 'check_cuda_runtime', 'get_m1_llvm_path',
            'Platform', 'Cpu64', 'Intel64', 'IntelSkylake', 'Amd', 'Arm', 'Power',
            'Device', 'NvidiaDevice', 'AmdDevice', 'IntelDevice',
-           # Intel
+           # Intel CPUs
            'INTEL64', 'SNB', 'IVB', 'HSW', 'BDW', 'KNL', 'KNL7210',
-           'SKX', 'KLX', 'CLX', 'CLK',
-           # ARM
-           'AMD', 'ARM', 'M1', 'GRAVITON',
-           # Other loosely supported CPU architectures
+           'SKX', 'KLX', 'CLX', 'CLK', 'SPR',
+           # ARM CPUs
+           'AMD', 'ARM', 'AppleArm', 'M1', 'M2', 'M3', 'GRAVITON',
+           # Other legacy CPUs
            'POWER8', 'POWER9',
-           # GPUs
-           'AMDGPUX', 'NVIDIAX', 'INTELGPUX']
+           # Generic GPUs
+           'AMDGPUX', 'NVIDIAX', 'INTELGPUX',
+           # Intel GPUs
+           'PVC', 'INTELGPUMAX', 'MAX1100', 'MAX1550']
 
 
 @memoized_func
@@ -242,6 +245,77 @@ def get_gpu_info():
 
             gpu_info['mem.%s' % i] = make_cbk(i)
 
+        return gpu_info
+
+    except OSError:
+        pass
+
+    # *** Second try: `rocm-smi`, clearly only works with AMD cards
+    try:
+        gpu_infos = {}
+
+        # Base gpu info
+        info_cmd = ['rocm-smi', '--showproductname']
+        proc = Popen(info_cmd, stdout=PIPE, stderr=DEVNULL)
+        raw_info = str(proc.stdout.read())
+
+        lines = raw_info.replace('\\n', '\n').replace('b\'', '').replace('\\t', '')
+        lines = lines.splitlines()
+
+        for line in lines:
+            if 'GPU' in line:
+                # Product
+                pattern = r'GPU\[(\d+)\].*?Card series:\s*(.*?)\s*$'
+                match1 = re.match(pattern, line)
+
+                if match1:
+                    gid = match1.group(1)
+                    gpu_infos.setdefault(gid, dict())
+                    gpu_infos[gid]['physicalid'] = gid
+                    gpu_infos[gid]['product'] = match1.group(2)
+
+                # Model
+                pattern = r'GPU\[(\d+)\].*?Card model:\s*(.*?)\s*$'
+                match2 = re.match(pattern, line)
+
+                if match2:
+                    gid = match2.group(1)
+                    gpu_infos.setdefault(gid, dict())
+                    gpu_infos[gid]['physicalid'] = match2.group(1)
+                    gpu_infos[gid]['model'] = match2.group(2)
+
+        gpu_info = homogenise_gpus(list(gpu_infos.values()))
+
+        # Also attach callbacks to retrieve instantaneous memory info
+        info_cmd = ['rocm-smi', '--showmeminfo', 'vram', '--json']
+        proc = Popen(info_cmd, stdout=PIPE, stderr=DEVNULL)
+        raw_info = str(proc.stdout.read())
+        lines = raw_info.replace('\\n', '').replace('b\'', '').replace('\'', '')
+        info = json.loads(lines)
+
+        for i in ['total', 'free', 'used']:
+            def make_cbk(i):
+                def cbk(deviceid=0):
+                    try:
+                        # Should only contain Used and total
+                        assert len(info['card%s' % deviceid]) == 2
+                        used = [int(v) for k, v in info['card%s' % deviceid].items()
+                                if 'Used' in k][0]
+                        total = [int(v) for k, v in info['card%s' % deviceid].items()
+                                 if 'Used' not in k][0]
+                        free = total - used
+                        return {'total': total, 'free': free, 'used': used}[i]
+                    except:
+                        # We shouldn't really end up here, unless nvidia-smi changes
+                        # the output format (though we still have tests in place that
+                        # will catch this)
+                        return None
+
+                return cbk
+
+            gpu_info['mem.%s' % i] = make_cbk(i)
+
+        gpu_infos['architecture'] = 'AMD'
         return gpu_info
 
     except OSError:
@@ -523,8 +597,26 @@ def get_platform():
 
 class Platform(object):
 
+    registry = {}
+    """
+    The Platform registry.
+
+    Each new Platform instance is automatically added to the registry.
+    """
+
+    max_mem_trans_nbytes = None
+    """Maximum memory transaction size in bytes."""
+
     def __init__(self, name):
         self.name = name
+
+        self.registry[name] = self
+
+    def __eq__(self, other):
+        return isinstance(other, Platform) and self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
 
     @classmethod
     def _mro(cls):
@@ -547,16 +639,6 @@ class Platform(object):
         return self.cores_logical // self.cores_physical
 
     @property
-    def simd_reg_size(self):
-        """Size in bytes of a SIMD register."""
-        return isa_registry.get(self.isa, 0)
-
-    def simd_items_per_reg(self, dtype):
-        """Number of items of type ``dtype`` that can fit in a SIMD register."""
-        assert self.simd_reg_size % np.dtype(dtype).itemsize == 0
-        return int(self.simd_reg_size / np.dtype(dtype).itemsize)
-
-    @property
     def memtotal(self):
         """Physical memory size in bytes, or None if unknown."""
         return None
@@ -565,8 +647,22 @@ class Platform(object):
         """Available physical memory in bytes, or None if unknown."""
         return None
 
+    def max_mem_trans_size(self, dtype):
+        """
+        Number of items of type `dtype` that can be transferred in a single
+        memory transaction.
+        """
+        assert self.max_mem_trans_nbytes % np.dtype(dtype).itemsize == 0
+        return int(self.max_mem_trans_nbytes / np.dtype(dtype).itemsize)
+
 
 class Cpu64(Platform):
+
+    # The vast majority of CPUs have a 64-byte cache line size
+    max_mem_trans_nbytes = 64
+
+    # The known ISAs are to be provided by the subclasses
+    known_isas = ()
 
     def __init__(self, name, cores_logical=None, cores_physical=None, isa=None):
         super().__init__(name)
@@ -576,9 +672,6 @@ class Cpu64(Platform):
         self.cores_logical = cores_logical or cpu_info['logical']
         self.cores_physical = cores_physical or cpu_info['physical']
         self.isa = isa or self._detect_isa()
-
-    # The known ISAs are to be provided by the subclasses
-    known_isas = ()
 
     @classmethod
     def _mro(cls):
@@ -599,6 +692,20 @@ class Cpu64(Platform):
                 return i
         return 'cpp'
 
+    @property
+    def simd_reg_nbytes(self):
+        """
+        Size in bytes of a SIMD register.
+        """
+        return isa_registry.get(self.isa, 0)
+
+    def simd_items_per_reg(self, dtype):
+        """
+        Number of items of type `dtype` that fit in a SIMD register.
+        """
+        assert self.simd_reg_nbytes % np.dtype(dtype).itemsize == 0
+        return int(self.simd_reg_nbytes / np.dtype(dtype).itemsize)
+
     @cached_property
     def memtotal(self):
         return psutil.virtual_memory().total
@@ -616,13 +723,24 @@ class IntelSkylake(Intel64):
     pass
 
 
-class IntelGoldenCode(Intel64):
+class IntelGoldenCove(Intel64):
     pass
 
 
 class Arm(Cpu64):
 
     known_isas = ('fp', 'asimd', 'asimdrdm')
+
+
+class AppleArm(Arm):
+
+    @cached_property
+    def march(self):
+        sysinfo = run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                      stdout=PIPE, stderr=DEVNULL).stdout.decode("utf-8")
+        mx = sysinfo.split(' ')[1].lower()
+        # Currently clang only supports up to m2
+        return min(mx, 'm2')
 
 
 class Amd(Cpu64):
@@ -638,12 +756,19 @@ class Power(Cpu64):
 
 class Device(Platform):
 
-    def __init__(self, name, cores_logical=1, cores_physical=1, isa='cpp'):
+    def __init__(self, name, cores_logical=1, cores_physical=1, isa='cpp',
+                 max_threads_per_block=1024, max_threads_dimx=1024,
+                 max_threads_dimy=1024, max_threads_dimz=64):
         super().__init__(name)
 
         self.cores_logical = cores_logical
         self.cores_physical = cores_physical
         self.isa = isa
+
+        self.max_threads_per_block = max_threads_per_block
+        self.max_threads_dimx = max_threads_dimx
+        self.max_threads_dimy = max_threads_dimy
+        self.max_threads_dimz = max_threads_dimz
 
     @classmethod
     def _mro(cls):
@@ -656,7 +781,7 @@ class Device(Platform):
                 break
         return retval
 
-    @cached_property
+    @property
     def march(self):
         return None
 
@@ -681,12 +806,21 @@ class Device(Platform):
 
 class IntelDevice(Device):
 
-    @cached_property
+    max_mem_trans_nbytes = 64
+
+    def __init__(self, *args, sub_group_size=32, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.sub_group_size = sub_group_size
+
+    @property
     def march(self):
         return ''
 
 
 class NvidiaDevice(Device):
+
+    max_mem_trans_nbytes = 128
 
     @cached_property
     def march(self):
@@ -699,6 +833,8 @@ class NvidiaDevice(Device):
 
 
 class AmdDevice(Device):
+
+    max_mem_trans_nbytes = 256
 
     @cached_property
     def march(cls):
@@ -734,20 +870,23 @@ CPU64 = Cpu64('cpu64')
 CPU64_DUMMY = Intel64('cpu64-dummy', cores_logical=2, cores_physical=1, isa='sse')
 
 INTEL64 = Intel64('intel64')
-SNB = Intel64('snb')
-IVB = Intel64('ivb')
-HSW = Intel64('hsw')
-BDW = Intel64('bdw', isa='avx2')
-KNL = Intel64('knl')
-KNL7210 = Intel64('knl', cores_logical=256, cores_physical=64, isa='avx512')
-SKX = IntelSkylake('skx')
-KLX = IntelSkylake('klx')
-CLX = IntelSkylake('clx')
-CLK = IntelSkylake('clk')
+SNB = Intel64('snb')  # Sandy Bridge
+IVB = Intel64('ivb')  # Ivy Bridge
+HSW = Intel64('hsw')  # Haswell
+BDW = Intel64('bdw', isa='avx2')  # Broadwell
+KNL = Intel64('knl')  # Knights Landing
+KNL7210 = Intel64('knl7210', cores_logical=256, cores_physical=64, isa='avx512')
+SKX = IntelSkylake('skx')  # Skylake
+KLX = IntelSkylake('klx')  # Kaby Lake
+CLX = IntelSkylake('clx')  # Coffee Lake
+CLK = IntelSkylake('clk')  # Cascade Lake
+SPR = IntelGoldenCove('spr')  # Sapphire Rapids
 
 ARM = Arm('arm')
 GRAVITON = Arm('graviton')
-M1 = Arm('m1')
+M1 = AppleArm('m1')
+M2 = AppleArm('m2')
+M3 = AppleArm('m3')
 
 AMD = Amd('amd')
 
@@ -756,39 +895,17 @@ POWER9 = Power('power9')
 
 # Devices
 NVIDIAX = NvidiaDevice('nvidiaX')
+
 AMDGPUX = AmdDevice('amdgpuX')
+
 INTELGPUX = IntelDevice('intelgpuX')
+PVC = IntelDevice('pvc')  # Legacy codename for MAX GPUs
+INTELGPUMAX = IntelDevice('intelgpuMAX')
+MAX1100 = IntelDevice('max1100')
+MAX1550 = IntelDevice('max1550')
 
-
-platform_registry = {
-    'cpu64-dummy': CPU64_DUMMY,
-    'intel64': INTEL64,
-    'snb': SNB,  # Sandy Bridge
-    'ivb': IVB,  # Ivy Bridge
-    'hsw': HSW,  # Haswell
-    'bdw': BDW,  # Broadwell
-    'skx': SKX,  # Skylake
-    'klx': KLX,  # Kaby Lake
-    'clx': CLX,  # Coffee Lake
-    'clk': CLK,  # Cascade Lake
-    'knl': KNL,
-    'knl7210': KNL7210,
-    'arm': ARM,  # Generic ARM CPU
-    'graviton': GRAVITON,  # AMS arm
-    'm1': M1,
-    'amd': AMD,  # Generic AMD CPU
-    'power8': POWER8,
-    'power9': POWER9,
-    'nvidiaX': NVIDIAX,  # Generic NVidia GPU
-    'amdgpuX': AMDGPUX,   # Generic AMD GPU
-    'intelgpuX': INTELGPUX   # Generic Intel GPU
-}
-"""
-Registry dict for deriving Platform classes according to the environment variable
-DEVITO_PLATFORM. Developers should add new platform classes here.
-"""
+platform_registry = Platform.registry
 platform_registry['cpu64'] = get_platform  # Autodetection
-
 
 isa_registry = {
     'cpp': 16,

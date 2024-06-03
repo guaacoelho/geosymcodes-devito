@@ -6,7 +6,7 @@ class Property(Tag):
     _KNOWN = []
 
     def __init__(self, name, val=None):
-        super(Property, self).__init__(name, val)
+        super().__init__(name, val)
         Property._KNOWN.append(self)
 
 
@@ -47,12 +47,6 @@ iteration space is likely to be very small.
 
 SKEWABLE = Property('skewable')
 """A fully parallel Dimension that would benefit from wavefront/skewed tiling."""
-
-ROUNDABLE = Property('roundable')
-"""
-A Dimension whose upper limit may be rounded up to a multiple of the SIMD
-vector length thanks to the presence of enough padding.
-"""
 
 AFFINE = Property('affine')
 """
@@ -130,7 +124,7 @@ def normalize_properties(*args):
 
 
 def relax_properties(properties):
-    return frozenset(properties - {PARALLEL_INDEP, ROUNDABLE})
+    return frozenset(properties - {PARALLEL_INDEP})
 
 
 class Properties(frozendict):
@@ -138,6 +132,10 @@ class Properties(frozendict):
     """
     A mapper {Dimension -> {properties}}.
     """
+
+    @property
+    def dimensions(self):
+        return tuple(self)
 
     def add(self, dims, properties=None):
         m = dict(self)
@@ -207,6 +205,9 @@ class Properties(frozendict):
 
     def is_parallel_relaxed(self, dims):
         return any(len(self[d] & PARALLELS) > 0 for d in as_tuple(dims))
+
+    def is_parallel_atomic(self, dims):
+        return any(PARALLEL_IF_ATOMIC in self.get(d, ()) for d in as_tuple(dims))
 
     def is_affine(self, dims):
         return any(AFFINE in self.get(d, ()) for d in as_tuple(dims))

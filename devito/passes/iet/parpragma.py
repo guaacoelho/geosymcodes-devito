@@ -1,6 +1,8 @@
+from collections import defaultdict
+from functools import cached_property
+
 import numpy as np
 import cgen as c
-from cached_property import cached_property
 from sympy import And, Max, true
 
 from devito.data import FULL
@@ -11,7 +13,7 @@ from devito.ir import (Conditional, DummyEq, Dereference, Expression,
                        retrieve_iteration_tree, IMask, VECTORIZED)
 from devito.passes.iet.engine import iet_pass
 from devito.passes.iet.langbase import (LangBB, LangTransformer, DeviceAwareMixin,
-                                        make_sections_from_imask)
+                                        ShmTransformer, make_sections_from_imask)
 from devito.symbolics import INT, ccode
 from devito.tools import as_tuple, flatten, is_integer, prod
 from devito.types import Symbol
@@ -41,11 +43,24 @@ class PragmaSimdTransformer(PragmaTransformer):
         return True
 
     @property
-    def simd_reg_size(self):
-        return self.platform.simd_reg_size
+    def simd_reg_nbytes(self):
+        return self.platform.simd_reg_nbytes
 
-    @iet_pass
-    def make_simd(self, iet):
+    def _make_simd_pragma(self, iet):
+        indexeds = FindSymbols('indexeds').visit(iet)
+        aligned = {i.name for i in indexeds if i.function.is_DiscreteFunction}
+        if aligned:
+            simd = self.lang['simd-for-aligned']
+            simd = as_tuple(simd(','.join(sorted(aligned)), self.simd_reg_nbytes))
+        else:
+            simd = as_tuple(self.lang['simd-for'])
+
+        return simd
+
+    def _make_simd(self, iet):
+        """
+        Carry out the bulk of `make_simd`.
+        """
         mapper = {}
         for tree in retrieve_iteration_tree(iet):
             candidates = [i for i in tree if i.is_ParallelRelaxed]
@@ -100,13 +115,7 @@ class PragmaSimdTransformer(PragmaTransformer):
                     continue
 
             # Add SIMD pragma
-            indexeds = FindSymbols('indexeds').visit(candidate)
-            aligned = {i.name for i in indexeds if i.function.is_DiscreteFunction}
-            if aligned:
-                simd = self.lang['simd-for-aligned']
-                simd = as_tuple(simd(','.join(sorted(aligned)), self.simd_reg_size))
-            else:
-                simd = as_tuple(self.lang['simd-for'])
+            simd = self._make_simd_pragma(candidate)
             pragmas = candidate.pragmas + simd
 
             # Add VECTORIZED property
@@ -118,6 +127,10 @@ class PragmaSimdTransformer(PragmaTransformer):
 
         return iet, {}
 
+    @iet_pass
+    def make_simd(self, iet):
+        return self._make_simd(iet)
+
 
 class PragmaIteration(ParallelIteration):
 
@@ -125,7 +138,9 @@ class PragmaIteration(ParallelIteration):
                  nthreads=None, ncollapsed=None, reduction=None, tile=None,
                  gpu_fit=None, **kwargs):
 
-        construct = self._make_construct(parallel=parallel)
+        construct = self._make_construct(
+            parallel=parallel, ncollapsed=ncollapsed, tile=tile
+        )
         clauses = self._make_clauses(
             ncollapsed=ncollapsed, chunk_size=chunk_size, nthreads=nthreads,
             reduction=reduction, schedule=schedule, tile=tile, gpu_fit=gpu_fit,
@@ -160,7 +175,7 @@ class PragmaIteration(ParallelIteration):
         Build a string representing of a reduction clause given a list of
         2-tuples `(symbol, ir.Operation)`.
         """
-        args = []
+        mapper = defaultdict(list)
         for i, imask, r in reductions:
             if i.is_Indexed:
                 f = i.function
@@ -175,10 +190,13 @@ class PragmaIteration(ParallelIteration):
                     else:
                         assert isinstance(k, tuple) and len(k) == 2
                         bounds.append('[%s:%s]' % k)
-                args.append('%s%s' % (i.name, ''.join(bounds)))
+                mapper[r.name].append('%s%s' % (i.name, ''.join(bounds)))
             else:
-                args.append(str(i))
-        return 'reduction(%s:%s)' % (r.name, ','.join(args))
+                mapper[r.name].append(str(i))
+
+        args = ['reduction(%s:%s)' % (k, ','.join(v)) for k, v in mapper.items()]
+
+        return ' '.join(args)
 
     @cached_property
     def collapsed(self):
@@ -189,128 +207,16 @@ class PragmaIteration(ParallelIteration):
         return tuple(ret)
 
 
-class PragmaShmTransformer(PragmaSimdTransformer):
+class PragmaShmTransformer(ShmTransformer, PragmaSimdTransformer):
 
     """
-    Abstract base class for PragmaTransformers capable of emitting SIMD-parallel
-    and shared-memory-parallel IETs.
+    PragmaTransformer capable of emitting SIMD-parallel and shared-memory-parallel
+    IETs for CPUs.
     """
 
     def __init__(self, sregistry, options, platform, compiler):
-        """
-        Parameters
-        ----------
-        sregistry : SymbolRegistry
-            The symbol registry, to access the symbols appearing in an IET.
-        options : dict
-             The optimization options. Accepted: ['par-collapse-ncores',
-             'par-collapse-work', 'par-chunk-nonaffine', 'par-dynamic-work', 'par-nested']
-             * 'par-collapse-ncores': use a collapse clause if the number of
-               available physical cores is greater than this threshold.
-             * 'par-collapse-work': use a collapse clause if the trip count of the
-               collapsable Iterations is statically known to exceed this threshold.
-             * 'par-chunk-nonaffine': coefficient to adjust the chunk size in
-               non-affine parallel Iterations.
-             * 'par-dynamic-work': use dynamic scheduling if the operation count per
-               iteration exceeds this threshold. Otherwise, use static scheduling.
-             * 'par-nested': nested parallelism if the number of hyperthreads per core
-               is greater than this threshold.
-        platform : Platform
-            The underlying platform.
-        compiler : Compiler
-            The underlying JIT compiler.
-        """
         key = lambda i: i.is_ParallelRelaxed and not i.is_Vectorized
-        super().__init__(key, sregistry, platform, compiler)
-
-        self.collapse_ncores = options['par-collapse-ncores']
-        self.collapse_work = options['par-collapse-work']
-        self.chunk_nonaffine = options['par-chunk-nonaffine']
-        self.dynamic_work = options['par-dynamic-work']
-        self.nested = options['par-nested']
-
-    @property
-    def ncores(self):
-        return self.platform.cores_physical
-
-    @property
-    def nhyperthreads(self):
-        return self.platform.threads_per_core
-
-    @property
-    def nthreads(self):
-        return self.sregistry.nthreads
-
-    @property
-    def nthreads_nested(self):
-        return self.sregistry.nthreads_nested
-
-    @property
-    def nthreads_nonaffine(self):
-        return self.sregistry.nthreads_nonaffine
-
-    @property
-    def threadid(self):
-        return self.sregistry.threadid
-
-    def _select_candidates(self, candidates):
-        assert candidates
-
-        if self.ncores < self.collapse_ncores:
-            return candidates[0], []
-
-        mapper = {}
-        for n0, root in enumerate(candidates):
-
-            collapsable = []
-            for n, i in enumerate(candidates[n0+1:], n0+1):
-                # The Iteration nest [root, ..., i] must be perfect
-                if not IsPerfectIteration(depth=i).visit(root):
-                    break
-
-                # Loops are collapsable only if none of the iteration variables appear
-                # in initializer expressions. For example, the following two loops
-                # cannot be collapsed
-                #
-                # for (i = ... )
-                #   for (j = i ...)
-                #     ...
-                #
-                # Here, we make sure this won't happen
-                if any(j.dim in i.symbolic_min.free_symbols for j in candidates[n0:n]):
-                    break
-
-                # Also, we do not want to collapse SIMD-vectorized Iterations
-                if i.is_Vectorized:
-                    break
-
-                # Would there be enough work per parallel iteration?
-                nested = candidates[n+1:]
-                if nested:
-                    try:
-                        work = prod([int(j.dim.symbolic_size) for j in nested])
-                        if work < self.collapse_work:
-                            break
-                    except TypeError:
-                        pass
-
-                collapsable.append(i)
-
-            # Give a score to this candidate, based on the number of fully-parallel
-            # Iterations and their position (i.e. outermost to innermost) in the nest
-            score = (
-                int(root.is_ParallelNoAtomic),
-                int(len([i for i in collapsable if i.is_ParallelNoAtomic]) >= 1),
-                int(len([i for i in collapsable if i.is_ParallelRelaxed]) >= 1),
-                -(n0 + 1)  # The outermost, the better
-            )
-
-            mapper[(root, tuple(collapsable))] = score
-
-        # Retrieve the candidates with highest score
-        root, collapsable = max(mapper, key=mapper.get)
-
-        return root, list(collapsable)
+        super().__init__(key, sregistry, options, platform, compiler)
 
     def _make_reductions(self, partree):
         if not any(i.is_ParallelAtomic for i in partree.collapsed):
@@ -347,7 +253,7 @@ class PragmaShmTransformer(PragmaSimdTransformer):
         partree = Transformer(mapper).visit(partree)
         return partree
 
-    def _make_partree(self, candidates, nthreads=None, index=None):
+    def _make_partree(self, candidates, nthreads=None):
         assert candidates
 
         # Get the collapsable Iterations
@@ -373,9 +279,14 @@ class PragmaShmTransformer(PragmaSimdTransformer):
                                           ncollapsed=ncollapsed, nthreads=nthreads,
                                           **root.args)
             prefix = []
+        elif nthreads is not None:
+            body = self.HostIteration(schedule='static',
+                                      parallel=nthreads is not self.nthreads_nested,
+                                      ncollapsed=ncollapsed, nthreads=nthreads,
+                                      **root.args)
+            prefix = []
         else:
             # pragma ... for ... schedule(..., expr)
-            assert nthreads is None
             nthreads = self.nthreads_nonaffine
             chunk_size = Symbol(name='chunk_size')
             body = self.HostIteration(ncollapsed=ncollapsed, chunk_size=chunk_size,
@@ -465,7 +376,7 @@ class PragmaShmTransformer(PragmaSimdTransformer):
     def _make_parallel(self, iet):
         mapper = {}
         parrays = {}
-        for i, tree in enumerate(retrieve_iteration_tree(iet, mode='superset')):
+        for tree in retrieve_iteration_tree(iet, mode='superset'):
             # Get the parallelizable Iterations in `tree`
             candidates = filter_iterations(tree, key=self.key)
             if not candidates:
@@ -477,7 +388,7 @@ class PragmaShmTransformer(PragmaSimdTransformer):
                 continue
 
             # Outer parallelism
-            root, partree = self._make_partree(candidates, index=i)
+            root, partree = self._make_partree(candidates)
             if partree is None or root in mapper:
                 continue
 
@@ -566,8 +477,16 @@ class PragmaDeviceAwareTransformer(DeviceAwareMixin, PragmaShmTransformer):
         super().__init__(sregistry, options, platform, compiler)
 
         self.gpu_fit = options['gpu-fit']
-        self.par_tile = options['par-tile']
+        # Need to reset the tile in case was already used and iter over by blocking
+        self.par_tile = options['par-tile'].reset()
         self.par_disabled = options['par-disabled']
+
+    def _score_candidate(self, n0, root, collapsable=()):
+        # `ndptrs`, the number of device pointers, part of the score too to
+        # ensure the outermost loop is offloaded
+        ndptrs = len(self._device_pointers(root))
+
+        return (ndptrs,) + super()._score_candidate(n0, root, collapsable)
 
     def _make_threaded_prodders(self, partree):
         if isinstance(partree.root, self.DeviceIteration):
@@ -594,7 +513,8 @@ class PragmaDeviceAwareTransformer(DeviceAwareMixin, PragmaShmTransformer):
 
         if self._is_offloadable(root):
             body = self.DeviceIteration(gpu_fit=self.gpu_fit,
-                                        ncollapsed=len(collapsable) + 1,
+                                        ncollapsed=len(collapsable)+1,
+                                        tile=self.par_tile.nextitem(),
                                         **root.args)
             partree = ParallelTree([], body, nthreads=nthreads)
 

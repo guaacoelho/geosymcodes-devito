@@ -10,8 +10,9 @@ from devito.passes.equations import collect_derivatives
 from devito.passes.clusters import (Lift, Streaming, Tasker, blocking, buffering,
                                     cire, cse, factorize, fission, fuse,
                                     optimize_pows)
-from devito.passes.iet import (DeviceOmpTarget, DeviceAccTarget, mpiize, hoist_prodders,
-                               linearize, pthreadify, relax_incr_dimensions)
+from devito.passes.iet import (DeviceOmpTarget, DeviceAccTarget, mpiize,
+                               hoist_prodders, linearize, pthreadify,
+                               relax_incr_dimensions, check_stability)
 from devito.tools import as_tuple, timed_pass
 
 __all__ = ['DeviceNoopOperator', 'DeviceAdvOperator', 'DeviceCustomOperator',
@@ -67,26 +68,33 @@ class DeviceOperatorMixin(object):
         o['cire-schedule'] = oo.pop('cire-schedule', cls.CIRE_SCHEDULE)
 
         # GPU parallelism
-        o['par-tile'] = ParTile(oo.pop('par-tile', False), default=(32, 4))
+        o['par-tile'] = ParTile(oo.pop('par-tile', False), default=(32, 4, 4),
+                                sparse=oo.pop('par-tile-sparse', None),
+                                reduce=oo.pop('par-tile-reduce', None))
         o['par-collapse-ncores'] = 1  # Always collapse (meaningful if `par-tile=False`)
         o['par-collapse-work'] = 1  # Always collapse (meaningful if `par-tile=False`)
         o['par-chunk-nonaffine'] = oo.pop('par-chunk-nonaffine', cls.PAR_CHUNK_NONAFFINE)
         o['par-dynamic-work'] = np.inf  # Always use static scheduling
         o['par-nested'] = np.inf  # Never use nested parallelism
         o['par-disabled'] = oo.pop('par-disabled', True)  # No host parallelism by default
-        o['gpu-fit'] = as_tuple(oo.pop('gpu-fit', cls._normalize_gpu_fit(**kwargs)))
+        o['gpu-fit'] = cls._normalize_gpu_fit(oo, **kwargs)
         o['gpu-create'] = as_tuple(oo.pop('gpu-create', ()))
 
         # Distributed parallelism
         o['dist-drop-unwritten'] = oo.pop('dist-drop-unwritten', cls.DIST_DROP_UNWRITTEN)
 
-        # Misc
+        # Code generation options for derivatives
         o['expand'] = oo.pop('expand', cls.EXPAND)
-        o['optcomms'] = oo.pop('optcomms', True)
+        o['deriv-schedule'] = oo.pop('deriv-schedule', cls.DERIV_SCHEDULE)
+        o['deriv-unroll'] = oo.pop('deriv-unroll', False)
+
+        # Misc
+        o['opt-comms'] = oo.pop('opt-comms', True)
         o['linearize'] = oo.pop('linearize', False)
         o['mapify-reduce'] = oo.pop('mapify-reduce', cls.MAPIFY_REDUCE)
         o['index-mode'] = oo.pop('index-mode', cls.INDEX_MODE)
         o['place-transfers'] = oo.pop('place-transfers', True)
+        o['errctl'] = oo.pop('errctl', cls.ERRCTL)
 
         if oo:
             raise InvalidOperator("Unsupported optimization options: [%s]"
@@ -97,23 +105,31 @@ class DeviceOperatorMixin(object):
         return kwargs
 
     @classmethod
-    def _normalize_gpu_fit(cls, **kwargs):
-        if any(i in kwargs['mode'] for i in ['tasking', 'streaming']):
-            return None
-        else:
-            return cls.GPU_FIT
+    def _normalize_gpu_fit(cls, oo, **kwargs):
+        try:
+            gfit = as_tuple(oo.pop('gpu-fit'))
+            gfit = set().union(*[f.values() if f.is_AbstractTensor else [f]
+                                 for f in gfit])
+            return tuple(gfit)
+        except KeyError:
+            if any(i in kwargs['mode'] for i in ['tasking', 'streaming']):
+                return (None,)
+            else:
+                return as_tuple(cls.GPU_FIT)
 
     @classmethod
-    def _rcompile_wrapper(cls, **kwargs):
-        options = kwargs['options']
+    def _rcompile_wrapper(cls, **kwargs0):
+        options = kwargs0['options']
 
-        def wrapper(expressions, kwargs=kwargs, mode='default'):
+        def wrapper(expressions, mode='default', **kwargs1):
             if mode == 'host':
-                kwargs = {
+                kwargs = {**{
                     'platform': 'cpu64',
                     'language': 'C' if options['par-disabled'] else 'openmp',
                     'compiler': 'custom',
-                }
+                }, **kwargs1}
+            else:
+                kwargs = {**kwargs0, **kwargs1}
             return rcompile(expressions, kwargs)
 
         return wrapper
@@ -213,6 +229,9 @@ class DeviceAdvOperator(DeviceOperatorMixin, CoreOperator):
 
         # Misc optimizations
         hoist_prodders(graph)
+
+        # Perform error checking
+        check_stability(graph, **kwargs)
 
         # Symbol definitions
         cls._Target.DataManager(**kwargs).process(graph)

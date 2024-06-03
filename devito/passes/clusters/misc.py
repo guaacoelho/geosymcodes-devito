@@ -5,6 +5,7 @@ from devito.finite_differences import IndexDerivative
 from devito.ir.clusters import Cluster, ClusterGroup, Queue, cluster_pass
 from devito.ir.support import (SEQUENTIAL, SEPARABLE, Scope, ReleaseLock,
                                WaitLock, WithLock, FetchUpdate, PrefetchUpdate)
+from devito.passes.clusters.utils import in_critical_region
 from devito.symbolics import pow_to_mul
 from devito.tools import DAG, Stamp, as_tuple, flatten, frozendict, timed_pass
 from devito.types import Hyperplane
@@ -25,14 +26,15 @@ class Lift(Queue):
 
     @timed_pass(name='lift')
     def process(self, elements):
-        return super(Lift, self).process(elements)
+        return super().process(elements)
 
     def callback(self, clusters, prefix):
         if not prefix:
             # No iteration space to be lifted from
             return clusters
 
-        hope_invariant = prefix[-1].dim._defines
+        dim = prefix[-1].dim
+        hope_invariant = dim._defines
         outer = set().union(*[i.dim._defines for i in prefix[:-1]])
 
         lifted = []
@@ -40,6 +42,12 @@ class Lift(Queue):
         for n, c in enumerate(clusters):
             # Increments prevent lifting
             if c.has_increments:
+                processed.append(c)
+                continue
+
+            # Synchronization prevents lifting
+            if c.syncs.get(dim) or \
+               in_critical_region(c, clusters):
                 processed.append(c)
                 continue
 
@@ -180,18 +188,18 @@ class Fusion(Queue):
         if isinstance(c, Cluster):
             syncs = (c.syncs,)
         else:
-            syncs = c.syncs
+            syncs = tuple(i.syncs for i in c)
         for i in syncs:
             mapper = defaultdict(set)
             for k, v in i.items():
                 for s in v:
-                    if isinstance(s, (FetchUpdate, PrefetchUpdate)) or \
+                    if isinstance(s, PrefetchUpdate) or \
                        (not self.fusetasks and isinstance(s, WaitLock)):
                         # NOTE: A mix of Clusters w/ and w/o WaitLocks can safely
                         # be fused, as in the worst case scenario the WaitLocks
                         # get "hoisted" above the first Cluster in the sequence
                         continue
-                    elif (isinstance(s, (WaitLock, ReleaseLock)) or
+                    elif (isinstance(s, (FetchUpdate, WaitLock, ReleaseLock)) or
                           (self.fusetasks and isinstance(s, WithLock))):
                         mapper[k].add(type(s))
                     else:
@@ -256,7 +264,7 @@ class Fusion(Queue):
 
         groups, processed = processed, []
         for group in groups:
-            for flag, minigroup in groupby(group, key=lambda c: c.is_halo_touch):
+            for flag, minigroup in groupby(group, key=lambda c: c.is_wild):
                 if flag:
                     processed.extend([(c,) for c in minigroup])
                 else:
@@ -301,7 +309,7 @@ class Fusion(Queue):
 
         return ClusterGroup(dag.topological_sort(choose_element), prefix)
 
-    def _build_dag(self, cgroups, prefix, peeking=False):
+    def _build_dag(self, cgroups, prefix):
         """
         A DAG representing the data dependences across the ClusterGroups within
         a given scope.
@@ -311,10 +319,10 @@ class Fusion(Queue):
         dag = DAG(nodes=cgroups)
         for n, cg0 in enumerate(cgroups):
 
-            def is_cross(dep):
+            def is_cross(source, sink):
                 # True if a cross-ClusterGroup dependence, False otherwise
-                t0 = dep.source.timestamp
-                t1 = dep.sink.timestamp
+                t0 = source.timestamp
+                t1 = sink.timestamp
                 v = len(cg0.exprs)
                 return t0 < v <= t1 or t1 < v <= t0
 
@@ -347,9 +355,6 @@ class Fusion(Queue):
                 # Clearly, output dependences must be honored
                 elif any(scope.d_output_gen()):
                     dag.add_edge(cg0, cg1)
-
-            if peeking and dag.edges:
-                return dag
 
         return dag
 

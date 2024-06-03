@@ -1,17 +1,19 @@
 from itertools import chain
+from functools import cached_property
 
 import numpy as np
-from cached_property import cached_property
 
 from devito.ir.equations import ClusterizedEq
 from devito.ir.support import (PARALLEL, PARALLEL_IF_PVT, BaseGuardBoundNext,
                                Forward, Interval, IntervalGroup, IterationSpace,
-                               DataSpace, Guards, Properties, Scope, detect_accesses,
-                               detect_io, normalize_properties, normalize_syncs,
-                               sdims_min, sdims_max)
+                               DataSpace, Guards, Properties, Scope, WithLock,
+                               PrefetchUpdate, detect_accesses, detect_io,
+                               normalize_properties, normalize_syncs, minimum,
+                               maximum, null_ispace)
 from devito.mpi.halo_scheme import HaloScheme, HaloTouch
 from devito.symbolics import estimate_cost
 from devito.tools import as_tuple, flatten, frozendict, infer_dtype
+from devito.types import WeakFence, CriticalRegion
 
 __all__ = ["Cluster", "ClusterGroup"]
 
@@ -41,10 +43,8 @@ class Cluster(object):
         The halo exchanges required by the Cluster.
     """
 
-    def __init__(self, exprs, ispace=None, guards=None, properties=None, syncs=None,
-                 halo_scheme=None):
-        ispace = ispace or IterationSpace([])
-
+    def __init__(self, exprs, ispace=null_ispace, guards=None, properties=None,
+                 syncs=None, halo_scheme=None):
         self._exprs = tuple(ClusterizedEq(e, ispace=ispace) for e in as_tuple(exprs))
         self._ispace = ispace
         self._guards = Guards(guards or {})
@@ -52,13 +52,7 @@ class Cluster(object):
 
         # Normalize properties
         properties = Properties(properties or {})
-        for d in ispace.itdimensions:
-            properties = properties.add(d)
-        for i in properties:
-            for d in as_tuple(i):
-                if d not in ispace.itdimensions:
-                    properties = properties.drop(d)
-        self._properties = properties
+        self._properties = tailor_properties(properties, ispace)
 
         self._halo_scheme = halo_scheme
 
@@ -85,10 +79,7 @@ class Cluster(object):
 
         guards = root.guards
 
-        properties = {}
-        for c in clusters:
-            for d, v in c.properties.items():
-                properties[d] = normalize_properties(properties.get(d, v), v)
+        properties = reduce_properties(clusters)
 
         try:
             syncs = normalize_syncs(*[c.syncs for c in clusters])
@@ -172,7 +163,8 @@ class Cluster(object):
         example, reduction or redundant (i.e., invariant) Dimensions won't
         appear in an expression.
         """
-        return {i for i in self.free_symbols if i.is_Dimension}
+        idims = set.union(*[set(e.implicit_dims) for e in self.exprs])
+        return {i for i in self.free_symbols if i.is_Dimension} | idims
 
     @cached_property
     def scope(self):
@@ -187,10 +179,6 @@ class Cluster(object):
         return any(e.is_Increment for e in self.exprs)
 
     @cached_property
-    def is_scalar(self):
-        return not any(f.is_Function for f in self.scope.writes)
-
-    @cached_property
     def grid(self):
         grids = set(f.grid for f in self.functions if f.is_DiscreteFunction) - {None}
         if len(grids) == 1:
@@ -199,42 +187,76 @@ class Cluster(object):
             raise ValueError("Cluster has no unique Grid")
 
     @cached_property
+    def is_scalar(self):
+        return not any(f.is_Function for f in self.scope.writes)
+
+    @cached_property
     def is_dense(self):
         """
-        A Cluster is dense if at least one of the following conditions is True:
+        True if at least one of the following conditions are True:
 
             * It is defined over a unique Grid and all of the Grid Dimensions
               are PARALLEL.
             * Only DiscreteFunctions are written and only affine index functions
               are used (e.g., `a[x+1, y-2]` is OK, while `a[b[x], y-2]` is not)
+
+        False in all other cases.
         """
         # Hopefully it's got a unique Grid and all Dimensions are PARALLEL (or
         # at most PARALLEL_IF_PVT). This is a quick and easy check so we try it first
         try:
             pset = {PARALLEL, PARALLEL_IF_PVT}
-            grid = self.grid
-            for d in grid.dimensions:
-                if not any(pset & v for k, v in self.properties.items()
-                           if d in k._defines):
-                    raise ValueError
-            return True
+            target = set(self.grid.dimensions)
+            dims = {d for d in self.properties if d._defines & target}
+            if any(pset & self.properties[d] for d in dims):
+                return True
         except ValueError:
             pass
 
         # Fallback to legacy is_dense checks
         return (not any(e.conditionals for e in self.exprs) and
                 not any(f.is_SparseFunction for f in self.functions) and
-                not self.is_halo_touch and
+                not self.is_wild and
                 all(a.is_regular for a in self.scope.accesses))
 
-    @property
+    @cached_property
     def is_sparse(self):
-        return not self.is_dense
+        """
+        True if it represents a sparse operation, i.e iff there's at least
+        one irregular access, False otherwise.
+        """
+        return any(a.is_irregular for a in self.scope.accesses)
+
+    @property
+    def is_wild(self):
+        """
+        True if encoding a non-mathematical operation, False otherwise.
+        """
+        return self.is_halo_touch or self.is_fence
 
     @property
     def is_halo_touch(self):
-        return (len(self.exprs) > 0 and
-                all(isinstance(e.rhs, HaloTouch) for e in self.exprs))
+        return self.exprs and all(isinstance(e.rhs, HaloTouch) for e in self.exprs)
+
+    @property
+    def is_fence(self):
+        return self.is_weak_fence or self.is_critical_region
+
+    @property
+    def is_weak_fence(self):
+        return self.exprs and all(isinstance(e.rhs, WeakFence) for e in self.exprs)
+
+    @property
+    def is_critical_region(self):
+        return self.exprs and all(isinstance(e.rhs, CriticalRegion) for e in self.exprs)
+
+    @property
+    def is_async(self):
+        """
+        True if an asynchronous Cluster, False otherwise.
+        """
+        return any(isinstance(s, (WithLock, PrefetchUpdate))
+                   for s in flatten(self.syncs.values()))
 
     @cached_property
     def dtype(self):
@@ -275,9 +297,9 @@ class Cluster(object):
                 continue
 
             intervals = [Interval(d,
-                                  min([sdims_min(i) for i in offs]),
-                                  max([sdims_max(i) for i in offs]))
-                         for d, offs in v.items()]
+                                  min([minimum(i, ispace=self.ispace) for i in o]),
+                                  max([maximum(i, ispace=self.ispace) for i in o]))
+                         for d, o in v.items()]
             intervals = IntervalGroup(intervals)
 
             # Factor in the IterationSpace -- if the min/max points aren't zero,
@@ -307,7 +329,8 @@ class Cluster(object):
 
             # Special case: if the factor of a ConditionalDimension has value 1,
             # then we can safely resort to the parent's Interval
-            intervals = intervals.promote(lambda d: d.is_Conditional and d.factor == 1)
+            key = lambda d: d.is_Conditional and d.condition is None and d.factor == 1
+            intervals = intervals.promote(key)
 
             parts[f] = intervals
 
@@ -358,6 +381,10 @@ class Cluster(object):
         reads, writes = detect_io(self.exprs, relax=True)
         accesses = [(i, 'r') for i in reads] + [(i, 'w') for i in writes]
 
+        # Ordering isn't important at this point, so returning an unordered
+        # collection makes the caller's life easier
+        uispace = self.ispace.reorder(mode='unordered')
+
         ret = {}
         for i, mode in accesses:
             if not i.is_AbstractFunction:
@@ -367,7 +394,8 @@ class Cluster(object):
                 intervals = self.dspace.parts[i]
 
                 # Assume that invariant dimensions always cause new loads/stores
-                invariants = self.ispace.intervals.drop(intervals.dimensions)
+                invariants = uispace.intervals.drop(intervals.dimensions)
+
                 intervals = intervals.generate('union', invariants, intervals)
 
                 # Bundles impact depends on the number of components
@@ -379,7 +407,8 @@ class Cluster(object):
                 for n in range(v):
                     ret[(i, mode, n)] = intervals
             else:
-                ret[(i, mode, 0)] = self.ispace.intervals
+                ret[(i, mode, 0)] = uispace.intervals
+
         return ret
 
 
@@ -397,7 +426,7 @@ class ClusterGroup(tuple):
     """
 
     def __new__(cls, clusters, ispace=None):
-        obj = super(ClusterGroup, cls).__new__(cls, flatten(as_tuple(clusters)))
+        obj = super().__new__(cls, flatten(as_tuple(clusters)))
         obj._ispace = ispace
         return obj
 
@@ -418,14 +447,20 @@ class ClusterGroup(tuple):
         return self._ispace
 
     @cached_property
+    def properties(self):
+        return tailor_properties(reduce_properties(self), self.ispace)
+
+    @cached_property
     def guards(self):
         """The guards of each Cluster in self."""
         return tuple(i.guards for i in self)
 
     @cached_property
     def syncs(self):
-        """The synchronization operations of each Cluster in self."""
-        return tuple(i.syncs for i in self)
+        """
+        A view of the ClusterGroup's synchronization operations.
+        """
+        return normalize_syncs(*[c.syncs for c in self])
 
     @cached_property
     def dspace(self):
@@ -447,7 +482,7 @@ class ClusterGroup(tuple):
         If two Clusters perform calculations with different precision, the
         data type with highest precision is returned.
         """
-        dtypes = {i.dtype for i in self}
+        dtypes = {i.dtype for i in self} - {None}
 
         return infer_dtype(dtypes)
 
@@ -460,3 +495,34 @@ class ClusterGroup(tuple):
             The data type and the data space of the ClusterGroup.
         """
         return (self.dtype, self.dspace)
+
+
+# *** Utils
+
+def reduce_properties(clusters):
+    """
+    The normalized intersection (basically, a reduction) of the Properties in
+    `clusters`.
+    """
+    properties = {}
+    for c in clusters:
+        for d, v in c.properties.items():
+            properties[d] = normalize_properties(properties.get(d, v), v)
+
+    return Properties(properties)
+
+
+def tailor_properties(properties, ispace):
+    """
+    Create a new Properties object off `properties` that retains all and only
+    the iteration dimensions in `ispace`.
+    """
+    for i in properties:
+        for d in as_tuple(i):
+            if d not in ispace.itdims:
+                properties = properties.drop(d)
+
+    for d in ispace.itdims:
+        properties = properties.add(d)
+
+    return properties

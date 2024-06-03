@@ -1,14 +1,15 @@
 from collections import OrderedDict, namedtuple
+from functools import cached_property
+import ctypes
 from operator import attrgetter
 from math import ceil
 
-from cached_property import cached_property
-import ctypes
+from sympy import sympify
 
 from devito.arch import compiler_registry, platform_registry
 from devito.data import default_allocator
-from devito.exceptions import InvalidOperator
-from devito.logger import debug, info, perf, warning, is_log_enabled_for
+from devito.exceptions import InvalidOperator, ExecutionError
+from devito.logger import debug, info, perf, warning, is_log_enabled_for, switch_log_level
 from devito.ir.equations import LoweredEq, lower_exprs
 from devito.ir.clusters import ClusterGroup, clusterize
 from devito.ir.iet import (Callable, CInterface, EntryFunction, FindSymbols, MetaCall,
@@ -20,11 +21,12 @@ from devito.operator.registry import operator_selector
 from devito.mpi import MPI
 from devito.parameters import configuration
 from devito.passes import (Graph, lower_index_derivatives, generate_implicit,
-                           generate_macros, minimize_symbols, unevaluate)
+                           generate_macros, minimize_symbols, unevaluate,
+                           error_mapper)
 from devito.symbolics import estimate_cost
 from devito.tools import (DAG, OrderedSet, Signer, ReducerMap, as_tuple, flatten,
                           filter_sorted, frozendict, is_integer, split, timed_pass,
-                          timed_region)
+                          timed_region, contains_val)
 from devito.types import Grid, Evaluable
 
 __all__ = ['Operator']
@@ -136,13 +138,13 @@ class Operator(Callable):
     _default_headers = [('_POSIX_C_SOURCE', '200809L')]
     _default_includes = ['stdlib.h', 'math.h', 'sys/time.h']
     _default_globals = []
-    
+    _default_namespaces = []
 
     def __new__(cls, expressions, **kwargs):
         if expressions is None:
             # Return a dummy Callable. This is exploited by unpickling. Users
             # can't do anything useful with it
-            return super(Operator, cls).__new__(cls, **kwargs)
+            return super().__new__(cls, **kwargs)
 
         # Parse input arguments
         kwargs = parse_kwargs(**kwargs)
@@ -189,18 +191,16 @@ class Operator(Callable):
         op = Callable.__new__(cls, **irs.iet.args)
         Callable.__init__(op, **op.args)
 
-        # Headers
+        # Header files, etc.
         op._headers = OrderedSet(*cls._default_headers)
         op._headers.update(byproduct.headers)
-            
-        # Globals
         op._globals = OrderedSet(*cls._default_globals)
         op._globals.update(byproduct.globals)
-        
-        #Includes
         op._includes = OrderedSet(*cls._default_includes)
         op._includes.update(profiler._default_includes)
         op._includes.update(byproduct.includes)
+        op._namespaces = OrderedSet(*cls._default_namespaces)
+        op._namespaces.update(byproduct.namespaces)
 
         # Required for the jit-compilation
         op._compiler = kwargs['compiler']
@@ -276,9 +276,9 @@ class Operator(Callable):
         return IRs(expressions, clusters, stree, uiet, iet), byproduct
 
     @classmethod
-    def _rcompile_wrapper(cls, **kwargs):
-        def wrapper(expressions, kwargs=kwargs):
-            return rcompile(expressions, kwargs)
+    def _rcompile_wrapper(cls, **kwargs0):
+        def wrapper(expressions, **kwargs1):
+            return rcompile(expressions, {**kwargs0, **kwargs1})
         return wrapper
 
     @classmethod
@@ -321,8 +321,15 @@ class Operator(Callable):
         # Specialization is performed on unevaluated expressions
         expressions = cls._specialize_dsl(expressions, **kwargs)
 
-        # Lower functional DSL
+        # Lower FD derivatives
+        # NOTE: we force expansion of derivatives along SteppingDimensions
+        # because it drastically simplifies the subsequent lowering into
+        # ModuloDimensions
+        if not expand:
+            expand = lambda d: d.is_Stepping
         expressions = flatten([i._evaluate(expand=expand) for i in expressions])
+
+        # Scalarize the tensor equations, if any
         expressions = [j for i in expressions for j in i._flatten]
 
         # A second round of specialization is performed on evaluated expressions
@@ -450,7 +457,6 @@ class Operator(Callable):
             * Finalize (e.g., symbol definitions, array casts)
         """
         name = kwargs.get("name", "Kernel")
-        sregistry = kwargs['sregistry']
 
         # Wrap the IET with an EntryFunction (a special Callable representing
         # the entry point of the generated library)
@@ -458,8 +464,8 @@ class Operator(Callable):
         iet = EntryFunction(name, uiet, 'int', parameters, ())
 
         # Lower IET to a target-specific IET
-        graph = Graph(iet, sregistry=sregistry)
-        graph = cls._specialize_iet(graph, profiler=profiler, **kwargs)
+        graph = Graph(iet, **kwargs)
+        graph = cls._specialize_iet(graph, **kwargs)
 
         # Instrument the IET for C-level profiling
         # Note: this is postponed until after _specialize_iet because during
@@ -563,7 +569,13 @@ class Operator(Callable):
                 elif k in futures:
                     # An explicit override is later going to set `args[k]`
                     pass
-                elif is_integer(args[k]) and args[k] not in as_tuple(v):
+                elif k in kwargs:
+                    # User is in control
+                    # E.g., given a ConditionalDimension `t_sub` with factor `fact` and
+                    # a TimeFunction `usave(t_sub, x, y)`, an override for `fact` is
+                    # supplied w/o overriding `usave`; that's legal
+                    pass
+                elif is_integer(args[k]) and not contains_val(args[k], v):
                     raise ValueError("Default `%s` is incompatible with other args as "
                                      "`%s=%s`, while `%s=%s` is expected. Perhaps you "
                                      "forgot to override `%s`?" %
@@ -575,6 +587,11 @@ class Operator(Callable):
         discretizations = {getattr(kwargs[p.name], 'grid', None) for p in overrides}
         discretizations.update({getattr(p, 'grid', None) for p in defaults})
         discretizations.discard(None)
+        # Remove subgrids if multiple grids
+        if len(discretizations) > 1:
+            discretizations = {g for g in discretizations
+                               if not any(d.is_Derived for d in g.dimensions)}
+
         for i in discretizations:
             args.update(i._arg_values(**kwargs))
 
@@ -611,7 +628,8 @@ class Operator(Callable):
 
         # Sanity check
         for p in self.parameters:
-            p._arg_check(args, self._dspace[p], am=self._access_modes.get(p))
+            p._arg_check(args, self._dspace[p], am=self._access_modes.get(p),
+                         **kwargs)
         for d in self.dimensions:
             if d.is_Derived:
                 d._arg_check(args, self._dspace[p])
@@ -631,13 +649,20 @@ class Operator(Callable):
 
         return args
 
+    def _postprocess_errors(self, retval):
+        if retval == 0:
+            return
+        elif retval == error_mapper['Stability']:
+            raise ExecutionError("Detected nan/inf in some output Functions")
+        elif retval == error_mapper['KernelLaunch']:
+            raise ExecutionError("Kernel launch failed")
+        else:
+            raise ExecutionError("An error occurred during execution")
+
     def _postprocess_arguments(self, args, **kwargs):
         """Process runtime arguments upon returning from ``.apply()``."""
         for p in self.parameters:
-            try:
-                p._arg_apply(args[p.name], args[p.coordinates.name], kwargs.get(p.name))
-            except AttributeError:
-                p._arg_apply(args[p.name], kwargs.get(p.name))
+            p._arg_apply(args[p.name], alias=kwargs.get(p.name))
 
     @cached_property
     def _known_arguments(self):
@@ -691,8 +716,7 @@ class Operator(Callable):
         """
         if self._lib is None:
             with self._profiler.timer_on('jit-compile'):
-                recompiled, src_file = self._compiler.jit_compile(self._soname,
-                                                                  str(self.ccode))
+                recompiled, src_file = self._compiler.jit_compile(self._soname, str(self))
 
             elapsed = self._profiler.py_timers['jit-compile']
             if recompiled:
@@ -826,7 +850,7 @@ class Operator(Callable):
         try:
             cfunction = self.cfunction
             with self._profiler.timer_on('apply', comm=args.comm):
-                cfunction(*arg_values)
+                retval = cfunction(*arg_values)
         except ctypes.ArgumentError as e:
             if e.args[0].startswith("argument "):
                 argnum = int(e.args[0][9:].split(':')[0]) - 1
@@ -838,11 +862,15 @@ class Operator(Callable):
             else:
                 raise
 
+        # Perform error checking
+        self._postprocess_errors(retval)
+
         # Post-process runtime arguments
         self._postprocess_arguments(args, **kwargs)
 
-        # Output summary of performance achieved
-        return self._emit_apply_profiling(args)
+        # In case MPI is used restrict result logging to one rank only
+        with switch_log_level(comm=args.comm):
+            return self._emit_apply_profiling(args)
 
     # Performance profiling
 
@@ -925,15 +953,22 @@ class Operator(Callable):
 
         # Emit local, i.e. "per-rank" performance. Without MPI, this is the only
         # thing that will be emitted
-        for k, v in summary.items():
-            rank = "[rank%d]" % k.rank if k.rank is not None else ""
+        def lower_perfentry(v):
             if v.gflopss:
                 oi = "OI=%.2f" % fround(v.oi)
                 gflopss = "%.2f GFlops/s" % fround(v.gflopss)
                 gpointss = "%.2f GPts/s" % fround(v.gpointss)
-                metrics = "[%s]" % ", ".join([oi, gflopss, gpointss])
+                return "[%s]" % ", ".join([oi, gflopss, gpointss])
+            elif v.gpointss:
+                gpointss = "%.2f GPts/s" % fround(v.gpointss)
+                return "[%s]" % gpointss
             else:
-                metrics = ""
+                return ""
+
+        for k, v in summary.items():
+            rank = "[rank%d]" % k.rank if k.rank is not None else ""
+
+            metrics = lower_perfentry(v)
 
             itershapes = [",".join(str(i) for i in its) for its in v.itershapes]
             if len(itershapes) > 1:
@@ -945,9 +980,12 @@ class Operator(Callable):
             name = "%s%s<%s>" % (k.name, rank, itershapes)
 
             perf("%s* %s ran in %.2f s %s" % (indent, name, fround(v.time), metrics))
-            for n, time in summary.subsections.get(k.name, {}).items():
-                perf("%s+ %s ran in %.2f s [%.2f%%]" %
-                     (indent*2, n, time, fround(time/v.time*100)))
+            for n, v1 in summary.subsections.get(k.name, {}).items():
+                metrics = lower_perfentry(v1)
+
+                perf("%s+ %s ran in %.2f s [%.2f%%] %s" %
+                     (indent*2, n, fround(v1.time), fround(v1.time/v.time*100),
+                      metrics))
 
         # Emit performance mode and arguments
         perf_args = {}
@@ -1012,10 +1050,11 @@ class Operator(Callable):
 # dangerous as some of them (the minority) might break in some circumstances
 # if applied in cascade (e.g., `linearization` on top of `linearization`)
 rcompile_registry = {
+    'disk-swap': False,
+    'avoid_denormals': False,
     'mpi': False,
     'linearize': False,
-    'place-transfers': False,
-    'disk-swap': False
+    'place-transfers': False
 }
 
 
@@ -1064,6 +1103,15 @@ class ArgumentsMap(dict):
     def comm(self):
         """The MPI communicator the arguments are collective over."""
         return self.grid.comm if self.grid is not None else MPI.COMM_NULL
+
+    @property
+    def opkwargs(self):
+        temp_registry = {v: k for k, v in compiler_registry.items()}
+        compiler = temp_registry[self.compiler.__class__]
+
+        return {'platform': self.platform.name,
+                'compiler': compiler,
+                'language': self.language}
 
 
 def parse_kwargs(**kwargs):
@@ -1180,7 +1228,12 @@ def parse_kwargs(**kwargs):
 
     # `allocator`
     kwargs['allocator'] = default_allocator(
-        '%s.%s' % (kwargs['compiler'].__class__.__name__, kwargs['language'])
+        '%s.%s.%s' % (kwargs['compiler'].name,
+                      kwargs['language'],
+                      kwargs['platform'])
     )
+
+    # Normalize `subs`, if any
+    kwargs['subs'] = {k: sympify(v) for k, v in kwargs.get('subs', {}).items()}
 
     return kwargs

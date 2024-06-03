@@ -1,27 +1,25 @@
 from functools import singledispatch
 
 import cgen
-import sympy
 import numpy as np
+import sympy
 
 from devito.finite_differences import Max, Min
 from devito.ir import (Any, Forward, Iteration, List, Prodder, FindApplications,
-                       FindNodes, Transformer, Uxreplace, filter_iterations,
-                       retrieve_iteration_tree)
+                       FindNodes, FindSymbols, Transformer, Uxreplace,
+                       filter_iterations, retrieve_iteration_tree, pull_dims)
 from devito.passes.iet.engine import iet_pass
-from devito.symbolics import evalrel, has_integer_args
-from devito.tools import as_mapper, split
+from devito.ir.iet.efunc import DeviceFunction, EntryFunction
+from devito.symbolics import ValueLimit, evalrel, has_integer_args, limits_mapper
+from devito.tools import as_mapper, filter_ordered, split
 
-from devito.ir.iet import (Call, CallableBody, Callable)
-from devito.symbolics import String
-from devito.types import CustomDimension, Array, Symbol
 
 __all__ = ['avoid_denormals', 'hoist_prodders', 'relax_incr_dimensions',
            'generate_macros', 'minimize_symbols']
 
 
 @iet_pass
-def avoid_denormals(iet, platform=None):
+def avoid_denormals(iet, platform=None, **kwargs):
     """
     Introduce nodes in the Iteration/Expression tree that will expand to C
     macros telling the CPU to flush denormal numbers in hardware. Denormals
@@ -140,10 +138,20 @@ def relax_incr_dimensions(iet, options=None, **kwargs):
 
 @iet_pass
 def generate_macros(iet):
+    # Generate Macros from higher-level SymPy objects
     applications = FindApplications().visit(iet)
     headers = set().union(*[_generate_macros(i) for i in applications])
 
-    return iet, {'headers': headers}
+    # Some special Symbols may represent Macros defined in standard libraries,
+    # so we need to include the respective includes
+    limits = FindApplications(ValueLimit).visit(iet)
+    includes = set()
+    if limits & (set(limits_mapper[np.int32]) | set(limits_mapper[np.int64])):
+        includes.add('limits.h')
+    elif limits & (set(limits_mapper[np.float32]) | set(limits_mapper[np.float64])):
+        includes.add('float.h')
+
+    return iet, {'headers': headers, 'includes': includes}
 
 
 @singledispatch
@@ -176,30 +184,90 @@ def minimize_symbols(iet):
 
         * Remove redundant ModuloDimensions (e.g., due to using the
           `save=Buffer(2)` API)
+        * Abridge SubDimension names where possible to declutter generated
+          loop nests and shrink indices
     """
     iet = remove_redundant_moddims(iet)
+    iet = abridge_dim_names(iet)
 
     return iet, {}
 
 
 def remove_redundant_moddims(iet):
-    subs0 = {}
-    subs1 = {}
+    key = lambda d: d.is_Modulo and d.origin is not None
+    mds = [d for d in FindSymbols('dimensions').visit(iet) if key(d)]
+    if not mds:
+        return iet
+
+    mapper = as_mapper(mds, key=lambda md: md.origin % md.modulo)
+
+    subs = {}
+    for k, v in mapper.items():
+        chosen = v.pop(0)
+        subs.update({d: chosen for d in v})
+
+    body = Uxreplace(subs).visit(iet.body)
+    iet = iet._rebuild(body=body)
+
+    # ModuloDimensions are defined in Iteration headers, hence they must be
+    # removed from there too
+    subs = {}
     for n in FindNodes(Iteration).visit(iet):
-        mds = [d for d in n.uindices
-               if d.is_Modulo and d.origin is not None]
-        if not mds:
+        if not set(n.uindices) & set(mds):
             continue
+        subs[n] = n._rebuild(uindices=filter_ordered(n.uindices))
 
-        mapper = as_mapper(mds, key=lambda md: md.origin % md.modulo)
-        for k, v in mapper.items():
-            chosen = v.pop(0)
-            subs0.update({d: chosen for d in v})
-
-        uindices = [d for d in n.uindices if d not in subs0]
-        subs1[n] = n._rebuild(uindices=uindices)
-
-    iet = Transformer(subs1, nested=True).visit(iet)
-    iet = Uxreplace(subs0).visit(iet)
+    iet = Transformer(subs, nested=True).visit(iet)
 
     return iet
+
+
+@singledispatch
+def abridge_dim_names(iet):
+    return iet
+
+
+@abridge_dim_names.register(DeviceFunction)
+def _(iet):
+    # Catch SubDimensions not in EntryFunction
+    mapper = _rename_subdims(iet, FindSymbols('dimensions').visit(iet))
+    return Uxreplace(mapper, nested=True).visit(iet)
+
+
+@abridge_dim_names.register(EntryFunction)
+def _(iet):
+    # SubDimensions in the main loop nests
+    mapper = {}
+    # Build a mapper replacing SubDimension names with respective root dimension
+    # names where possible
+    for tree in retrieve_iteration_tree(iet):
+        # Rename SubDimensions present as indices in innermost loop
+        mapper.update(_rename_subdims(tree.inner, tree.dimensions))
+
+        # Update unbound index parents with renamed SubDimensions
+        dims = set().union(*[i.uindices for i in tree])
+        dims = [d for d in dims if d.is_Incr and d.parent in mapper]
+        mapper.update({d: d._rebuild(parent=mapper[d.parent]) for d in dims})
+
+        # Update parents of CIRE-generated ModuloDimensions
+        dims = FindSymbols('dimensions').visit(tree)
+        dims = [d for d in dims if d.is_Modulo and d.parent in mapper]
+        mapper.update({d: d._rebuild(parent=mapper[d.parent]) for d in dims})
+
+    return Uxreplace(mapper, nested=True).visit(iet)
+
+
+def _rename_subdims(target, dimensions):
+    # Find SubDimensions or SubDimension-derived dimensions used as indices in
+    # the expression
+    indexeds = FindSymbols('indexeds').visit(target)
+    dims = pull_dims(indexeds, flag=False)
+    dims = [d for d in dims if any([dim.is_Sub for dim in d._defines])]
+    dims = [d for d in dims if not d.is_SubIterator]
+    names = [d.root.name for d in dims]
+
+    # Rename them to use the name of their root dimension if this will not cause a
+    # clash with Dimensions or other renamed SubDimensions
+    return {d: d._rebuild(d.root.name) for d in dims
+            if d.root not in dimensions
+            and names.count(d.root.name) < 2}

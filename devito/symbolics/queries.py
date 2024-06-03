@@ -20,7 +20,8 @@ __all__ = ['q_leaf', 'q_indexed', 'q_terminal', 'q_function', 'q_routine',
 # * Number
 # * Symbol
 # * Indexed
-extra_leaves = (FieldFromPointer, FieldFromComposite, IndexedBase, AbstractObject)
+extra_leaves = (FieldFromPointer, FieldFromComposite, IndexedBase, AbstractObject,
+                IndexedPointer)
 
 
 def q_symbol(expr):
@@ -31,7 +32,9 @@ def q_symbol(expr):
 
 
 def q_leaf(expr):
-    return expr.is_Atom or expr.is_Indexed or isinstance(expr, extra_leaves)
+    return (expr.is_Atom or
+            expr.is_Indexed or
+            isinstance(expr, extra_leaves))
 
 
 def q_indexed(expr):
@@ -43,10 +46,15 @@ def q_function(expr):
     return isinstance(expr, DiscreteFunction)
 
 
+def q_derivative(expr):
+    from devito.finite_differences.derivative import Derivative
+    return isinstance(expr, Derivative)
+
+
 def q_terminal(expr):
     return (expr.is_Symbol or
             expr.is_Indexed or
-            isinstance(expr, extra_leaves + (IndexedPointer,)))
+            isinstance(expr, extra_leaves))
 
 
 def q_routine(expr):

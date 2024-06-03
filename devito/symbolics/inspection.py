@@ -1,7 +1,8 @@
 from functools import singledispatch
 
 import numpy as np
-from sympy import Function, Indexed, Integer, Mul, Number, Pow, S, Symbol, Tuple
+from sympy import (Function, Indexed, Integer, Mul, Number,
+                   Pow, S, Symbol, Tuple)
 
 from devito.finite_differences import Derivative
 from devito.finite_differences.differentiable import IndexDerivative
@@ -10,8 +11,9 @@ from devito.symbolics.extended_sympy import (INT, CallFromPointer, Cast,
                                              DefFunction, ReservedWord)
 from devito.symbolics.queries import q_routine
 from devito.tools import as_tuple, prod
+from devito.tools.dtypes_lowering import infer_dtype
 
-__all__ = ['compare_ops', 'estimate_cost', 'has_integer_args']
+__all__ = ['compare_ops', 'estimate_cost', 'has_integer_args', 'sympy_dtype']
 
 
 def compare_ops(e1, e2):
@@ -42,9 +44,14 @@ def compare_ops(e1, e2):
     >>> compare_ops(u[x] + u[x+1], u[x] + u[y+10])
     True
     """
-    if type(e1) == type(e2) and len(e1.args) == len(e2.args):
+    if type(e1) is type(e2) and len(e1.args) == len(e2.args):
         if e1.is_Atom:
             return True if e1 == e2 else False
+        elif isinstance(e1, IndexDerivative) and isinstance(e2, IndexDerivative):
+            if e1.mapper == e2.mapper:
+                return compare_ops(e1.expr, e2.expr)
+            else:
+                return False
         elif e1.is_Indexed and e2.is_Indexed:
             return True if e1.base == e2.base else False
         else:
@@ -83,6 +90,7 @@ def estimate_cost(exprs, estimate=False):
         # We don't use SymPy's count_ops because we do not count integer arithmetic
         # (e.g., array index functions such as i+1 in A[i+1])
         # Also, the routine below is *much* faster than count_ops
+        seen = {}
         flops = 0
         for expr in as_tuple(exprs):
             # TODO: this if-then should be part of singledispatch too, but because
@@ -95,7 +103,7 @@ def estimate_cost(exprs, estimate=False):
             else:
                 e = expr
 
-            flops += _estimate_cost(e, estimate)[0]
+            flops += _estimate_cost(e, estimate, seen)[0]
 
         return flops
     except:
@@ -108,14 +116,32 @@ estimate_values = {
     'pow': 50,
     'div': 5,
     'Abs': 5,
+    'floor': 1,
+    'ceil': 1
 }
 
 
+def dont_count_if_seen(func):
+    """
+    This decorator is used to avoid counting the same expression multiple
+    times. This is necessary because the same expression may appear multiple
+    times in the same expression tree or even across different expressions.
+    """
+    def wrapper(expr, estimate, seen):
+        try:
+            _, flags = seen[expr]
+            flops = 0
+        except KeyError:
+            flops, flags = seen[expr] = func(expr, estimate, seen)
+        return flops, flags
+    return wrapper
+
+
 @singledispatch
-def _estimate_cost(expr, estimate):
+def _estimate_cost(expr, estimate, seen):
     # Retval: flops (int), flag (bool)
     # The flag tells wether it's an integer expression (implying flops==0) or not
-    flops, flags = zip(*[_estimate_cost(a, estimate) for a in expr.args])
+    flops, flags = zip(*[_estimate_cost(a, estimate, seen) for a in expr.args])
     flops = sum(flops)
     if all(flags):
         # `expr` is an operation involving integer operands only
@@ -128,28 +154,28 @@ def _estimate_cost(expr, estimate):
 
 @_estimate_cost.register(Tuple)
 @_estimate_cost.register(CallFromPointer)
-def _(expr, estimate):
+def _(expr, estimate, seen):
     try:
-        flops, flags = zip(*[_estimate_cost(a, estimate) for a in expr.args])
+        flops, flags = zip(*[_estimate_cost(a, estimate, seen) for a in expr.args])
     except ValueError:
         flops, flags = [], []
     return sum(flops), all(flags)
 
 
 @_estimate_cost.register(Integer)
-def _(expr, estimate):
+def _(expr, estimate, seen):
     return 0, True
 
 
 @_estimate_cost.register(Number)
 @_estimate_cost.register(ReservedWord)
-def _(expr, estimate):
+def _(expr, estimate, seen):
     return 0, False
 
 
 @_estimate_cost.register(Symbol)
 @_estimate_cost.register(Indexed)
-def _(expr, estimate):
+def _(expr, estimate, seen):
     try:
         if issubclass(expr.dtype, np.integer):
             return 0, True
@@ -159,27 +185,27 @@ def _(expr, estimate):
 
 
 @_estimate_cost.register(Mul)
-def _(expr, estimate):
-    flops, flags = _estimate_cost.registry[object](expr, estimate)
+def _(expr, estimate, seen):
+    flops, flags = _estimate_cost.registry[object](expr, estimate, seen)
     if {S.One, S.NegativeOne}.intersection(expr.args):
         flops -= 1
     return flops, flags
 
 
 @_estimate_cost.register(INT)
-def _(expr, estimate):
-    return _estimate_cost(expr.base, estimate)[0], True
+def _(expr, estimate, seen):
+    return _estimate_cost(expr.base, estimate, seen)[0], True
 
 
 @_estimate_cost.register(Cast)
-def _(expr, estimate):
-    return _estimate_cost(expr.base, estimate)[0], False
+def _(expr, estimate, seen):
+    return _estimate_cost(expr.base, estimate, seen)[0], False
 
 
 @_estimate_cost.register(Function)
-def _(expr, estimate):
+def _(expr, estimate, seen):
     if q_routine(expr):
-        flops, _ = zip(*[_estimate_cost(a, estimate) for a in expr.args])
+        flops, _ = zip(*[_estimate_cost(a, estimate, seen) for a in expr.args])
         flops = sum(flops)
         if isinstance(expr, DefFunction):
             # Bypass user-defined or language-specific functions
@@ -197,8 +223,8 @@ def _(expr, estimate):
 
 
 @_estimate_cost.register(Pow)
-def _(expr, estimate):
-    flops, _ = zip(*[_estimate_cost(a, estimate) for a in expr.args])
+def _(expr, estimate, seen):
+    flops, _ = zip(*[_estimate_cost(a, estimate, seen) for a in expr.args])
     flops = sum(flops)
     if estimate:
         if expr.exp.is_Number:
@@ -219,13 +245,15 @@ def _(expr, estimate):
 
 
 @_estimate_cost.register(Derivative)
-def _(expr, estimate):
-    return _estimate_cost(expr._evaluate(expand=False), estimate)
+@dont_count_if_seen
+def _(expr, estimate, seen):
+    return _estimate_cost(expr._evaluate(expand=False), estimate, seen)
 
 
 @_estimate_cost.register(IndexDerivative)
-def _(expr, estimate):
-    flops, _ = _estimate_cost(expr.expr, estimate)
+@dont_count_if_seen
+def _(expr, estimate, seen):
+    flops, _ = _estimate_cost(expr.expr, estimate, seen)
 
     # It's an increment
     flops += 1
@@ -260,3 +288,16 @@ def has_integer_args(*args):
         except AttributeError:
             res = res and has_integer_args(a)
     return res
+
+
+def sympy_dtype(expr, base=None):
+    """
+    Infer the dtype of the expression.
+    """
+    dtypes = {base} - {None}
+    for i in expr.free_symbols:
+        try:
+            dtypes.add(i.dtype)
+        except AttributeError:
+            pass
+    return infer_dtype(dtypes)

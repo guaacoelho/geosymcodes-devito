@@ -8,7 +8,7 @@ from sympy import And, Ge, Gt, Le, Lt, Mul, true
 
 from devito.ir.support.space import Forward, IterationDirection
 from devito.symbolics import CondEq, CondNe
-from devito.tools import Pickable, as_tuple, frozendict
+from devito.tools import Pickable, as_tuple, frozendict, split
 from devito.types import Dimension
 
 __all__ = ['GuardFactor', 'GuardBound', 'GuardBoundNext', 'BaseGuardBound',
@@ -103,7 +103,7 @@ GuardBound = GuardBoundLe
 # *** GuardBoundNext
 
 
-class BaseGuardBoundNext(Guard):
+class BaseGuardBoundNext(Guard, Pickable):
 
     """
     A guard to avoid out-of-bounds iteration.
@@ -118,11 +118,13 @@ class BaseGuardBoundNext(Guard):
     given `direction`.
     """
 
+    __rargs__ = ('d', 'direction')
+
     def __new__(cls, d, direction, **kwargs):
         assert isinstance(d, Dimension)
         assert isinstance(direction, IterationDirection)
 
-        if direction is Forward:
+        if direction == Forward:
             p0 = d.root
             p1 = d.root.symbolic_max
 
@@ -228,9 +230,22 @@ class Guards(frozendict):
             return Guards(m)
 
         try:
-            m[d] = And(m[d], guard)
+            m[d] = simplify_and(m[d], guard)
         except KeyError:
             m[d] = guard
+
+        return Guards(m)
+
+    def xandg(self, d, guard):
+        m = dict(self)
+
+        if guard == true:
+            return Guards(m)
+
+        try:
+            m[d] = And(m[d], guard)
+        except KeyError:
+            pass
 
         return Guards(m)
 
@@ -256,3 +271,45 @@ class Guards(frozendict):
         m = {d: v for d, v in self.items() if key(d)}
 
         return Guards(m)
+
+
+# *** Utils
+
+def simplify_and(relation, v):
+    """
+    Given `x = And(*relation.args, v)`, return `relation` if `x ≡ relation`,
+    `x` otherwise.
+
+    SymPy doesn't have a builtin function to simplify boolean inequalities; here,
+    we run a set of simple checks to at least discard the most obvious (and thus
+    annoying to see in the generated code) redundancies.
+    """
+    if isinstance(relation, And):
+        candidates, other = split(list(relation.args), lambda a: type(a) is type(v))
+    elif type(relation) is type(v):
+        candidates, other = [relation], []
+    else:
+        candidates, other = [], [relation, v]
+
+    covered = False
+    new_args = []
+    for a in candidates:
+        if a.lhs is v.lhs:
+            covered = True
+            try:
+                if type(a) in (Gt, Ge) and v.rhs > a.rhs:
+                    new_args.append(v)
+                elif type(a) in (Lt, Le) and v.rhs < a.rhs:
+                    new_args.append(v)
+                else:
+                    new_args.append(a)
+            except TypeError:
+                # E.g., `v.rhs = const + z_M` and `a.rhs = z_M`, so the inequalities
+                # above are not evaluable to True/False
+                new_args.append(a)
+        else:
+            new_args.append(a)
+    if not covered:
+        new_args.append(v)
+
+    return And(*(new_args + other))

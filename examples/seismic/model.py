@@ -57,7 +57,7 @@ class PhysicalDomain(SubDomain):
     name = 'physdomain'
 
     def __init__(self, so, fs=False):
-        super(PhysicalDomain, self).__init__()
+        super().__init__()
         self.so = so
         self.fs = fs
 
@@ -73,7 +73,7 @@ class FSDomain(SubDomain):
     name = 'fsdomain'
 
     def __init__(self, so):
-        super(FSDomain, self).__init__()
+        super().__init__()
         self.size = so
 
     def define(self, dimensions):
@@ -167,7 +167,7 @@ class GenericModel(object):
         return {i.name: kwargs.get(i.name, i) or i for i in known}
 
     def _gen_phys_param(self, field, name, space_order, is_param=True,
-                        default_value=0):
+                        default_value=0, **kwargs):
         if field is None:
             return default_value
         if isinstance(field, np.ndarray):
@@ -270,8 +270,8 @@ class SeismicModel(GenericModel):
 
     def __init__(self, origin, spacing, shape, space_order, vp, nbl=20, fs=False,
                  dtype=np.float32, subdomains=(), bcs="mask", grid=None, **kwargs):
-        super(SeismicModel, self).__init__(origin, spacing, shape, space_order, nbl,
-                                           dtype, subdomains, grid=grid, bcs=bcs, fs=fs)
+        super().__init__(origin, spacing, shape, space_order, nbl,
+                         dtype, subdomains, grid=grid, bcs=bcs, fs=fs)
 
         # Initialize physics
         self._initialize_physics(vp, space_order, **kwargs)
@@ -305,7 +305,6 @@ class SeismicModel(GenericModel):
             self.lam = self._gen_phys_param((vp**2 - 2. * vs**2)/b, 'lam', space_order,
                                             is_param=True)
             self.mu = self._gen_phys_param(vs**2 / b, 'mu', space_order, is_param=True)
-
         else:
             # All other seismic models have at least a velocity
             self.vp = self._gen_phys_param(vp, 'vp', space_order)

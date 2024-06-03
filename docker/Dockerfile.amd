@@ -3,8 +3,7 @@
 # Based on  https://github.com/amd/InfinityHub-CI/tree/main/base-gpu-mpi-rocm-docker
 ##############################################################
 
-ARG ROCM_VERSION=5.4.2
-ARG arch="aomp"
+ARG ROCM_VERSION=5.5.1
 
 FROM rocm/dev-ubuntu-22.04:${ROCM_VERSION}-complete as sdk-base
 
@@ -38,9 +37,6 @@ RUN rm /etc/apt/sources.list.d/* \
     hwloc \
   && apt-get clean
 
-# Until rocm base has it fixed
-RUN ln -s /opt/rocm/llvm/bin/offload-arch /opt/rocm/bin/offload-arch
-
 # Requires cmake > 3.22 
 RUN mkdir -p /opt/cmake  \
   && wget --no-check-certificate --quiet -O - https://cmake.org/files/v3.22/cmake-3.22.2-linux-x86_64.tar.gz | tar --strip-components=1 -xz -C /opt/cmake
@@ -49,13 +45,15 @@ ENV ROCM_HOME=/opt/rocm \
     UCX_HOME=/opt/ucx \
     OMPI_HOME=/opt/ompi
 
+# Until rocm base has it fixed
+RUN ln -s /opt/rocm/llvm/bin/offload-arch /opt/rocm/bin/offload-arch
+
 # Install tmpi
 RUN curl https://raw.githubusercontent.com/Azrael3000/tmpi/master/tmpi -o /usr/local/bin/tmpi
 
 # Adding rocm/cmake to the Environment 
 ENV PATH=$ROCM_HOME/bin:$ROCM_HOME/profiler/bin:$ROCM_HOME/opencl/bin:/opt/cmake/bin:$PATH \
     LD_LIBRARY_PATH=$ROCM_HOME/lib:$ROCM_HOME/lib64:$ROCM_HOME/llvm/lib:$LD_LIBRARY_PATH \
-    LIBRARY_PATH=$ROCM_HOME/lib:$ROCM_HOME/lib64:$LIBRARY_PATH \
     C_INCLUDE_PATH=$ROCM_HOME/include:$C_INCLUDE_PATH \
     CPLUS_INCLUDE_PATH=$ROCM_HOME/include:$CPLUS_INCLUDE_PATH \
     CPATH=$ROCM_HOME/include:$CPATH \
@@ -65,7 +63,7 @@ WORKDIR /tmp
 
 # Install UCX
 RUN cd /tmp/ \
-    && git clone https://github.com/openucx/ucx.git -b ${UCX_BRANCH} \
+    && git clone --depth 1 https://github.com/openucx/ucx.git -b ${UCX_BRANCH} \
     && cd ucx \
     && ./autogen.sh \
     && mkdir build \
@@ -84,12 +82,13 @@ RUN cd /tmp/ \
 
 # Install OpenMPI
 RUN cd /tmp \
-    && git clone --recursive https://github.com/open-mpi/ompi.git -b ${OMPI_BRANCH} \
+    && git clone --depth 1 --recursive https://github.com/open-mpi/ompi.git -b ${OMPI_BRANCH} \
     && cd ompi \
     && ./autogen.pl \
     && mkdir build \
     && cd build \
     && ../configure --prefix=$OMPI_HOME --with-ucx=$UCX_HOME \
+        CC=amdclang CXX=amdclang++ FC=amdflang F90=amdflang \
         --enable-mca-no-build=btl-uct  \
         --without-verbs \
         --with-pmix  \
@@ -100,19 +99,16 @@ RUN cd /tmp \
     && make install
 
 # Cleanup
-RUN rm -rf /tmp/ompi && rm -rf /tmp/ucx
-
+RUN rm -rf /tmp/ucx && rm -rf /tmp/ompi
 
 # Adding OpenMPI and UCX to Environment
 ENV PATH=$OMPI_HOME/bin:$UCX_HOME/bin:$PATH \
     LD_LIBRARY_PATH=$OMPI_HOME/lib:$UCX_HOME/lib:$LD_LIBRARY_PATH \
-    LIBRARY_PATH=$OMPI_HOME/lib:$UCX_HOME/lib:$LIBRARY_PATH \
     C_INCLUDE_PATH=$OMPI_HOME/include:$UCX_HOME/include:$C_INCLUDE_PATH \ 
     CPLUS_INCLUDE_PATH=$OMPI_HOME/include:$UCX_HOME/include:$CPLUS_INCLUDE_PATH \ 
     CPATH=$OMPI_HOME/include:$UCX_HOME/include:$CPATH \
     INCLUDE=$OMPI_HOME/include:$UCX_HOME/include:$INCLUDE \
     PKG_CONFIG_PATH=$OMPI_HOME/lib/pkgconfig:$UCX_HOME/lib/pkgconfig:$PKG_CONFIG_PATH
-
 
 # Adding environment variable for Running as ROOT
 ENV OMPI_ALLOW_RUN_AS_ROOT=1
@@ -126,17 +122,17 @@ ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 RUN apt-get update && \
     apt-get install -y dh-autoreconf python3-venv python3-dev python3-pip
 
-# Build mpi4py against amdclang
-RUN python3 -m venv /venv && \
-    /venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /venv/bin/pip install --no-cache-dir mpi4py && \
-    rm -rf ~/.cache/pip
+RUN apt-get clean && apt-get autoclean && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+EXPOSE 8888
+CMD ["/bin/bash"]
 
 ########################################################################
 # AOMP for GPUs (OpenMP offloading)
 ########################################################################
 # This will only trigger if arch is aomp since the final stage depends on it
-FROM sdk-base as aomp
+FROM sdk-base as amdclang
 
 # MPI env
 ENV OMPI_CC="amdclang"
@@ -146,7 +142,6 @@ ENV OMPI_CXX="amdclang++"
 ENV DEVITO_ARCH="aomp"
 ENV DEVITO_PLATFORM="amdgpuX"
 ENV DEVITO_LANGUAGE="openmp"
-
 
 ########################################################################
 # HIPCC for GPUs (HIP)
@@ -162,15 +157,3 @@ ENV OMPI_CXX="hipcc"
 ENV DEVITO_ARCH="hip"
 ENV DEVITO_PLATFORM="amdgpuX"
 ENV DEVITO_LANGUAGE="hip"
-
-
-########################################################################
-# Final image
-########################################################################
-FROM ${arch} as final
-
-RUN apt-get clean && apt-get autoclean && apt-get autoremove && \
-    rm -rf /var/lib/apt/lists/*
-
-EXPOSE 8888
-CMD ["/bin/bash"]

@@ -2,30 +2,31 @@ from functools import partial
 from hashlib import sha1
 from os import environ, path, makedirs
 from packaging.version import Version
-from subprocess import DEVNULL, PIPE, CalledProcessError, check_output, check_call, run
+from subprocess import (DEVNULL, PIPE, CalledProcessError, check_output,
+                        check_call, run)
 import platform
 import warnings
-import sys
 import time
 
 import numpy.ctypeslib as npct
 from codepy.jit import compile_from_string
-from codepy.toolchain import GCCToolchain
+from codepy.toolchain import (GCCToolchain,
+                              call_capture_output as _call_capture_output)
 
-from devito.arch import (AMDGPUX, Cpu64, M1, NVIDIAX, POWER8, POWER9, GRAVITON,
-                         INTELGPUX, IntelSkylake, get_nvidia_cc, check_cuda_runtime,
+from devito.arch import (AMDGPUX, Cpu64, AppleArm, NVIDIAX, POWER8, POWER9, GRAVITON,
+                         IntelDevice, get_nvidia_cc, check_cuda_runtime,
                          get_m1_llvm_path)
 from devito.exceptions import CompilationError
-from devito.logger import debug, warning, error
+from devito.logger import debug, warning
 from devito.parameters import configuration
 from devito.tools import (as_list, change_directory, filter_ordered,
-                          memoized_func, memoized_meth, make_tempdir)
+                          memoized_func, make_tempdir)
 
 __all__ = ['sniff_mpi_distro', 'compiler_registry']
 
 
 @memoized_func
-def sniff_compiler_version(cc):
+def sniff_compiler_version(cc, allow_fail=False):
     """
     Detect the compiler version.
 
@@ -40,9 +41,11 @@ def sniff_compiler_version(cc):
             return Version("0")
     except UnicodeDecodeError:
         return Version("0")
-    except FileNotFoundError:
-        error("The `%s` compiler isn't available on this system" % cc)
-        sys.exit(1)
+    except OSError:
+        if allow_fail:
+            return Version("0")
+        else:
+            raise RuntimeError("The `%s` compiler isn't available on this system" % cc)
 
     if ver.startswith("gcc"):
         compiler = "gcc"
@@ -52,8 +55,12 @@ def sniff_compiler_version(cc):
         compiler = "clang"
     elif ver.startswith("Homebrew clang"):
         compiler = "clang"
+    elif ver.startswith("Intel"):
+        compiler = "icx"
     elif ver.startswith("icc"):
         compiler = "icc"
+    elif ver.startswith("icx"):
+        compiler = "icx"
     elif ver.startswith("pgcc"):
         compiler = "pgcc"
     elif ver.startswith("cray"):
@@ -62,7 +69,7 @@ def sniff_compiler_version(cc):
         compiler = "unknown"
 
     ver = Version("0")
-    if compiler in ["gcc", "icc"]:
+    if compiler in ["gcc", "icc", "icx"]:
         try:
             # gcc-7 series only spits out patch level on dumpfullversion.
             res = run([cc, "-dumpfullversion"], stdout=PIPE, stderr=DEVNULL)
@@ -119,6 +126,15 @@ def sniff_mpi_flags(mpicc='mpicc'):
     return compile_flags.split(), link_flags.split()
 
 
+@memoized_func
+def call_capture_output(cmd):
+    """
+    Memoize calls to codepy's `call_capture_output` to avoid leaking memory due
+    to some prefork/subprocess voodoo.
+    """
+    return _call_capture_output(cmd)
+
+
 class Compiler(GCCToolchain):
     """
     Base class for all compiler classes.
@@ -150,28 +166,29 @@ class Compiler(GCCToolchain):
     suffix : str, optional
         The JIT compiler version to be used. For example, assuming ``CC=gcc`` and
         ``suffix='4.9'``, the ``gcc-4.9`` will be used as JIT compiler.
-    cpp : bool, optional
-        If True, JIT compile using a C++ compiler. Defaults to False.
-    mpi : bool, optional
-        If True, JIT compile using an MPI compiler. Defaults to False.
+    cpp : bool, optional, default=False
+        If True, JIT compile using a C++ compiler.
+    mpi : bool, optional, default=False
+        If True, JIT compile using an MPI compiler.
     platform : Platform, optional
         The target Platform on which the JIT compiler will be used.
     """
 
     fields = {'cc', 'ld'}
+    _cpp = False
 
     def __init__(self, **kwargs):
-        super(Compiler, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
         self.__lookup_cmds__()
 
         self.suffix = kwargs.get('suffix')
         if not kwargs.get('mpi'):
-            self.cc = self.CC if kwargs.get('cpp', False) is False else self.CXX
+            self.cc = self.CC if self._cpp is False else self.CXX
             self.cc = self.cc if self.suffix is None else ('%s-%s' %
                                                            (self.cc, self.suffix))
         else:
-            self.cc = self.MPICC if kwargs.get('cpp', False) is False else self.MPICXX
+            self.cc = self.MPICC if self._cpp is False else self.MPICXX
         self.ld = self.cc  # Wanted by the superclass
 
         self.cflags = ['-O3', '-g', '-fPIC', '-Wall', '-std=c99']
@@ -183,7 +200,7 @@ class Compiler(GCCToolchain):
         self.defines = []
         self.undefines = []
 
-        self.src_ext = 'c' if kwargs.get('cpp', False) is False else 'cpp'
+        self.src_ext = 'c' if self._cpp is False else 'cpp'
 
         if platform.system() == "Linux":
             self.so_ext = '.so'
@@ -194,14 +211,10 @@ class Compiler(GCCToolchain):
         else:
             raise NotImplementedError("Unsupported platform %s" % platform)
 
-        if self.suffix is not None:
-            try:
-                self.version = Version(str(float(self.suffix)))
-            except (TypeError, ValueError):
-                self.version = Version(self.suffix)
-        else:
-            # Knowing the version may still be useful to pick supported flags
-            self.version = sniff_compiler_version(self.CC)
+        self.__init_finalize__(**kwargs)
+
+    def __init_finalize__(self, **kwargs):
+        pass
 
     def __new_with__(self, **kwargs):
         """
@@ -212,12 +225,34 @@ class Compiler(GCCToolchain):
                               mpi=kwargs.pop('mpi', configuration['mpi']),
                               **kwargs)
 
-    @memoized_meth
+    @property
+    def name(self):
+        return self.__class__.__name__
+
+    @property
+    def version(self):
+        if self.suffix is not None:
+            try:
+                version = Version(str(float(self.suffix)))
+            except (TypeError, ValueError):
+                version = Version(self.suffix)
+        else:
+            # Knowing the version may still be useful to pick supported flags
+            allow_fail = isinstance(self, CustomCompiler)
+            version = sniff_compiler_version(self.CC, allow_fail=allow_fail)
+
+        return version
+
+    def get_version(self):
+        result, stdout, stderr = call_capture_output((self.cc, "--version"))
+        if result != 0:
+            raise RuntimeError(f"version query failed: {stderr}")
+        return stdout
+
     def get_jit_dir(self):
         """A deterministic temporary directory for jit-compiled objects."""
         return make_tempdir('jitcache')
 
-    @memoized_meth
     def get_codepy_dir(self):
         """A deterministic temporary directory for the codepy cache."""
         return make_tempdir('codepy')
@@ -373,12 +408,10 @@ class Compiler(GCCToolchain):
 
 class GNUCompiler(Compiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+    def __init_finalize__(self, **kwargs):
         platform = kwargs.pop('platform', configuration['platform'])
 
-        self.cflags += ['-march=native', '-Wno-unused-result',
+        self.cflags += ['-Wno-unused-result',
                         '-Wno-unused-variable', '-Wno-unused-but-set-variable']
 
         if configuration['safe-math']:
@@ -386,11 +419,21 @@ class GNUCompiler(Compiler):
         else:
             self.cflags.append('-ffast-math')
 
-        if isinstance(platform, IntelSkylake):
-            # The default is `=256` because avx512 slows down the CPU frequency;
-            # however, we empirically found that stencils generally benefit
-            # from `=512`
-            self.cflags.append('-mprefer-vector-width=512')
+        if platform.isa == 'avx512':
+            if self.version >= Version("8.0.0"):
+                # The default is `=256` because avx512 slows down the CPU frequency;
+                # however, we empirically found that stencils generally benefit
+                # from `=512`
+                self.cflags.append('-mprefer-vector-width=512')
+            else:
+                # Unsupported on earlier versions
+                pass
+
+        if platform in [POWER8, POWER9]:
+            # -march isn't supported on power architectures, is -mtune needed?
+            self.cflags = ['-mcpu=native'] + self.cflags
+        else:
+            self.cflags = ['-march=native'] + self.cflags
 
         language = kwargs.pop('language', configuration['language'])
         try:
@@ -412,9 +455,8 @@ class GNUCompiler(Compiler):
 
 class ArmCompiler(GNUCompiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+    def __init_finalize__(self, **kwargs):
+        GNUCompiler.__init_finalize__(self, **kwargs)
         platform = kwargs.pop('platform', configuration['platform'])
 
         # Graviton flag
@@ -424,12 +466,12 @@ class ArmCompiler(GNUCompiler):
 
 class ClangCompiler(Compiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init_finalize__(self, **kwargs):
 
         self.cflags += ['-Wno-unused-result', '-Wno-unused-variable']
         if not configuration['safe-math']:
             self.cflags.append('-ffast-math')
+        self.cflags.append('-fdenormal-fp-math=ieee')
 
         language = kwargs.pop('language', configuration['language'])
         platform = kwargs.pop('platform', configuration['platform'])
@@ -451,14 +493,16 @@ class ClangCompiler(Compiler):
                                  '-fopenmp-targets=amdgcn-amd-amdhsa',
                                  '-Xopenmp-target=amdgcn-amd-amdhsa']
                 self.ldflags += ['-march=%s' % platform.march]
-        elif platform is M1:
+        elif isinstance(platform, AppleArm):
             # NOTE:
-            # Apple M1 supports OpenMP through Apple's LLVM compiler.
+            # Apple Mx supports OpenMP through Apple's LLVM compiler.
             # The compiler can be installed with Homebrew or can be built from scratch.
             # Check if installed and set compiler flags accordingly
             llvmm1 = get_m1_llvm_path(language)
             if llvmm1 and language == 'openmp':
-                self.ldflags += ['-mcpu=apple-m1', '-fopenmp', '-L%s' % llvmm1['libs']]
+                mx = platform.march
+                self.ldflags += ['-mcpu=apple-%s' % mx,
+                                 '-fopenmp', '-L%s' % llvmm1['libs']]
                 self.cflags += ['-Xclang', '-I%s' % llvmm1['include']]
         else:
             if platform in [POWER8, POWER9]:
@@ -491,8 +535,7 @@ class AOMPCompiler(Compiler):
 
     """AMD's fork of Clang for OpenMP offloading on both AMD and NVidia cards."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init_finalize__(self, **kwargs):
 
         language = kwargs.pop('language', configuration['language'])
         platform = kwargs.pop('platform', configuration['platform'])
@@ -525,8 +568,7 @@ class AOMPCompiler(Compiler):
 
 class DPCPPCompiler(Compiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init_finalize__(self, **kwargs):
 
         self.cflags += ['-qopenmp', '-fopenmp-targets=spir64']
 
@@ -541,8 +583,9 @@ class DPCPPCompiler(Compiler):
 
 class PGICompiler(Compiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, cpp=True, **kwargs)
+    _cpp = True
+
+    def __init_finalize__(self, **kwargs):
 
         self.cflags.remove('-std=c99')
         self.cflags.remove('-O3')
@@ -587,8 +630,9 @@ class NvidiaCompiler(PGICompiler):
 
 class CudaCompiler(Compiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, cpp=True, **kwargs)
+    _cpp = True
+
+    def __init_finalize__(self, **kwargs):
 
         self.cflags.remove('-std=c99')
         self.cflags.remove('-Wall')
@@ -622,7 +666,11 @@ class CudaCompiler(Compiler):
                     proc_link_flags.append(i)
             self.ldflags.extend(proc_link_flags)
 
-        self.cflags.append('-arch=native')
+        cc = get_nvidia_cc()
+        if cc:
+            self.cflags.append(f'-arch=sm_{cc}')
+        else:
+            self.cflags.append('-arch=native')
 
         # Disable `warning #1650-D: result of call is not used`
         # See `https://gist.github.com/gavinb/f2320f9eaa0e0a7efca6877a34047a9d` about
@@ -652,8 +700,9 @@ class CudaCompiler(Compiler):
 
 class HipCompiler(Compiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, cpp=True, **kwargs)
+    _cpp = True
+
+    def __init_finalize__(self, **kwargs):
 
         self.cflags.remove('-std=c99')
         self.cflags.remove('-Wall')
@@ -681,9 +730,7 @@ class HipCompiler(Compiler):
 
 class IntelCompiler(Compiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+    def __init_finalize__(self, **kwargs):
         platform = kwargs.pop('platform', configuration['platform'])
         language = kwargs.pop('language', configuration['language'])
 
@@ -694,19 +741,37 @@ class IntelCompiler(Compiler):
         else:
             self.cflags.append('-fp-model=fast')
 
-        if isinstance(platform, IntelSkylake):
-            # Systematically use 512-bit vectors on skylake
+        if platform.isa == 'avx512':
+            # Systematically use 512-bit vectors if avx512 is available.
             self.cflags.append("-qopt-zmm-usage=high")
 
         if language == 'openmp':
             self.ldflags.append('-qopenmp')
 
-        # Make sure the MPI compiler uses `icc` underneath -- whatever the MPI distro is
         if kwargs.get('mpi'):
-            mpi_distro = sniff_mpi_distro('mpiexec')
-            if mpi_distro != 'IntelMPI':
-                warning("Expected Intel MPI distribution with `%s`, but found `%s`"
-                        % (self.__class__.__name__, mpi_distro))
+            self.__init_intel_mpi__()
+            self.__init_intel_mpi_flags__()
+
+    def __init_intel_mpi__(self, **kwargs):
+        # Make sure the MPI compiler uses an Intel compiler underneath,
+        # whatever the MPI distro is
+        mpi_distro = sniff_mpi_distro('mpiexec')
+        if mpi_distro != 'IntelMPI':
+            warning("Expected Intel MPI distribution with `%s`, but found `%s`"
+                    % (self.__class__.__name__, mpi_distro))
+
+    def __init_intel_mpi_flags__(self, **kwargs):
+        self.cflags.insert(0, '-cc=%s' % self.CC)
+
+    def get_version(self):
+        if configuration['mpi']:
+            cmd = (self.cc, "-cc=%s" % self.CC, "--version")
+        else:
+            cmd = (self.cc, "--version")
+        result, stdout, stderr = call_capture_output(cmd)
+        if result != 0:
+            raise RuntimeError(f"version query failed: {stderr}")
+        return stdout
 
     def __lookup_cmds__(self):
         self.CC = 'icc'
@@ -719,9 +784,9 @@ class IntelCompiler(Compiler):
         # we try to use `mpiicc` first, while `mpicc` is our fallback, which may
         # or may not be an Intel distribution
         try:
-            check_output(["mpiicc", "--version"]).decode("utf-8")
+            check_output(["mpiicc", "-cc=%s" % self.CC, "--version"]).decode("utf-8")
             self.MPICC = 'mpiicc'
-            self.MPICXX = 'mpiicpc'
+            self.MPICXX = 'mpicxx'
         except FileNotFoundError:
             self.MPICC = 'mpicc'
             self.MPICXX = 'mpicxx'
@@ -729,8 +794,8 @@ class IntelCompiler(Compiler):
 
 class IntelKNLCompiler(IntelCompiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init_finalize__(self, **kwargs):
+        IntelCompiler.__init_finalize__(self, **kwargs)
 
         language = kwargs.pop('language', configuration['language'])
 
@@ -742,41 +807,86 @@ class IntelKNLCompiler(IntelCompiler):
 
 class OneapiCompiler(IntelCompiler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init_finalize__(self, **kwargs):
+        IntelCompiler.__init_finalize__(self, **kwargs)
 
         platform = kwargs.pop('platform', configuration['platform'])
         language = kwargs.pop('language', configuration['language'])
 
-        if language == 'openmp':
-            self.ldflags.remove('-qopenmp')
-            self.ldflags.append('-fopenmp')
-
         if language == 'sycl':
-            self.cflags.append('-fsycl')
-            if platform is NVIDIAX:
-                self.cflags.append('-fsycl-targets=nvptx64-cuda')
-            else:
-                self.cflags.append('-fsycl-targets=spir64')
+            raise ValueError("Use SyclCompiler to jit-compile sycl")
+
+        elif language == 'openmp':
+            # Earlier versions to OneAPI 2023.2.0 (clang17 underneath), have an
+            # OpenMP bug concerning reductions, hence with them we're forced to
+            # use the obsolete -fopenmp
+            if self.version < Version('17.0.0'):
+                self.ldflags.remove('-qopenmp')
+                self.ldflags.append('-fopenmp')
 
             if platform is NVIDIAX:
                 self.cflags.append('-fopenmp-targets=nvptx64-cuda')
-            if platform is INTELGPUX:
+            elif isinstance(platform, IntelDevice):
+                self.cflags.append('-fiopenmp')
                 self.cflags.append('-fopenmp-targets=spir64')
                 self.cflags.append('-fopenmp-target-simd')
 
-        if platform is INTELGPUX:
-            self.cflags.remove('-g')  # -g disables some optimizations in IGC
-            self.cflags.append('-gline-tables-only')
-            self.cflags.append('-fdebug-info-for-profiling')
+                self.cflags.remove('-g')  # -g disables some optimizations in IGC
+                self.cflags.append('-gline-tables-only')
+                self.cflags.append('-fdebug-info-for-profiling')
+
+    def __init_intel_mpi__(self, **kwargs):
+        IntelCompiler.__init_intel_mpi__(self, **kwargs)
+
+        platform = kwargs.pop('platform', configuration['platform'])
+
+        # The Intel toolchain requires the I_MPI_OFFLOAD env var to be set
+        # to enable GPU-aware MPI (that is, passing device pointers to MPI calls)
+        if isinstance(platform, IntelDevice):
+            environ['I_MPI_OFFLOAD'] = '1'
+
+    def __init_intel_mpi_flags__(self, **kwargs):
+        pass
+
+    get_version = Compiler.get_version
 
     def __lookup_cmds__(self):
         # OneAPI HPC ToolKit comes with icpx, which is clang++,
         # and icx, which is clang
         self.CC = 'icx'
         self.CXX = 'icpx'
-        self.MPICC = 'mpicc'
-        self.MPICX = 'mpicx'
+        self.MPICC = 'mpiicx'
+        self.MPICXX = 'mpiicpx'
+
+
+class SyclCompiler(OneapiCompiler):
+
+    _cpp = True
+
+    def __init_finalize__(self, **kwargs):
+        IntelCompiler.__init_finalize__(self, **kwargs)
+
+        platform = kwargs.pop('platform', configuration['platform'])
+        language = kwargs.pop('language', configuration['language'])
+
+        if language != 'sycl':
+            raise ValueError("Expected language sycl with SyclCompiler")
+
+        self.cflags.remove('-std=c99')
+        self.cflags.append('-fsycl')
+
+        self.cflags.remove('-g')  # -g disables some optimizations in IGC
+        self.cflags.append('-gline-tables-only')
+        self.cflags.append('-fdebug-info-for-profiling')
+
+        if isinstance(platform, Cpu64):
+            pass
+        elif platform is NVIDIAX:
+            self.cflags.append('-fsycl-targets=nvptx64-cuda')
+        elif isinstance(platform, IntelDevice):
+            self.cflags.append('-fsycl-targets=spir64')
+        else:
+            raise NotImplementedError("Unsupported platform %s" % platform)
 
 
 class CustomCompiler(Compiler):
@@ -796,33 +906,58 @@ class CustomCompiler(Compiler):
 
     def __new__(cls, *args, **kwargs):
         platform = kwargs.pop('platform', configuration['platform'])
-
-        if any(i in environ for i in ['CC', 'CXX', 'CFLAGS', 'LDFLAGS']):
-            obj = super().__new__(cls)
-            obj.__init__(*args, **kwargs)
-            return obj
-        elif platform is M1:
-            return ClangCompiler(*args, **kwargs)
-        else:
-            return GNUCompiler(*args, **kwargs)
-
-    def __init__(self, *args, **kwargs):
-        super(CustomCompiler, self).__init__(*args, **kwargs)
-
-        default = '-O3 -g -march=native -fPIC -Wall -std=c99'
-        self.cflags = environ.get('CFLAGS', default).split(' ')
-        self.ldflags = environ.get('LDFLAGS', '-shared').split(' ')
-
         language = kwargs.pop('language', configuration['language'])
 
-        if language == 'openmp':
-            self.ldflags += environ.get('OMP_LDFLAGS', '-fopenmp').split(' ')
+        if isinstance(platform, AppleArm):
+            _base = ClangCompiler
+        elif isinstance(platform, IntelDevice):
+            _base = OneapiCompiler
+        elif platform is NVIDIAX:
+            if language == 'cuda':
+                _base = CudaCompiler
+            else:
+                _base = NvidiaCompiler
+        elif platform is AMDGPUX:
+            if language == 'hip':
+                _base = HipCompiler
+            else:
+                _base = AOMPCompiler
+        else:
+            _base = GNUCompiler
+
+        obj = super().__new__(cls)
+        # Keep base to initialize accordingly
+        obj._base = kwargs.pop('base', _base)
+        obj._cpp = obj._base._cpp
+
+        return obj
+
+    def __init_finalize__(self, **kwargs):
+        self._base.__init_finalize__(self, **kwargs)
+        # Update cflags
+        try:
+            extrac = environ.get('CFLAGS').split(' ')
+            self.cflags = self.cflags + extrac
+        except AttributeError:
+            pass
+        # Update ldflags
+        try:
+            extrald = environ.get('LDFLAGS').split(' ')
+            self.ldflags = self.ldflags + extrald
+        except AttributeError:
+            pass
 
     def __lookup_cmds__(self):
-        self.CC = environ.get('CC', 'gcc')
-        self.CXX = environ.get('CXX', 'g++')
-        self.MPICC = environ.get('MPICC', 'mpicc')
-        self.MPICXX = environ.get('MPICXX', 'mpicxx')
+        self._base.__lookup_cmds__(self)
+        # TODO: check for conflicts, for example using the nvhpc module file
+        # will set CXX to nvc++ breaking  the cuda backend
+        self.CC = environ.get('CC', self.CC)
+        self.CXX = environ.get('CXX', self.CXX)
+        self.MPICC = environ.get('MPICC', self.MPICC)
+        self.MPICXX = environ.get('MPICXX', self.MPICXX)
+
+    def __new_with__(self, **kwargs):
+        return super().__new_with__(base=self._base, **kwargs)
 
 
 compiler_registry = {
@@ -845,6 +980,7 @@ compiler_registry = {
     'intel': OneapiCompiler,
     'icx': OneapiCompiler,
     'icpx': OneapiCompiler,
+    'sycl': SyclCompiler,
     'icc': IntelCompiler,
     'icpc': IntelCompiler,
     'intel-knl': IntelKNLCompiler,
@@ -856,4 +992,5 @@ Registry dict for deriving Compiler classes according to the environment variabl
 DEVITO_ARCH. Developers should add new compiler classes here.
 """
 compiler_registry.update({'gcc-%s' % i: partial(GNUCompiler, suffix=i)
-                          for i in ['4.9', '5', '6', '7', '8', '9', '10', '11', '12']})
+                          for i in ['4.9', '5', '6', '7', '8', '9', '10',
+                                    '11', '12', '13']})

@@ -3,7 +3,7 @@ from functools import wraps
 
 import numpy as np
 
-from devito.data.allocators import ALLOC_FLAT
+from devito.data.allocators import ALLOC_ALIGNED
 from devito.data.utils import *
 from devito.logger import warning
 from devito.parameters import configuration
@@ -26,12 +26,16 @@ class Data(np.ndarray):
     decomposition : tuple of Decomposition, optional
         The data decomposition, for each dimension.
     modulo : tuple of bool, optional
-        If the i-th entry is True, then the i-th array dimension uses modulo indexing.
+        If the i-th entry is True, then the i-th array dimension uses modulo
+        indexing.
     allocator : MemoryAllocator, optional
-        Used to allocate memory. Defaults to ``ALLOC_FLAT``.
+        Used to allocate memory. Defaults to `ALLOC_ALIGNED`.
     distributor : Distributor, optional
-        The distributor from which the original decomposition was produced. Note that
-        the decomposition Parameter above may be different to distributor.decomposition.
+        The distributor from which the original decomposition was produced.
+        Note that `decomposition` may differ from `distributor.decomposition`.
+    padding : int or 2-tuple of ints, optional
+        The number of points that are allocated before and after the data,
+        that is in addition to the requested shape. Defaults to 0.
 
     Notes
     -----
@@ -44,10 +48,10 @@ class Data(np.ndarray):
     `Data`.
     """
 
-    def __new__(cls, shape, dtype, decomposition=None, modulo=None, allocator=ALLOC_FLAT,
-                distributor=None):
+    def __new__(cls, shape, dtype, decomposition=None, modulo=None,
+                allocator=ALLOC_ALIGNED, distributor=None, padding=0):
         assert len(shape) == len(modulo)
-        ndarray, memfree_args = allocator.alloc(shape, dtype)
+        ndarray, memfree_args = allocator.alloc(shape, dtype, padding=padding)
         obj = ndarray.view(cls)
         obj._allocator = allocator
         obj._memfree_args = memfree_args
@@ -109,6 +113,7 @@ class Data(np.ndarray):
             self._is_distributed = False
             self._modulo = tuple(False for i in range(self.ndim))
             self._decomposition = (None,)*self.ndim
+            self._allocator = ALLOC_ALIGNED
         elif obj._index_stash is not None:
             # From `__getitem__`
             self._is_distributed = obj._is_distributed
@@ -125,9 +130,11 @@ class Data(np.ndarray):
                 else:
                     decomposition.append(dec.reshape(i))
             self._decomposition = tuple(decomposition)
+            self._allocator = obj._allocator
         else:
             self._is_distributed = obj._is_distributed
             self._distributor = obj._distributor
+            self._allocator = obj._allocator
             if self.ndim == obj.ndim:
                 # E.g., from a ufunc, such as `np.add`
                 self._modulo = obj._modulo
@@ -243,7 +250,7 @@ class Data(np.ndarray):
             # Retrieve the pertinent local data prior to MPI send/receive operations
             data_idx = loc_data_idx(loc_idx)
             self._index_stash = flip_idx(glb_idx, self._decomposition)
-            local_val = super(Data, self).__getitem__(data_idx)
+            local_val = super().__getitem__(data_idx)
             self._index_stash = None
 
             comm = self._distributor.comm
@@ -314,7 +321,7 @@ class Data(np.ndarray):
             return None
         else:
             self._index_stash = glb_idx
-            retval = super(Data, self).__getitem__(loc_idx)
+            retval = super().__getitem__(loc_idx)
             self._index_stash = None
             return retval
 
@@ -328,9 +335,9 @@ class Data(np.ndarray):
             if index_is_basic(loc_idx):
                 # Won't go through `__getitem__` as it's basic indexing mode,
                 # so we should just propage `loc_idx`
-                super(Data, self).__setitem__(loc_idx, val)
+                super().__setitem__(loc_idx, val)
             else:
-                super(Data, self).__setitem__(glb_idx, val)
+                super().__setitem__(glb_idx, val)
         elif isinstance(val, Data) and val._is_distributed:
             if comm_type is index_by_index:
                 glb_idx, val = self._process_args(glb_idx, val)
@@ -353,7 +360,7 @@ class Data(np.ndarray):
                         self.__setitem__(idx_global[j], data_global[j])
             elif self._is_distributed:
                 # `val` is decomposed, `self` is decomposed -> local set
-                super(Data, self).__setitem__(glb_idx, val)
+                super().__setitem__(glb_idx, val)
             else:
                 # `val` is decomposed, `self` is replicated -> gatherall-like
                 raise NotImplementedError
@@ -389,13 +396,13 @@ class Data(np.ndarray):
             else:
                 # `val` is replicated`, `self` is replicated -> plain ndarray.__setitem__
                 pass
-            super(Data, self).__setitem__(glb_idx, val)
+            super().__setitem__(glb_idx, val)
         elif isinstance(val, Iterable):
             if self._is_mpi_distributed:
                 raise NotImplementedError("With MPI, data can only be set "
                                           "via scalars, numpy arrays or "
                                           "other data ")
-            super(Data, self).__setitem__(glb_idx, val)
+            super().__setitem__(glb_idx, val)
         else:
             raise ValueError("Cannot insert obj of type `%s` into a Data" % type(val))
 

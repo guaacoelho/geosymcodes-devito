@@ -2,7 +2,6 @@ import pytest
 import numpy as np
 import scipy.sparse
 
-from conftest import skipif
 from devito import (Grid, Function, TimeFunction, SparseTimeFunction, Operator, Eq,
                     Inc, MatrixSparseTimeFunction, sin)
 from devito.ir import Call, Callable, DummyExpr, Expression, FindNodes, SymbolRegistry
@@ -30,9 +29,9 @@ def test_basic():
 
     assert np.all(u.data == u1.data)
 
-@skipif(['nompi'])
+
 @pytest.mark.parallel(mode=[(1, 'basic'), (1, 'diag2'), (1, 'full')])
-def test_mpi():
+def test_mpi(mode):
     grid = Grid(shape=(4, 4))
 
     u = TimeFunction(name='u', grid=grid, space_order=2)
@@ -153,17 +152,14 @@ def test_interpolation_msf():
     assert op1.cfunction
 
 
-@skipif(['nompi'])
-@pytest.mark.parallel(mode=[(1, 'diag2')])
-def test_codegen_quality0():
+@pytest.mark.parallel(mode=[(2, 'diag2')])
+def test_codegen_quality0(mode):
     grid = Grid(shape=(4, 4))
-
     u = TimeFunction(name='u', grid=grid, space_order=2)
 
     eqn = Eq(u.forward, u.dx2 + 1.)
 
     op = Operator(eqn, opt=('advanced', {'linearize': True}))
-
     assert 'uL0' in str(op)
 
     exprs = FindNodes(Expression).visit(op)
@@ -172,7 +168,7 @@ def test_codegen_quality0():
 
     # Only four access macros necessary, namely `uL0`, `bufL0`, `bufL1`
     # for the efunc args
-    # (the other three obviously are _POSIX_C_SOURCE, START_TIMER, STOP_TIMER)
+    # (the other three obviously are _POSIX_C_SOURCE, START, STOP)
     assert len(op._headers) == 6
 
 
@@ -194,7 +190,7 @@ def test_codegen_quality1():
     assert all('const long' not in str(i) for i in exprs[-3:])
 
     # Only two access macros necessary, namely `uL0` and `r1L0` (the other five
-    # obviously are _POSIX_C_SOURCE, MIN, MAX, START_TIMER, STOP_TIMER)
+    # obviously are _POSIX_C_SOURCE, MIN, MAX, START, STOP)
     assert len(op._headers) == 6
 
 
@@ -292,7 +288,7 @@ def test_strides_forwarding0():
     graph = Graph(foo)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int32'},
+    linearize(graph, callback=True, options={'index-mode': 'int32'},
               sregistry=SymbolRegistry())
 
     # Since `f` is passed via `f.indexed`, we expect the stride exprs to be
@@ -322,7 +318,7 @@ def test_strides_forwarding1():
     graph = Graph(foo)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int32'},
+    linearize(graph, callback=True, options={'index-mode': 'int32'},
               sregistry=SymbolRegistry())
 
     # Despite `a` is passed via `a.indexed`, and since it's an Array (which
@@ -370,7 +366,7 @@ def test_strides_forwarding2():
     graph.efuncs['foo0'] = foo0
     graph.efuncs['foo1'] = foo1
 
-    linearize(graph, lmode=True, options={'index-mode': 'int32'},
+    linearize(graph, callback=True, options={'index-mode': 'int32'},
               sregistry=SymbolRegistry())
 
     # Both foo's are expected to define `a`!
@@ -410,7 +406,7 @@ def test_strides_forwarding3():
     graph = Graph(root)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int64'},
+    linearize(graph, callback=True, options={'index-mode': 'int64'},
               sregistry=SymbolRegistry())
 
     # Both foo's are expected to define `a`!
@@ -442,7 +438,7 @@ def test_strides_forwarding4():
     graph = Graph(root)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int64'},
+    linearize(graph, callback=True, options={'index-mode': 'int64'},
               sregistry=SymbolRegistry())
 
     root = graph.root
@@ -481,8 +477,8 @@ def test_issue_1838():
     op1.apply(time_M=3, dt=1., p0=p1)
 
     # Check generated code
-    assert "r0L0(x, y, z) r0[(x)*y_stride1 + (y)*z_stride1 + (z)]" in str(op1)
-    assert "r4L0(x, y, z) r4[(x)*y_stride2 + (y)*z_stride1 + (z)]" in str(op1)
+    assert "r0L0(x,y,z) r0[(x)*y_stride1 + (y)*z_stride1 + (z)]" in str(op1)
+    assert "r4L0(x,y,z) r4[(x)*y_stride2 + (y)*z_stride1 + (z)]" in str(op1)
 
     assert np.allclose(p0.data, p1.data, rtol=1e-6)
 
@@ -516,7 +512,7 @@ def test_call_retval_indexed():
     # Emulate what the compiler would do
     graph = Graph(foo)
 
-    linearize(graph, lmode=True, options={'index-mode': 'int64'},
+    linearize(graph, callback=True, options={'index-mode': 'int64'},
               sregistry=SymbolRegistry())
 
     foo = graph.root
@@ -542,7 +538,7 @@ def test_bundle():
     graph = Graph(foo)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int64'},
+    linearize(graph, callback=True, options={'index-mode': 'int64'},
               sregistry=SymbolRegistry())
 
     foo = graph.root

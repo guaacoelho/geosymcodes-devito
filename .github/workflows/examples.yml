@@ -6,13 +6,13 @@ concurrency:
 
 on:
   # Trigger the workflow on push or pull request,
-  # but only for the main branch
+  # but only for the master branch
   push:
     branches:
-      - main
+      - master
   pull_request:
     branches:
-      - main
+      - master
 
 jobs:
   tutorials:
@@ -34,7 +34,7 @@ jobs:
 
     steps:
     - name: Checkout devito
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Setup conda
       uses: conda-incubator/setup-miniconda@v2
@@ -46,11 +46,11 @@ jobs:
 
     - name: Install dependencies
       run: |
-        pip install -e .[tests]
-        pip install matplotlib pyrevolve
+        pip install -e .[tests,extras]
 
     - name: Tests in examples
-      run: py.test --cov --cov-config=.coveragerc --cov-report=xml examples/
+      run: |
+        py.test --cov --cov-config=.coveragerc --cov-report=xml examples/
 
     - name: Seismic acoustic examples
       run: |
@@ -87,8 +87,7 @@ jobs:
         python examples/cfd/example_diffusion.py
 
     - name: Upload coverage to Codecov
-      if: matrix.name != 'pytest-docker-py37-gcc-omp'
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         name: ${{ matrix.name }}

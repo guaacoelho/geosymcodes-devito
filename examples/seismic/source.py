@@ -1,5 +1,5 @@
+from functools import cached_property
 from scipy import interpolate
-from cached_property import cached_property
 import numpy as np
 try:
     import matplotlib.pyplot as plt
@@ -58,10 +58,10 @@ class TimeAxis(object):
         if not isinstance(num, int):
             raise TypeError("input argument must be of type int")
 
-        self.start = start
-        self.stop = stop
-        self.step = step
-        self.num = num
+        self.start = float(start)
+        self.stop = float(stop)
+        self.step = float(step)
+        self.num = int(num)
 
     def __str__(self):
         return "TimeAxis: start=%g, stop=%g, step=%g, num=%g" % \
@@ -110,7 +110,7 @@ class PointSource(SparseTimeFunction):
         kwargs['nt'] = kwargs['time_range'].num
 
         # Either `npoint` or `coordinates` must be provided
-        npoint = kwargs.get('npoint')
+        npoint = kwargs.get('npoint', kwargs.get('npoint_global'))
         if npoint is None:
             coordinates = kwargs.get('coordinates', kwargs.get('coordinates_data'))
             if coordinates is None:
@@ -124,7 +124,7 @@ class PointSource(SparseTimeFunction):
         data = kwargs.pop('data', None)
 
         kwargs.setdefault('time_order', 2)
-        super(PointSource, self).__init_finalize__(*args, **kwargs)
+        super().__init_finalize__(*args, **kwargs)
 
         self._time_range = time_range._rebuild()
 
@@ -205,10 +205,10 @@ class WaveletSource(PointSource):
     def __args_setup__(cls, *args, **kwargs):
         kwargs.setdefault('npoint', 1)
 
-        return super(WaveletSource, cls).__args_setup__(*args, **kwargs)
+        return super().__args_setup__(*args, **kwargs)
 
     def __init_finalize__(self, *args, **kwargs):
-        super(WaveletSource, self).__init_finalize__(*args, **kwargs)
+        super().__init_finalize__(*args, **kwargs)
 
         self.f0 = kwargs.get('f0')
         self.a = kwargs.get('a')

@@ -2,7 +2,7 @@
 
 import sympy
 
-from cached_property import cached_property
+from functools import cached_property
 
 from devito.finite_differences import default_rules
 from devito.tools import as_tuple
@@ -25,15 +25,15 @@ class Eq(sympy.Eq, Evaluable):
     ----------
     lhs : Function or SparseFunction
         The left-hand side.
-    rhs : expr-like, optional
-        The right-hand side. Defaults to 0.
-    subdomain : SubDomain, optional
+    rhs : expr-like, optional, default=0
+        The right-hand side.
+    subdomain : SubDomain, optional, default=None
         To restrict the computation of the Eq to a particular sub-region in the
         computational domain.
-    coefficients : Substitutions, optional
+    coefficients : Substitutions, optional, default=None
         Can be used to replace symbolic finite difference weights with user
         defined weights.
-    implicit_dims : Dimension or list of Dimension, optional
+    implicit_dims : Dimension or list of Dimension, optional, default=None
         An ordered list of Dimensions that do not explicitly appear in either the
         left-hand side or in the right-hand side, but that should be honored when
         constructing an Operator.
@@ -106,7 +106,12 @@ class Eq(sympy.Eq, Evaluable):
         """
         if self.lhs.is_Matrix:
             # Maps the Equations to retrieve the rhs from relevant lhs
-            eqs = dict(zip(as_tuple(self.lhs), as_tuple(self.rhs)))
+            try:
+                eqs = dict(zip(self.lhs, self.rhs))
+            except TypeError:
+                # Same rhs for all lhs
+                assert not self.rhs.is_Matrix
+                eqs = {i: self.rhs for i in self.lhs}
             # Get the relevant equations from the lhs structure. .values removes
             # the symmetric duplicates and off-diagonal zeros.
             lhss = self.lhs.values()

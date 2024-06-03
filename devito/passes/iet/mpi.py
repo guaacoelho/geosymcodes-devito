@@ -91,6 +91,9 @@ def _hoist_halospots(iet):
                                               for q in d._defines])
 
                 for n, i in enumerate(iters):
+                    if i not in scopes:
+                        continue
+
                     candidates = [i.dim._defines for i in iters[n:]]
 
                     all_candidates = set().union(*candidates)
@@ -251,9 +254,10 @@ def _mark_overlappable(iet):
     found = []
     for hs in FindNodes(HaloSpot).visit(iet):
         expressions = FindNodes(Expression).visit(hs)
-        scope = Scope([i.expr for i in expressions])
+        if not expressions:
+            continue
 
-        test = True
+        scope = Scope([i.expr for i in expressions])
 
         # Comp/comm overlaps is legal only if the OWNED regions can grow
         # arbitrarly, which means all of the dependences must be carried
@@ -270,6 +274,8 @@ def _mark_overlappable(iet):
                     #     f[x, y] = ...
                     test = False
                     break
+        else:
+            test = True
 
         # Heuristic: avoid comp/comm overlap for sparse Iteration nests
         if test:
@@ -320,7 +326,6 @@ def make_mpi(iet, mpimode=None, **kwargs):
                 mapper.update({n: n._rebuild(properties=set(n.properties)-{PARALLEL})
                                for n in tree[:tree.index(i)+1]})
                 break
-    
     iet = Transformer(mapper, nested=True).visit(iet)
 
     return iet, {'includes': ['mpi.h'], 'efuncs': efuncs}
@@ -340,7 +345,7 @@ def mpiize(graph, **kwargs):
     """
     options = kwargs['options']
 
-    if options['optcomms']:
+    if options['opt-comms']:
         optimize_halospots(graph, **kwargs)
 
     mpimode = options['mpi']

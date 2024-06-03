@@ -6,11 +6,14 @@ import numpy as np
 
 from sympy import Expr, Symbol
 from devito import (Constant, Dimension, Grid, Function, solve, TimeFunction, Eq,  # noqa
-                    Operator, SubDimension, norm, Le, Ge, Gt, Lt, Abs, sin, cos, Min, Max)
+                    Operator, SubDimension, norm, Le, Ge, Gt, Lt, Abs, sin, cos,
+                    Min, Max)
 from devito.ir import Expression, FindNodes
 from devito.symbolics import (retrieve_functions, retrieve_indexed, evalrel,  # noqa
                               CallFromPointer, Cast, DefFunction, FieldFromPointer,
-                              INT, FieldFromComposite, IntDiv, ccode, uxreplace)
+                              INT, FieldFromComposite, IntDiv, Namespace, Rvalue,
+                              ReservedWord, ListInitializer, ccode, uxreplace,
+                              retrieve_derivatives)
 from devito.tools import as_tuple
 from devito.types import (Array, Bundle, FIndexed, LocalObject, Object,
                           Symbol as dSymbol)
@@ -131,6 +134,17 @@ def test_indexed():
     assert ub.indexed.free_symbols == {ub.indexed}
 
 
+def test_indexed_staggered():
+    grid = Grid(shape=(10, 10))
+    x, y = grid.dimensions
+    hx, hy = x.spacing, y.spacing
+
+    u = Function(name='u', grid=grid, staggered=(x, y))
+    u0 = u.subs({x: 1, y: 2})
+    assert u0.indices == (1 + hx / 2, 2 + hy / 2)
+    assert u0.indexify().indices == (1, 2)
+
+
 def test_bundle():
     grid = Grid(shape=(4, 4))
 
@@ -246,6 +260,18 @@ def test_integer_abs():
     assert ccode(Abs(i1 - .5)) == "fabs(i1 - 5.0e-1F)"
 
 
+def test_cos_vs_cosf():
+    a = dSymbol('a', dtype=np.float32)
+    assert ccode(cos(a)) == "cosf(a)"
+
+    b = dSymbol('b', dtype=np.float64)
+    assert ccode(cos(b)) == "cos(b)"
+
+    # Doesn't make much sense, but it's legal
+    c = dSymbol('c', dtype=np.int32)
+    assert ccode(cos(c)) == "cos(c)"
+
+
 def test_intdiv():
     a = Symbol('a')
     b = Symbol('b')
@@ -275,6 +301,52 @@ def test_intdiv():
     assert ccode(v) == 'b*((a + b) / 2) + 3'
 
 
+def test_def_function():
+    foo0 = DefFunction('foo', arguments=['a', 'b'], template=['int'])
+    foo1 = DefFunction('foo', arguments=['a', 'b'], template=['int'])
+    foo2 = DefFunction('foo', arguments=['a', 'b'])
+    foo3 = DefFunction('foo', arguments=['a'])
+
+    # Code generation
+    assert str(foo0) == 'foo<int>(a, b)'
+    assert str(foo3) == 'foo(a)'
+
+    # Hashing and equality
+    assert hash(foo0) == hash(foo1)
+    assert foo0 == foo1
+    assert hash(foo0) != hash(foo2)
+    assert hash(foo2) != hash(foo3)
+
+    # Reconstruction
+    assert foo0 == foo0._rebuild()
+    assert str(foo0._rebuild('bar', template=['float'])) == 'bar<float>(a, b)'
+
+
+def test_namespace():
+    ns0 = Namespace(['std', 'algorithms', 'parallel'])
+    assert str(ns0) == 'std::algorithms::parallel'
+
+    ns1 = Namespace(['std'])
+    ns2 = Namespace(['std', 'algorithms', 'parallel'])
+
+    # Test hashing and equality
+    assert hash(ns0) != hash(ns1)  # Same reason as above
+    assert ns0 != ns1
+    assert hash(ns0) == hash(ns2)
+    assert ns0 == ns2
+
+    # Free symbols
+    assert not ns0.free_symbols
+
+
+def test_rvalue():
+    ctype = ReservedWord('dummytype')
+    ns = Namespace(['my', 'namespace'])
+    init = ListInitializer(())
+
+    assert str(Rvalue(ctype, ns, init)) == 'my::namespace::dummytype{}'
+
+
 def test_cast():
     s = Symbol(name='s', dtype=np.float32)
 
@@ -291,19 +363,6 @@ def test_cast():
     assert v != v1
 
 
-def test_symbolic_printing():
-    b = Symbol('b')
-
-    v = CallFromPointer('foo', 's') + b
-    assert str(v) == 'b + s->foo()'
-
-    class MyLocalObject(LocalObject, Expr):
-        pass
-
-    lo = MyLocalObject(name='lo')
-    assert str(lo + 2) == '2 + lo'
-
-
 def test_findexed():
     grid = Grid(shape=(3, 3, 3))
     f = Function(name='f', grid=grid)
@@ -316,15 +375,34 @@ def test_findexed():
     assert new_fi.strides == (3, 4)
 
 
+def test_symbolic_printing():
+    b = Symbol('b')
+
+    v = CallFromPointer('foo', 's') + b
+    assert str(v) == 'b + s->foo()'
+
+    class MyLocalObject(LocalObject, Expr):
+        pass
+
+    lo = MyLocalObject(name='lo')
+    assert str(lo + 2) == '2 + lo'
+
+    grid = Grid((10,))
+    f = Function(name="f", grid=grid)
+    fi = FIndexed.from_indexed(f.indexify(), "foo", strides=(1, 2))
+    df = DefFunction('aaa', arguments=[fi])
+    assert ccode(df) == 'aaa(foo(x))'
+
+
 def test_is_on_grid():
     grid = Grid((10,))
     x = grid.dimensions[0]
     x0 = x + .5 * x.spacing
     u = Function(name="u", grid=grid, space_order=2)
 
-    assert u._is_on_grid
-    assert not u.subs({x: x0})._is_on_grid
-    assert all(uu._is_on_grid for uu in retrieve_functions(u.subs({x: x0}).evaluate))
+    assert u._grid_map == {}
+    assert u.subs({x: x0})._grid_map == {x: x0}
+    assert all(uu._grid_map == {} for uu in retrieve_functions(u.subs({x: x0}).evaluate))
 
 
 @pytest.mark.parametrize('expr,expected', [
@@ -360,10 +438,10 @@ def test_solve_time():
     eq = m * u.dt2 + u.dx
     sol = solve(eq, u.forward)
     # Check u.dx is not evaluated. Need to simplify because the solution
-    # contains some Dummy in the Derivatibe subs that make equality break.
-    # TODO: replace by retreive_derivatives after Fabio's PR
-    assert sympy.simplify(u.dx - sol.args[2].args[0].args[1]) == 0
-    assert sympy.simplify(sol - (-dt**2*u.dx/m + 2.0*u - u.backward)) == 0
+    # contains some Dummy in the Derivative subs that make equality break.
+    assert len(retrieve_derivatives(sol)) == 1
+    assert sympy.simplify(u.dx - retrieve_derivatives(sol)[0]) == 0
+    assert sympy.simplify(sympy.expand(sol - (-dt**2*u.dx/m + 2.0*u - u.backward))) == 0
 
 
 @pytest.mark.parametrize('expr,subs,expected', [

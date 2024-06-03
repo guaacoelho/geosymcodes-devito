@@ -1,6 +1,5 @@
 from devito import Eq, Operator, VectorTimeFunction, TensorTimeFunction
 from devito import div, grad, diag, solve
-from examples.seismic import PointSource, Receiver
 
 
 def src_rec(v, tau, model, geometry):
@@ -9,20 +8,12 @@ def src_rec(v, tau, model, geometry):
     """
     s = model.grid.time_dim.spacing
     # Source symbol with input wavelet
-    src = PointSource(name='src', grid=model.grid, time_range=geometry.time_axis,
-                      npoint=geometry.nsrc)
-    rec1 = Receiver(name='rec1', grid=model.grid, time_range=geometry.time_axis,
-                    npoint=geometry.nrec)
-    rec2 = Receiver(name='rec2', grid=model.grid, time_range=geometry.time_axis,
-                    npoint=geometry.nrec)
+    src = geometry.src
+    rec1 = geometry.new_rec(name="rec1")
+    rec2 = geometry.new_rec(name="rec2")
 
     # The source injection term
-    src_xx = src.inject(field=tau[0, 0].forward, expr=src * s)
-    src_zz = src.inject(field=tau[-1, -1].forward, expr=src * s)
-    src_expr = src_xx + src_zz
-    if model.grid.dim == 3:
-        src_yy = src.inject(field=tau[1, 1].forward, expr=src * s)
-        src_expr += src_yy
+    src_expr = src.inject(tau.forward.diagonal(), expr=src * s)
 
     # Create interpolation expression for receivers
     rec_term1 = rec1.interpolate(expr=tau[-1, -1])

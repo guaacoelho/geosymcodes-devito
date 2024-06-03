@@ -1,10 +1,10 @@
 from abc import ABC
 from collections import namedtuple
+from functools import cached_property
 from math import floor
 
 import numpy as np
 from sympy import prod
-from cached_property import cached_property
 
 from devito.data import LEFT, RIGHT
 from devito.logger import warning
@@ -13,6 +13,7 @@ from devito.tools import ReducerMap, as_tuple
 from devito.types.args import ArgProvider
 from devito.types.basic import Scalar
 from devito.types.dense import Function
+from devito.types.utils import DimensionTuple
 from devito.types.dimension import (Dimension, SpaceDimension, TimeDimension,
                                     Spacing, SteppingDimension, SubDimension)
 
@@ -37,7 +38,7 @@ class CartesianDiscretization(ABC):
     @property
     def shape(self):
         """Shape of the physical domain."""
-        return self._shape
+        return DimensionTuple(*self._shape, getters=self.dimensions)
 
     @property
     def dimensions(self):
@@ -67,21 +68,18 @@ class Grid(CartesianDiscretization, ArgProvider):
     ----------
     shape : tuple of ints
         Shape of the computational domain in grid points.
-    extent : tuple of floats, optional
-        Physical extent of the domain in m; defaults to a unit box of extent 1m
-        in all dimensions.
-    origin : tuple of floats, optional
-        Physical coordinate of the origin of the domain; defaults to 0.0 in all
-        dimensions.
+    extent : tuple of floats, default=unit box of extent 1m in all dimensions
+        Physical extent of the domain in m.
+    origin : tuple of floats, default=0.0 in all dimensions
+        Physical coordinate of the origin of the domain.
     dimensions : tuple of SpaceDimension, optional
         The dimensions of the computational domain encapsulated by this Grid.
     time_dimension : TimeDimension, optional
         The dimension used to define time in a `TimeFunction` created from
         this Grid.
-    dtype : data-type, optional
+    dtype : data-type, default=np.float32
         Any object that can be interpreted as a numpy data type, used as default
         data type to be inherited by all Functions created from this Grid.
-        Defaults to ``np.float32``.
     subdomains : tuple of SubDomain, optional
         If no subdomains are specified, the Grid only defines the two default
         subdomains ``interior`` and ``domain``.
@@ -222,11 +220,17 @@ class Grid(CartesianDiscretization, ArgProvider):
         return dict(zip(self.origin_symbols, self.origin))
 
     @property
-    def origin_offset(self):
-        """Offset of the local (per-process) origin from the domain origin."""
+    def origin_ioffset(self):
+        """Offset index of the local (per-process) origin from the domain origin."""
         grid_origin = [min(i) for i in self.distributor.glb_numb]
         assert len(grid_origin) == len(self.spacing)
-        return tuple(i*h for i, h in zip(grid_origin, self.spacing))
+        return DimensionTuple(*grid_origin, getters=self.dimensions)
+
+    @property
+    def origin_offset(self):
+        """Physical offset of the local (per-process) origin from the domain origin."""
+        return DimensionTuple(*[i*h for i, h in zip(self.origin_ioffset, self.spacing)],
+                              getters=self.dimensions)
 
     @property
     def time_dim(self):
@@ -273,7 +277,7 @@ class Grid(CartesianDiscretization, ArgProvider):
                 # Special case subsampling: `Grid.dimensions` -> (xb, yb, zb)`
                 # where `xb, yb, zb` are ConditionalDimensions whose parents
                 # are SpaceDimensions
-                mapper[d.root.spacing] = s/self.dtype(d.factor)
+                mapper[d.root.spacing] = s/self.dtype(d.factor.data)
             elif d.is_Space:
                 # Typical case: `Grid.dimensions` -> (x, y, z)` where `x, y, z` are
                 # the SpaceDimensions
@@ -542,7 +546,10 @@ class MultiSubDimension(SubDimension):
     A special SubDimension for graceful lowering of MultiSubDomains.
     """
 
-    def __init_finalize__(self, name, parent, msd):
+    __rargs__ = ('name', 'parent', 'msd')
+    __rkwargs__ = ('thickness',)
+
+    def __init_finalize__(self, name, parent, msd, thickness=None):
         # NOTE: a MultiSubDimension stashes a reference to the originating MultiSubDomain.
         # This creates a circular pattern as the `msd` itself carries references to
         # its MultiSubDimensions. This is currently necessary because during compilation
@@ -551,7 +558,15 @@ class MultiSubDimension(SubDimension):
         # definitely possible, but not straightforward
         self.msd = msd
 
-        lst, rst = self._symbolic_thickness(name)
+        if not thickness:
+            lst, rst = self._symbolic_thickness(name)
+        else:  # Used for rebuilding. Reuse thickness symbols rather than making new ones
+            try:
+                ((lst, _), (rst, _)) = thickness
+            except ValueError:
+                raise ValueError("Invalid thickness specification: %s does not match"
+                                 "expected format ((left_symbol, left_thickness),"
+                                 " (right_symbol, right_thickness))" % thickness)
         left = parent.symbolic_min + lst
         right = parent.symbolic_max - rst
 
@@ -720,7 +735,8 @@ class SubDomainSet(MultiSubDomain):
 
         # Create the SubDomainSet SubDimensions
         self._dimensions = tuple(
-            MultiSubDimension('%si' % d.name, d, self) for d in grid.dimensions
+            MultiSubDimension('%si%d' % (d.name, counter), d, self)
+            for d in grid.dimensions
         )
 
         # Compute the SubDomainSet shapes

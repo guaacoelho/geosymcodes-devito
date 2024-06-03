@@ -1,9 +1,8 @@
 import pytest
 import numpy as np
 from scipy.ndimage import gaussian_filter
-from scipy import misc
+from scipy.misc import ascent
 
-from conftest import skipif
 from devito import ConditionalDimension, Grid, Function, TimeFunction, switchconfig
 from devito.builtins import (assign, norm, gaussian_smooth, initialize_function,
                              inner, mmin, mmax, sum, sumall)
@@ -92,9 +91,8 @@ class TestAssign(object):
 
         assert np.all(f.data == 1)
 
-    @skipif('nompi')
     @pytest.mark.parallel(mode=4)
-    def test_assign_parallel(self):
+    def test_assign_parallel(self, mode):
         a = np.arange(64).reshape((8, 8))
         grid = Grid(shape=a.shape)
 
@@ -154,7 +152,7 @@ class TestGaussianSmooth(object):
     def test_gs_2d_int(self, sigma):
         """Test the Gaussian smoother in 2d."""
 
-        a = misc.ascent()
+        a = ascent()
         sp_smoothed = gaussian_filter(a, sigma=sigma)
         dv_smoothed = gaussian_smooth(a, sigma=sigma)
 
@@ -168,16 +166,15 @@ class TestGaussianSmooth(object):
     def test_gs_2d_float(self, sigma):
         """Test the Gaussian smoother in 2d."""
 
-        a = misc.ascent()
+        a = ascent()
         a = a+0.1
         sp_smoothed = gaussian_filter(a, sigma=sigma)
         dv_smoothed = gaussian_smooth(a, sigma=sigma)
 
         assert np.amax(np.abs(sp_smoothed - np.array(dv_smoothed))) <= 1e-5
 
-    @skipif('nompi')
     @pytest.mark.parallel(mode=[(4, 'full')])
-    def test_gs_parallel(self):
+    def test_gs_parallel(self, mode):
         a = np.arange(64).reshape((8, 8))
         grid = Grid(shape=a.shape)
 
@@ -238,9 +235,8 @@ class TestInitializeFunction(object):
 
         assert np.all(a[:] - np.array(f.data[:]) == 0)
 
-    @skipif('nompi')
     @pytest.mark.parallel(mode=4)
-    def test_if_parallel(self):
+    def test_if_parallel(self, mode):
         a = np.arange(36).reshape((6, 6))
         grid = Grid(shape=(18, 18))
         x, y = grid.dimensions
@@ -294,10 +290,9 @@ class TestInitializeFunction(object):
             assert np.take(f._data_with_outhalo, 0, axis=-1)[7] == 1
             assert np.take(f._data_with_outhalo, -1, axis=-1)[7] == 3
 
-    @skipif('nompi')
     @pytest.mark.parametrize('nbl', [0, 2])
     @pytest.mark.parallel(mode=4)
-    def test_if_halo_mpi(self, nbl):
+    def test_if_halo_mpi(self, nbl, mode):
         """
         Test that FD halo is padded as well.
         """
@@ -327,6 +322,23 @@ class TestInitializeFunction(object):
             expected = np.pad(a[na//2:, na//2:], [(0, 1+nbl), (0, 1+nbl)], 'edge')
             assert np.all(f._data_with_outhalo._local == expected)
 
+    def test_batching(self):
+        grid = Grid(shape=(12, 12))
+
+        a = np.arange(16).reshape((4, 4))
+
+        f = Function(name='f', grid=grid, dtype=np.int32)
+        g = Function(name='g', grid=grid, dtype=np.float32)
+        h = Function(name='h', grid=grid, dtype=np.float64)
+
+        initialize_function([f, g, h], [a, a, a], 4, mode='reflect')
+
+        for i in [f, g, h]:
+            assert np.all(a[:, ::-1] - np.array(i.data[4:8, 0:4]) == 0)
+            assert np.all(a[:, ::-1] - np.array(i.data[4:8, 8:12]) == 0)
+            assert np.all(a[::-1, :] - np.array(i.data[0:4, 4:8]) == 0)
+            assert np.all(a[::-1, :] - np.array(i.data[8:12, 4:8]) == 0)
+
 
 class TestBuiltinsResult(object):
 
@@ -340,8 +352,8 @@ class TestBuiltinsResult(object):
         f = TimeFunction(name='f', grid=grid)
         f.data[:] = np.arange(10000).reshape((100, 100))
 
-        assert np.isclose(norm(f),
-                          switchconfig(openmp=True)(norm)(f),
+        assert np.isclose(switchconfig(language='C')(norm)(f),
+                          switchconfig(language='openmp')(norm)(f),
                           rtol=1e-5)
 
     def test_inner_sparse(self):
@@ -490,7 +502,7 @@ class TestBuiltinsResult(object):
         assert v0 == v1
         assert v0 == v2
         assert v0 == v3
-        assert type(v0) == np.int16
-        assert type(v1) == np.int32
-        assert type(v2) == np.float32
-        assert type(v3) == np.float64
+        assert type(v0) is np.int16
+        assert type(v1) is np.int32
+        assert type(v2) is np.float32
+        assert type(v3) is np.float64

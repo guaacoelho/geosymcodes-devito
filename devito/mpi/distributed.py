@@ -1,12 +1,13 @@
 from abc import ABC, abstractmethod
 from ctypes import c_int, c_void_p, sizeof
 from itertools import groupby, product
+from functools import cached_property
+
 from math import ceil, pow
 from sympy import factorint
 
 import atexit
 
-from cached_property import cached_property
 import numpy as np
 from cgen import Struct, Value
 
@@ -14,7 +15,10 @@ from devito.data import LEFT, CENTER, RIGHT, Decomposition
 from devito.parameters import configuration
 from devito.tools import EnrichedTuple, as_tuple, ctypes_to_cstr, filter_ordered
 from devito.types import CompositeObject, Object
+from devito.types.utils import DimensionTuple
 
+
+__all__ = ['CustomTopology']
 
 # Do not prematurely initialize MPI
 # This allows launching a Devito program from within another Python program
@@ -39,13 +43,19 @@ try:
         if init_by_devito and MPI.Is_initialized() and not MPI.Is_finalized():
             MPI.Finalize()
     atexit.register(cleanup)
-except ImportError:
+except ImportError as e:
     # Dummy fallback in case mpi4py/MPI aren't available
     class NoneMetaclass(type):
         def __getattr__(self, name):
             return None
 
     class MPI(object, metaclass=NoneMetaclass):
+        init_error = e
+
+        @classmethod
+        def Init(cls):
+            raise cls.init_error
+
         @classmethod
         def Is_initialized(cls):
             return False
@@ -57,7 +67,7 @@ except ImportError:
             return None
 
 
-__all__ = ['Distributor', 'SparseDistributor', 'MPI']
+__all__ = ['Distributor', 'SparseDistributor', 'MPI', 'CustomTopology']
 
 
 class AbstractDistributor(ABC):
@@ -126,7 +136,8 @@ class AbstractDistributor(ABC):
     @property
     def shape(self):
         """The calling MPI rank's local shape."""
-        return tuple(len(i) for i in self.glb_numb)
+        return DimensionTuple(*[len(i) for i in self.glb_numb],
+                              getters=self.dimensions)
 
     @property
     def dimensions(self):
@@ -183,7 +194,7 @@ class Distributor(AbstractDistributor):
     """
 
     def __init__(self, shape, dimensions, input_comm=None, topology=None):
-        super(Distributor, self).__init__(shape, dimensions)
+        super().__init__(shape, dimensions)
 
         if configuration['mpi']:
             # First time we enter here, we make sure MPI is initialized
@@ -251,6 +262,16 @@ class Distributor(AbstractDistributor):
     def nprocs(self):
         if self.comm is not MPI.COMM_NULL:
             return self.comm.size
+        else:
+            return 1
+
+    @property
+    def nprocs_local(self):
+        if self.comm is not MPI.COMM_NULL:
+            local_comm = MPI.Comm.Split_type(self.comm, MPI.COMM_TYPE_SHARED)
+            node_size = local_comm.Get_size()
+            local_comm.Free()
+            return node_size
         else:
             return 1
 
@@ -424,7 +445,7 @@ class SparseDistributor(AbstractDistributor):
     """
 
     def __init__(self, npoint, dimension, distributor):
-        super(SparseDistributor, self).__init__(npoint, dimension)
+        super().__init__(npoint, dimension)
         self._distributor = distributor
 
         # The dimension decomposition
@@ -521,7 +542,7 @@ class MPINeighborhood(CompositeObject):
         self._entries = [i for i in neighborhood if isinstance(i, tuple)]
 
         fields = [(''.join(j.name[0] for j in i), c_int) for i in self.entries]
-        super(MPINeighborhood, self).__init__('nb', 'neighborhood', fields)
+        super().__init__('nb', 'neighborhood', fields)
 
     @property
     def entries(self):
@@ -550,7 +571,7 @@ class MPINeighborhood(CompositeObject):
                                    for i, j in groups])
 
     def _arg_defaults(self):
-        values = super(MPINeighborhood, self)._arg_defaults()
+        values = super()._arg_defaults()
         for name, i in zip(self.fields, self.entries):
             setattr(values[self.name]._obj, name, self.neighborhood[i])
         return values

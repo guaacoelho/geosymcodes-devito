@@ -55,6 +55,8 @@ class AbstractObject(Basic, sympy.Basic, Pickable):
     def _sympystr(self, printer):
         return str(self)
 
+    _ccode = _sympystr
+
     def _hashable_content(self):
         return (self.name, self.dtype)
 
@@ -73,10 +75,6 @@ class AbstractObject(Basic, sympy.Basic, Pickable):
     @property
     def _C_ctype(self):
         return self.dtype
-
-    @property
-    def base(self):
-        return self
 
     @property
     def function(self):
@@ -172,28 +170,51 @@ class LocalObject(AbstractObject):
     LocalObjects encode their dtype as a class attribute.
     """
 
-    __rargs__ = ('name',)
-    __rkwargs__ = ('cargs', 'liveness')
+    default_initvalue = None
+    """
+    The initial value may or may not be a class-level attribute. In the latter
+    case, it is passed to the constructor.
+    """
 
-    def __init__(self, name, cargs=None, **kwargs):
+    __rargs__ = ('name',)
+    __rkwargs__ = ('cargs', 'initvalue', 'liveness', 'is_global')
+
+    def __init__(self, name, cargs=None, initvalue=None, liveness='lazy',
+                 is_global=False, **kwargs):
         self.name = name
         self.cargs = as_tuple(cargs)
+        self.initvalue = initvalue or self.default_initvalue
 
-        self._liveness = kwargs.get('liveness', 'lazy')
-        assert self._liveness in ['eager', 'lazy']
-        
+        assert liveness in ['eager', 'lazy']
+        self._liveness = liveness
+
+        self._is_global = is_global
         self.ignoreDefinition = self.__ignoreDefinition_setup__(**kwargs)
 
     def _hashable_content(self):
-        return super()._hashable_content() + self.cargs + (self.liveness,)
+        return (super()._hashable_content() +
+                self.cargs +
+                (self.initvalue, self.liveness, self.is_global))
 
     @property
     def liveness(self):
         return self._liveness
 
     @property
+    def is_global(self):
+        return self._is_global
+
+    @property
     def free_symbols(self):
-        return super().free_symbols | set(self.cargs)
+        ret = set()
+        ret.update(super().free_symbols)
+        for i in self.cargs:
+            try:
+                ret.update(i.free_symbols)
+            except AttributeError:
+                # E.g., pure integers
+                pass
+        return ret
 
     @property
     def _C_init(self):
@@ -217,6 +238,13 @@ class LocalObject(AbstractObject):
         """
         return None
 
+    _C_modifier = None
+    """
+    A modifier added to the LocalObject's C declaration when the object appears
+    in a function signature. For example, a subclass might define `_C_modifier = '&'`
+    to impose pass-by-reference semantics.
+    """
+
     @property
     def _mem_internal_eager(self):
         return self._liveness == 'eager'
@@ -224,3 +252,7 @@ class LocalObject(AbstractObject):
     @property
     def _mem_internal_lazy(self):
         return self._liveness == 'lazy'
+
+    @property
+    def _mem_global(self):
+        return self._is_global

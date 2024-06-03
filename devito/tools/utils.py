@@ -12,7 +12,7 @@ __all__ = ['prod', 'as_tuple', 'is_integer', 'generator', 'grouper', 'split',
            'roundm', 'powerset', 'invert', 'flatten', 'single_or', 'filter_ordered',
            'as_mapper', 'filter_sorted', 'pprint', 'sweep', 'all_equal', 'as_list',
            'indices_to_slices', 'indices_to_sections', 'transitive_closure',
-           'humanbytes']
+           'humanbytes', 'contains_val', 'sorted_priority']
 
 
 def prod(iterable, initial=1):
@@ -73,6 +73,13 @@ def is_integer(value):
     A thorough instance comparison for all integer types.
     """
     return isinstance(value, (int, np.integer, sympy.Integer))
+
+
+def contains_val(val, items):
+    try:
+        return val in items
+    except TypeError:
+        return val == items
 
 
 def generator():
@@ -299,6 +306,37 @@ def humanbytes(B):
     elif MB <= B < GB:
         return '%d MB' % round(B / MB)
     elif GB <= B < TB:
-        return '%d GB' % round(B / GB)
+        return '%.1f GB' % round(B / GB, 1)
     elif TB <= B:
-        return '%d TB' % round(B / TB)
+        return '%.2f TB' % round(B / TB, 1)
+
+
+def sorted_priority(items, priority):
+    """
+    Sort items based on their type priority.
+
+    Rules:
+
+        * Each type has an integer priority.
+        * Types with higher priority precede types with lower priority.
+        * Types with same priority are sorted based on the type name.
+        * Types with unknown priority are given 0-priority.
+
+    Parameters
+    ----------
+    items : iterable
+        The objects to be sorted.
+    priority : dict
+        A dictionary from types to integer values.
+    """
+
+    def key(i):
+        for cls in sorted(priority, key=priority.get, reverse=True):
+            if isinstance(i, cls):
+                v = priority[cls]
+                break
+        else:
+            v = 0
+        return (v, str(type(i)))
+
+    return sorted(items, key=key, reverse=True)

@@ -1,22 +1,21 @@
 import abc
 from functools import reduce
 from operator import mul
+import ctypes
+from ctypes.util import find_library
 import mmap
 import os
 import sys
 
 import numpy as np
-import ctypes
-from ctypes.util import find_library
 
 from devito.logger import logger
 from devito.parameters import configuration
-from devito.tools import dtype_to_ctype
+from devito.tools import dtype_to_ctype, is_integer
 
-
-__all__ = ['ALLOC_FLAT', 'ALLOC_NUMA_LOCAL', 'ALLOC_NUMA_ANY',
+__all__ = ['ALLOC_ALIGNED', 'ALLOC_NUMA_LOCAL', 'ALLOC_NUMA_ANY',
            'ALLOC_KNL_MCDRAM', 'ALLOC_KNL_DRAM', 'ALLOC_GUARD',
-           'ALLOC_CUPY', 'default_allocator']
+           'default_allocator']
 
 
 class MemoryAllocator(object):
@@ -24,9 +23,6 @@ class MemoryAllocator(object):
     """Abstract class defining the interface to memory allocators."""
 
     __metaclass__ = abc.ABCMeta
-
-    is_Posix = False
-    is_Numa = False
 
     _attempted_init = False
     lib = None
@@ -52,7 +48,7 @@ class MemoryAllocator(object):
         """
         return
 
-    def alloc(self, shape, dtype):
+    def alloc(self, shape, dtype, padding=0):
         """
         Allocate memory.
 
@@ -62,6 +58,9 @@ class MemoryAllocator(object):
             Shape of the allocated array.
         dtype : numpy.dtype
             The data type of the raw data.
+        padding : int or 2-tuple of ints, optional
+            The number of points that are allocated before and after the data,
+            that is in addition to the requested shape. Defaults to 0.
 
         Returns
         -------
@@ -70,34 +69,40 @@ class MemoryAllocator(object):
             access the data as a ctypes object. The second element is an opaque
             object that is needed only for the "memfree" call.
         """
-        size = int(reduce(mul, shape))
+        datasize = int(reduce(mul, shape))
         ctype = dtype_to_ctype(dtype)
 
-        c_pointer, memfree_args = self._alloc_C_libcall(size, ctype)
-        if c_pointer is None:
-            raise RuntimeError("Unable to allocate %d elements in memory", str(size))
+        # Add padding, if any
+        try:
+            padleft, padright = padding
+        except TypeError:
+            padleft, padright = padding, padding
+        if not is_integer(padleft) and not is_integer(padright):
+            raise TypeError("padding must be an int or a 2-tuple of ints")
+        size = datasize + padleft + padright
 
-        if c_pointer:
-            # cast to 1D array of the specified size
-            ctype_1d = ctype * size
-            buf = ctypes.cast(c_pointer, ctypes.POINTER(ctype_1d)).contents
-            pointer = np.frombuffer(buf, dtype=dtype)
+        padleft_pointer, memfree_args = self._alloc_C_libcall(size, ctype)
+        if padleft_pointer is None:
+            raise RuntimeError("Unable to allocate %d elements in memory" % size)
 
-        # During the execution in MPI, domain splitting can generate a situation where
-        # the allocated data size is zero, as we have observed with Sparse Functions.
-        # When this occurs, Cupy returns a pointer with a value of zero. This
-        # conditional statement was defined for this case.
-        else:
-            pointer = np.empty(shape=(0), dtype=dtype)
+        # Compute the pointer to the user data
+        padleft_bytes = padleft * ctypes.sizeof(ctype)
+        c_pointer = ctypes.c_void_p(padleft_pointer.value + padleft_bytes)
 
-        # pointer.reshape should not be used here because it may introduce a copy
-        # From https://docs.scipy.org/doc/numpy/reference/generated/numpy.reshape.html:
-        # It is not always possible to change the shape of an array without copying the
-        # data. If you want an error to be raised when the data is copied, you should
-        # assign the new shape to the shape attribute of the array:
-        pointer.shape = shape
+        # Cast to 1D array of the specified `datasize`
+        ctype_1d = ctype * datasize
+        buf = ctypes.cast(c_pointer, ctypes.POINTER(ctype_1d)).contents
+        array = np.frombuffer(buf, dtype=dtype)
 
-        return (pointer, memfree_args)
+        # `array.reshape` should not be used here because it may introduce
+        # a copy. From `docs.scipy.org/doc/numpy/reference/generated/numpy.reshape`:
+        #   It is not always possible to change the shape of an array without
+        #   copying the data. If you want an error to be raised when the data
+        #   is copied, you should assign the new shape to the shape attribute
+        #   of the array:
+        array.shape = shape
+
+        return (array, memfree_args)
 
     @abc.abstractmethod
     def _alloc_C_libcall(self, size, ctype):
@@ -133,8 +138,6 @@ class PosixAllocator(MemoryAllocator):
     Memory allocator based on ``posix`` functions. The allocated memory is
     aligned to page boundaries.
     """
-
-    is_Posix = True
 
     @classmethod
     def initialize(cls):
@@ -172,7 +175,7 @@ class PosixAllocator(MemoryAllocator):
 class GuardAllocator(PosixAllocator):
 
     """
-    Memory allocator based on ``posix`` functions. The allocated memory is
+    Memory allocator based on `posix` functions. The allocated memory is
     aligned to page boundaries.  Additionally, it allocates extra memory
     before and after the data, and configures it so that an SEGV is thrown
     immediately if an out-of-bounds access occurs.
@@ -205,20 +208,20 @@ class GuardAllocator(PosixAllocator):
         if ret != 0:
             return None, None
 
-        # generate pointers to the left padding, the user data, and the right pad
+        # Generate pointers to the left padding, the user data, and the right pad
         padleft_pointer = c_pointer
         c_pointer = ctypes.c_void_p(c_pointer.value + self.padding_bytes)
         padright_pointer = ctypes.c_void_p(c_pointer.value + npages_user * pagesize)
 
-        # and set the permissions on the pad memory to 0 (no access)
-        # if these fail, don't worry about failing the entire allocation
+        # And set the permissions on the pad memory to 0 (no access)
+        # If these fail, don't worry about failing the entire allocation
         c_padsize = ctypes.c_ulong(self.padding_bytes)
         if self.lib.mprotect(padleft_pointer, c_padsize, ctypes.c_int(0)):
             logger.warning("couldn't protect memory")
         if self.lib.mprotect(padright_pointer, c_padsize, ctypes.c_int(0)):
             logger.warning("couldn't protect memory")
 
-        # if there is a multiple of 4 bytes left, use the code below to poison
+        # If there is a multiple of 4 bytes left, use the code below to poison
         # the memory
         if nbytes_user % 4 == 0:
             poison_size = npages_user*pagesize - nbytes_user
@@ -226,16 +229,16 @@ class GuardAllocator(PosixAllocator):
             poison_ptr = ctypes.cast(ctypes.c_void_p(c_pointer.value + nbytes_user),
                                      intp_type)
 
-            # for both float32 and float64, a sequence of -100 int32s represents NaNs,
-            # at least on little-endian architectures.  It shouldn't matter what we
-            # put in there, anyway
+            # For both float32 and float64, a sequence of -100 int32s
+            # represents NaNs, at least on little-endian architectures;
+            # it shouldn't matter what we put in there, anyway
             for i in range(poison_size // 4):
                 poison_ptr[i] = -100
 
         return c_pointer, (padleft_pointer, c_bytesize)
 
     def free(self, c_pointer, total_size):
-        # unprotect it, since free() accesses it, I think...
+        # Unprotect it, since free() accesses it, I think...
         self.lib.mprotect(c_pointer, total_size,
                           ctypes.c_int(mmap.PROT_READ | mmap.PROT_WRITE))
         self.lib.free(c_pointer)
@@ -257,8 +260,6 @@ class NumaAllocator(MemoryAllocator):
         ("allocate on any NUMA node with sufficient free memory") are accepted.
     """
 
-    is_Numa = True
-
     @classmethod
     def initialize(cls):
         handle = find_library('numa')
@@ -278,7 +279,7 @@ class NumaAllocator(MemoryAllocator):
         cls.lib = lib
 
     def __init__(self, node):
-        super(NumaAllocator, self).__init__()
+        super().__init__()
         self._node = node
 
     def _alloc_C_libcall(self, size, ctype):
@@ -327,51 +328,6 @@ class NumaAllocator(MemoryAllocator):
         return self._node == 'local'
 
 
-class CupyAllocator(MemoryAllocator):
-
-    """
-    Memory allocator based on Unified Memory concept. The allocation is made using Cupy.
-    """
-    _mempool = None
-
-    @classmethod
-    def initialize(cls):
-
-        try:
-            import cupy as cp
-            cls.lib = cp
-            cls._initialize_shared_memory()
-            try:
-                from devito.mpi import MPI
-                cls.MPI = MPI
-                cls._set_device_for_mpi()
-            except:
-                cls.MPI = None
-        except:
-            cls.lib = None
-
-    @classmethod
-    def _initialize_shared_memory(cls):
-        cls._mempool = cls.lib.cuda.MemoryPool(cls.lib.cuda.malloc_managed)
-        cls.lib.cuda.set_allocator(cls._mempool.malloc)
-
-    @classmethod
-    def _set_device_for_mpi(cls):
-        if cls.MPI.Is_initialized():
-            n_gpu = cls.lib.cuda.runtime.getDeviceCount()
-            rank_l = cls.MPI.COMM_WORLD.Split_type(cls.MPI.COMM_TYPE_SHARED).Get_rank()
-            cls.lib.cuda.runtime.setDevice(rank_l % n_gpu)
-
-    def _alloc_C_libcall(self, size, ctype):
-        if not self.available():
-            raise ImportError("Couldn't initialize cupy or MPI elements of alocation")
-        mem_obj = self.lib.zeros(size, dtype=self.lib.float64)
-        return mem_obj.data.ptr, (mem_obj,)
-
-    def free(self, _):
-        self._mempool.free_all_blocks()
-
-
 class ExternalAllocator(MemoryAllocator):
 
     """
@@ -411,7 +367,7 @@ class ExternalAllocator(MemoryAllocator):
     def __init__(self, numpy_array):
         self.numpy_array = numpy_array
 
-    def alloc(self, shape, dtype):
+    def alloc(self, shape, dtype, padding=0):
         assert shape == self.numpy_array.shape, \
             "Provided array has shape %s. Expected %s" %\
             (str(self.numpy_array.shape), str(shape))
@@ -423,12 +379,11 @@ class ExternalAllocator(MemoryAllocator):
 
 
 ALLOC_GUARD = GuardAllocator(1048576)
-ALLOC_FLAT = PosixAllocator()
+ALLOC_ALIGNED = PosixAllocator()
 ALLOC_KNL_DRAM = NumaAllocator(0)
 ALLOC_KNL_MCDRAM = NumaAllocator(1)
 ALLOC_NUMA_ANY = NumaAllocator('any')
 ALLOC_NUMA_LOCAL = NumaAllocator('local')
-ALLOC_CUPY = CupyAllocator()
 
 custom_allocators = {}
 """User-defined allocators."""
@@ -459,8 +414,8 @@ def default_allocator(name=None):
 
         * ALLOC_GUARD: Only used in so-called "develop mode", to trigger SIGSEGV as
                        soon as OOB accesses are performed.
-        * ALLOC_FLAT: Align memory to page boundaries using the posix function
-                      `posix_memalign`.
+        * ALLOC_ALIGNED: Align memory to page boundaries using the function
+                         `posix_memalign`.
         * ALLOC_NUMA_LOCAL: Allocate memory in the "closest" NUMA node. This only
                             makes sense on a NUMA architecture. Falls back to
                             allocation in an arbitrary NUMA node if there isn't
@@ -480,10 +435,9 @@ def default_allocator(name=None):
 
     if configuration['develop-mode']:
         return ALLOC_GUARD
-    elif NumaAllocator.available():
-        if configuration['platform'].name == 'knl' and infer_knl_mode() == 'flat':
-            return ALLOC_KNL_MCDRAM
-        else:
-            return ALLOC_NUMA_LOCAL
+    elif (NumaAllocator.available() and
+          configuration['platform'].name == 'knl' and
+          infer_knl_mode() == 'flat'):
+        return ALLOC_KNL_MCDRAM
     else:
-        return ALLOC_FLAT
+        return custom_allocators.get('default', ALLOC_ALIGNED)

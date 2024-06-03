@@ -1,20 +1,20 @@
 import numpy as np
 import pytest
 
-from devito import Operator, norm, Function, Grid, SparseFunction
+from devito import Operator, norm, Function, Grid, SparseFunction, inner
 from devito.logger import info
-from examples.seismic import demo_model, Receiver
+from examples.seismic import demo_model
 from examples.seismic.acoustic import acoustic_setup
 from examples.seismic.tti import tti_setup
 from examples.seismic.viscoacoustic import viscoacoustic_setup
-from examples.seismic.stiffness import iso_elastic_setup
 
 presets = {
     'constant': {'preset': 'constant-isotropic'},
     'layers': {'preset': 'layers-isotropic', 'nlayers': 2},
+    'layers-fs': {'preset': 'layers-isotropic', 'nlayers': 2, 'fs': True},
     'layers-tti': {'preset': 'layers-tti', 'nlayers': 2},
+    'layers-tti-fs': {'preset': 'layers-tti', 'nlayers': 2, 'fs': True},
     'layers-viscoacoustic': {'preset': 'layers-viscoacoustic', 'nlayers': 2},
-    'layers-elastic': {'preset': 'layers-elastic', 'nlayers': 2},
 }
 
 
@@ -29,6 +29,8 @@ class TestAdjoint(object):
         ('layers', (60, 70), 'OT2', 8, 2, acoustic_setup),
         ('layers', (60, 70), 'OT2', 4, 2, acoustic_setup),
         ('layers', (60, 70), 'OT4', 2, 2, acoustic_setup),
+        # 2D test with 2 layers and freesurface
+        ('layers-fs', (60, 70), 'OT2', 4, 2, acoustic_setup),
         # 3D tests with varying time and space orders
         ('layers', (60, 70, 80), 'OT2', 8, 2, acoustic_setup),
         ('layers', (60, 70, 80), 'OT2', 6, 2, acoustic_setup),
@@ -44,6 +46,8 @@ class TestAdjoint(object):
         ('layers-tti', (30, 35), 'centered', 4, 2, tti_setup),
         ('layers-tti', (30, 35), 'staggered', 8, 1, tti_setup),
         ('layers-tti', (30, 35), 'staggered', 4, 1, tti_setup),
+        # 2D TTI test with 2 layers and freesurface
+        ('layers-tti-fs', (30, 35), 'centered', 4, 2, tti_setup),
         # 3D TTI tests with varying space orders
         ('layers-tti', (30, 35, 40), 'centered', 8, 2, tti_setup),
         ('layers-tti', (30, 35, 40), 'centered', 4, 2, tti_setup),
@@ -83,16 +87,6 @@ class TestAdjoint(object):
             viscoacoustic_setup),
         ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 2, 2, \
             viscoacoustic_setup),
-        # 2D elastic tests with varying space orders
-        ('layers-elastic', (20, 25), None, 2, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25), None, 4, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25), None, 8, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25), None, 12, 1, iso_elastic_setup),
-        # 3D elastic tests with varying space orders
-        ('layers-elastic', (20, 25, 20), None, 2, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25, 20), None, 4, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25, 20), None, 8, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25, 20), None, 12, 1, iso_elastic_setup),
     ])
     def test_adjoint_F(self, mkey, shape, kernel, space_order, time_order, setup_func):
         """
@@ -111,16 +105,14 @@ class TestAdjoint(object):
                             **(presets[mkey]), dtype=np.float64)
 
         # Create adjoint receiver symbol
-        srca = Receiver(name='srca', grid=solver.model.grid,
-                        time_range=solver.geometry.time_axis,
-                        coordinates=solver.geometry.src_positions)
+        srca = solver.geometry.new_src(name="srca", src_type=None)
 
         # Run forward and adjoint operators
         rec = solver.forward(save=False)[0]
         solver.adjoint(rec=rec, srca=srca)
 
         # Adjoint test: Verify <Ax,y> matches  <x, A^Ty> closely
-        term1 = np.dot(srca.data.reshape(-1), solver.geometry.src.data)
+        term1 = inner(srca, solver.geometry.src)
         term2 = norm(rec) ** 2
         info('<x, A^Ty>: %f, <Ax,y>: %f, difference: %4.4e, ratio: %f'
              % (term1, term2, (term1 - term2)/term1, term1 / term2))
@@ -135,6 +127,8 @@ class TestAdjoint(object):
         ('layers', (60, 70), 'OT2', 12, 2, acoustic_setup),
         ('layers', (60, 70), 'OT2', 8, 2, acoustic_setup),
         ('layers', (60, 70), 'OT2', 4, 2, acoustic_setup),
+        # 2D test with 2 layers and freesurface
+        ('layers-fs', (60, 70), 'OT2', 4, 2, acoustic_setup),
         # 3D tests with varying time and space orders
         ('layers', (40, 50, 30), 'OT2', 12, 2, acoustic_setup),
         ('layers', (40, 50, 30), 'OT2', 8, 2, acoustic_setup),
@@ -142,6 +136,8 @@ class TestAdjoint(object):
         # 2D TTI tests with varying space orders
         ('layers-tti', (20, 25), 'centered', 8, 2, tti_setup),
         ('layers-tti', (20, 25), 'centered', 4, 2, tti_setup),
+        # 2D TTI test with 2 layers and freesurface
+        ('layers-tti-fs', (20, 25), 'centered', 4, 2, tti_setup),
         # 3D TTI tests with varying space orders
         ('layers-tti', (20, 25, 30), 'centered', 8, 2, tti_setup),
         ('layers-tti', (20, 25, 30), 'centered', 4, 2, tti_setup),
@@ -233,6 +229,6 @@ class TestAdjoint(object):
         # y => p
         # x => c
         # P^T y => a
-        term1 = np.dot(p2.data.reshape(-1), p.data.reshape(-1))
-        term2 = np.dot(c.data.reshape(-1), a.data.reshape(-1))
+        term1 = inner(p2, p)
+        term2 = inner(c, a)
         assert np.isclose((term1-term2) / term1, 0., atol=1.e-6)

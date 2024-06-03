@@ -4,7 +4,7 @@ import numpy as np
 from devito.arch import AMDGPUX, NVIDIAX
 from devito.ir import (Call, DeviceCall, DummyExpr, EntryFunction, List, Block,
                        ParallelTree, Pragma, Return, FindSymbols, make_callable)
-from devito.passes import is_on_device
+from devito.passes import needs_transfer, is_on_device
 from devito.passes.iet.definitions import DeviceAwareDataManager
 from devito.passes.iet.engine import iet_pass
 from devito.passes.iet.orchestration import Orchestrator
@@ -13,8 +13,8 @@ from devito.passes.iet.parpragma import (PragmaDeviceAwareTransformer, PragmaLan
 from devito.passes.iet.languages.C import CBB
 from devito.passes.iet.languages.openmp import OmpRegion, OmpIteration
 from devito.symbolics import FieldFromPointer, Macro, cast_mapper
-from devito.tools import filter_ordered
-from devito.types import DeviceMap, Symbol
+from devito.tools import filter_ordered, UnboundTuple
+from devito.types import Symbol
 
 __all__ = ['DeviceAccizer', 'DeviceAccDataManager', 'AccOrchestrator']
 
@@ -30,7 +30,8 @@ class DeviceAccIteration(PragmaIteration):
         clauses = []
 
         if tile:
-            clauses.append('tile(%s)' % ','.join(str(i) for i in tile))
+            stile = [str(tile[i]) for i in range(ncollapsed)]
+            clauses.append('tile(%s)' % ','.join(stile))
         elif ncollapsed > 1:
             clauses.append('collapse(%d)' % ncollapsed)
 
@@ -155,23 +156,17 @@ class DeviceAccizer(PragmaDeviceAwareTransformer):
 
     lang = AccBB
 
-    def _make_partree(self, candidates, nthreads=None, index=0):
+    def _make_partree(self, candidates, nthreads=None):
         assert candidates
 
         root, collapsable = self._select_candidates(candidates)
-        ncollapsable = len(collapsable)
+        ncollapsable = len(collapsable) + 1
 
         if self._is_offloadable(root) and \
            all(i.is_Affine for i in [root] + collapsable) and \
            self.par_tile:
-            idx = min(index, len(self.par_tile) - 1)
-            tile = self.par_tile[idx]
-            assert isinstance(tile, tuple)
-            nremainder = (ncollapsable + 1) - len(tile)
-            if nremainder >= 0:
-                tile += (tile[-1],)*nremainder
-            else:
-                tile = tile[:ncollapsable + 1]
+            tile = self.par_tile.nextitem()
+            assert isinstance(tile, UnboundTuple)
 
             body = self.DeviceIteration(gpu_fit=self.gpu_fit, tile=tile,
                                         ncollapsed=ncollapsable, **root.args)
@@ -219,13 +214,13 @@ class DeviceAccDataManager(DeviceAwareDataManager):
         if not isinstance(iet, EntryFunction):
             return iet, {}
 
-        dmaps = [i for i in FindSymbols('basics').visit(iet)
-                 if isinstance(i, DeviceMap)]
+        symbols = FindSymbols('basics').visit(iet)
+        functions = [f for f in symbols if needs_transfer(f, self.gpu_fit)]
 
         efuncs = []
         calls = []
-        for dmap in filter_ordered(dmaps):
-            f = dmap.function
+        for f in functions:
+            dmap = f.dmap
             hp = f.indexed
 
             tdp = Symbol(name="dptr", dtype=np.uint64)
@@ -247,7 +242,10 @@ class DeviceAccDataManager(DeviceAwareDataManager):
             name = self.sregistry.make_name(prefix='map_device_ptr')
             efuncs.append(make_callable(name, body, retval=hp))
 
-            calls.append(Call(name, f, retobj=dmap))
+            if dmap in symbols:
+                calls.append(Call(name, f, retobj=dmap))
+            else:
+                calls.append(Call(name, f))
 
         body = iet.body._rebuild(maps=iet.body.maps + tuple(calls))
         iet = iet._rebuild(body=body)

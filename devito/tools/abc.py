@@ -135,6 +135,12 @@ class Reconstructable(object):
                 args += tuple(getattr(self, i[1:]))
             else:
                 args += (getattr(self, i),)
+
+        args = list(args)
+        for k in list(kwargs):
+            if k in self.__rargs__:
+                args[self.__rargs__.index(k)] = kwargs.pop(k)
+
         kwargs.update({i: getattr(self, i) for i in self.__rkwargs__ if i not in kwargs})
 
         # Should we use a constum reconstructor?
@@ -253,7 +259,7 @@ class Singleton(type):
 
     def __call__(cls, *args, **kwargs):
         if cls not in cls._instances:
-            cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
+            cls._instances[cls] = super().__call__(*args, **kwargs)
         return cls._instances[cls]
 
 

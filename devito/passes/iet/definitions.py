@@ -9,11 +9,10 @@ from operator import itemgetter
 
 import numpy as np
 
-from devito.ir import (Block, Call, Definition, DeviceCall, DeviceFunction,
-                       DummyExpr, Return, EntryFunction, FindSymbols, MapExprStmts,
-                       Transformer, make_callable)
-from devito.passes import is_on_device, is_gpu_create
-from devito.passes.iet.engine import iet_pass, iet_visit
+from devito.ir import (Block, Call, Definition, DummyExpr, Return, EntryFunction,
+                       FindSymbols, MapExprStmts, Transformer, make_callable)
+from devito.passes import is_gpu_create
+from devito.passes.iet.engine import iet_pass
 from devito.passes.iet.langbase import LangBB
 from devito.symbolics import (Byref, DefFunction, FieldFromPointer, IndexedPointer,
                               SizeOf, VOID, Keyword, pow_to_mul)
@@ -25,8 +24,8 @@ __all__ = ['DataManager', 'DeviceAwareDataManager', 'Storage']
 
 class MetaSite(object):
 
-    _items = ('allocs', 'objs', 'frees', 'pallocs', 'pfrees',
-              'maps', 'unmaps', 'efuncs')
+    _items = ('standalones', 'allocs', 'stacks', 'objs', 'frees', 'pallocs',
+              'pfrees', 'maps', 'unmaps', 'efuncs')
 
     def __init__(self):
         for i in self._items:
@@ -74,9 +73,10 @@ class DataManager(object):
     The language used to express data allocations, deletions, and host-device transfers.
     """
 
-    def __init__(self, rcompile=None, sregistry=None, **kwargs):
+    def __init__(self, rcompile=None, sregistry=None, platform=None, **kwargs):
         self.rcompile = rcompile
         self.sregistry = sregistry
+        self.platform = platform
 
     def _alloc_object_on_low_lat_mem(self, site, obj, storage):
         """
@@ -91,7 +91,10 @@ class DataManager(object):
 
         frees = obj._C_free
 
-        storage.update(obj, site, objs=definition, frees=frees)
+        if obj.free_symbols - {obj}:
+            storage.update(obj, site, objs=definition, frees=frees)
+        else:
+            storage.update(obj, site, standalones=definition, frees=frees)
 
     def _alloc_array_on_low_lat_mem(self, site, obj, storage):
         """
@@ -99,7 +102,7 @@ class DataManager(object):
         """
         alloc = Definition(obj)
 
-        storage.update(obj, site, allocs=alloc)
+        storage.update(obj, site, stacks=alloc)
 
     def _alloc_array_on_global_mem(self, site, obj, storage):
         """
@@ -199,13 +202,13 @@ class DataManager(object):
         name = self.sregistry.make_name(prefix='alloc')
         body = (decl, *allocs, init, ret)
         efunc0 = make_callable(name, body, retval=obj)
-        assert len(efunc0.parameters) == 1  # `nbytes_param`
-        alloc = Call(name, nbytes_arg, retobj=obj)
+        args = list(efunc0.parameters)
+        args[args.index(nbytes_param)] = nbytes_arg
+        alloc = Call(name, args, retobj=obj)
 
         name = self.sregistry.make_name(prefix='free')
         efunc1 = make_callable(name, frees)
-        assert len(efunc1.parameters) == 1  # `obj`
-        free = Call(name, obj)
+        free = Call(name, efunc1.parameters)
 
         storage.update(obj, site, allocs=alloc, frees=free, efuncs=(efunc0, efunc1))
 
@@ -272,10 +275,12 @@ class DataManager(object):
             cbody = k.body
 
             # objects
+            standalones = as_list(cbody.standalones) + flatten(v.standalones)
             objs = as_list(cbody.objs) + flatten(v.objs)
 
             # allocs/pallocs
             allocs = as_list(cbody.allocs) + flatten(v.allocs)
+            stacks = as_list(cbody.stacks) + flatten(v.stacks)
             for tid, body in as_mapper(v.pallocs, itemgetter(0), itemgetter(1)).items():
                 header = self.lang.Region._make_header(tid.symbolic_size)
                 init = self.lang['thread-num'](retobj=tid)
@@ -296,9 +301,11 @@ class DataManager(object):
             # efuncs
             efuncs.extend(v.efuncs)
 
-            mapper[cbody] = cbody._rebuild(allocs=allocs, maps=maps, objs=objs,
-                                           unmaps=unmaps, frees=frees)
-        
+            mapper[cbody] = cbody._rebuild(
+                standalones=standalones, allocs=allocs, stacks=stacks,
+                maps=maps, objs=objs, unmaps=unmaps, frees=frees
+            )
+
         processed = Transformer(mapper, nested=True).visit(iet)
 
         return processed, flatten(efuncs)
@@ -355,7 +362,9 @@ class DataManager(object):
         includes = set()
         if isinstance(iet, EntryFunction) and globs:
             for i in sorted(globs, key=lambda f: f.name):
-                includes.add(self._alloc_array_on_global_mem(iet, i, storage))
+                v = self._alloc_array_on_global_mem(iet, i, storage)
+                if v:
+                    includes.add(v)
 
         iet, efuncs = self._inject_definitions(iet, storage)
 
@@ -393,7 +402,6 @@ class DataManager(object):
         # Create and attach the type casts
         casts = tuple(self.lang.PointerCast(i.function, obj=i) for i in bases
                       if i not in defines)
-        
         if casts:
             iet = iet._rebuild(body=iet.body._rebuild(casts=casts + iet.body.casts))
 
@@ -485,33 +493,8 @@ class DeviceAwareDataManager(DataManager):
 
         storage.update(obj, site, maps=mmap, unmaps=unmap, efuncs=efunc)
 
-    @iet_visit
-    def derive_transfers(self, iet):
-        """
-        Collect all symbols that cause host-device data transfer, distinguishing
-        between reads and writes.
-        """
-
-        def needs_transfer(f):
-            return f._mem_mapped and not f.alias and is_on_device(f, self.gpu_fit)
-
-        writes = set()
-        reads = set()
-        for i, v in MapExprStmts().visit(iet).items():
-            if not any(isinstance(j, self.lang.DeviceIteration) for j in v) and \
-               not isinstance(i, DeviceCall) and \
-               not isinstance(iet, DeviceFunction):
-                # Not an offloaded Iteration tree
-                continue
-
-            writes.update({w for w in i.writes if needs_transfer(w)})
-            reads.update({f for f in i.functions
-                          if needs_transfer(f) and f not in writes})
-
-        return (reads, writes)
-
     @iet_pass
-    def place_transfers(self, iet, **kwargs):
+    def place_transfers(self, iet, data_movs=None, **kwargs):
         """
         Create a new IET with host-device data transfers. This requires mapping
         symbols to the suitable memory spaces.
@@ -520,17 +503,12 @@ class DeviceAwareDataManager(DataManager):
             return iet, {}
 
         @singledispatch
-        def _place_transfers(iet, mapper):
+        def _place_transfers(iet, data_movs):
             return iet, {}
 
         @_place_transfers.register(EntryFunction)
-        def _(iet, mapper):
-            try:
-                reads, writes = list(zip(*mapper.values()))
-            except ValueError:
-                return iet, {}
-            reads = set(flatten(reads))
-            writes = set(flatten(writes))
+        def _(iet, data_movs):
+            reads, writes = data_movs
 
             # Special symbol which gives user code control over data deallocations
             devicerm = DeviceRM()
@@ -551,7 +529,7 @@ class DeviceAwareDataManager(DataManager):
 
             return iet, {'efuncs': efuncs}
 
-        return _place_transfers(iet, mapper=kwargs['mapper'])
+        return _place_transfers(iet, data_movs=data_movs)
 
     @iet_pass
     def place_devptr(self, iet, **kwargs):
@@ -579,11 +557,10 @@ class DeviceAwareDataManager(DataManager):
         """
         Apply the `place_transfers`, `place_definitions` and `place_casts` passes.
         """
-        mapper = self.derive_transfers(graph)
-        self.place_transfers(graph, mapper=mapper)
+        self.place_transfers(graph, data_movs=graph.data_movs)
         self.place_definitions(graph, globs=set())
         self.place_devptr(graph)
-        self.place_bundling(graph)
+        self.place_bundling(graph, writes_input=graph.writes_input)
         self.place_casts(graph)
 
 
