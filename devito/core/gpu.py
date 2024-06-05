@@ -40,7 +40,7 @@ class DeviceOperatorMixin(object):
         o['mpi'] = oo.pop('mpi')
         o['parallel'] = True
 
-        o['disk-swap'] = DiskSwapConfig(oo.pop('disk-swap', None))
+        o['disk-swap'] = oo.pop('disk-swap', None)
 
         # Buffering
         o['buf-async-degree'] = oo.pop('buf-async-degree', None)

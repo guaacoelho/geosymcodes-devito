@@ -769,6 +769,13 @@ class CastStar(object):
 
     def __new__(cls, base=''):
         return cls.base(base, '*')
+    
+class CastStarStar(object):
+
+    base = None
+
+    def __new__(cls, base=''):
+        return cls.base(base, '**')
 
 
 # Dynamically create INT, INT2, .... INTP, INT2P, ... FLOAT, ...
