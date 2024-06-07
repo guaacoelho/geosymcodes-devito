@@ -72,17 +72,10 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
         # TODO: initialize int myrank
         # TODO: initialize char error[140]
         myrank = Symbol(name="myrank", dtype=np.int32)
-        mr_eq = IREq(myrank, 0)
-
-        dps = Symbol(name="DPS", dtype=np.int32, ignoreDefinition=True)
-        socket = Symbol(name="socket", dtype=np.int32)
-              
-        socket_eq = IREq(socket, Mod(myrank, 2) * dps)
-        c_socket_eq = ClusterizedEq(socket_eq, ispace=None)                
+        mr_eq = IREq(myrank, 0)              
          
         it_nodes.append(Expression(ClusterizedEq(mr_eq), None, True))
         it_nodes.append(Call(name="MPI_Comm_rank", arguments=[Macro("MPI_COMM_WORLD"), Byref(myrank)]))
-        it_nodes.append(Expression(c_socket_eq, None, True))  
         it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{exec_id_path}/socket_%d_%s_vec_%d.bin\""), myrank, stencil_name_array, i_symbol]))
     else:   
         it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{exec_id_path}/%s_vec_%d.bin\""), stencil_name_array, i_symbol]))        
