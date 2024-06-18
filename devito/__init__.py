@@ -24,6 +24,7 @@ from devito.builtins import *  # noqa
 from devito.data.allocators import *  # noqa
 from devito.logger import error, warning, info, set_log_level  # noqa
 from devito.mpi import MPI, CustomTopology  # noqa
+from devito.tools import create_ds_path, remove_ds_path  # noqa
 try:
     from devito.checkpointing import DevitoCheckpoint, CheckpointOperator  # noqa
     from pyrevolve import Revolver

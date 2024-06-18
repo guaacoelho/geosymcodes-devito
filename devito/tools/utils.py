@@ -1,3 +1,5 @@
+import os
+
 from collections import OrderedDict
 from collections.abc import Iterable
 from functools import reduce
@@ -12,7 +14,7 @@ __all__ = ['prod', 'as_tuple', 'is_integer', 'generator', 'grouper', 'split',
            'roundm', 'powerset', 'invert', 'flatten', 'single_or', 'filter_ordered',
            'as_mapper', 'filter_sorted', 'pprint', 'sweep', 'all_equal', 'as_list',
            'indices_to_slices', 'indices_to_sections', 'transitive_closure',
-           'humanbytes', 'contains_val', 'sorted_priority']
+           'humanbytes', 'contains_val', 'sorted_priority', 'create_ds_path', 'remove_ds_path']
 
 
 def prod(iterable, initial=1):
@@ -340,3 +342,77 @@ def sorted_priority(items, priority):
         return (v, str(type(i)))
 
     return sorted(items, key=key, reverse=True)
+
+def create_ds_path(folder, path=None, generate_only=False):
+    """
+    Create a directory for disk swap, with the given name in the given path.
+
+    Args:
+        folder (str): folder name.
+        path (str, optional): folder path.
+        generate_only (bool, optional): if True, only generate the path, do not create it.
+
+    Returns:
+        str: complete path to the created folder.
+    """
+    
+    if not path:
+        try:
+            import devito
+            up = os.path.dirname
+
+            # install_folder/devito/devito -> install_folder/devito -> install_folder
+            pwd = up(up(up(devito.__file__)))
+        except Exception as e:
+            raise RuntimeError("Error while trying to get the default path: %s. \nConsider providing a path" % e)
+    else:
+        pwd = path
+        
+    try:
+        real_pwd = os.path.realpath(os.path.abspath(pwd))
+    except Exception as e:
+        raise RuntimeError("Error while trying to build real path: %s." % e)
+    
+    full_path = os.path.join(real_pwd, folder)
+
+    if generate_only:
+        return full_path
+    
+    try:
+        os.makedirs(full_path, exist_ok=True)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            print(f"Directory '{full_path}' already exists.")
+        elif e.errno == errno.EACCES:
+            print(f"Permission denied while creating '{full_path}'.")
+        elif e.errno == errno.ENAMETOOLONG:
+            print(f"Directory name is too long: '{full_path}'.")
+        else:
+            print(f"Error while creating '{full_path}': {e}")
+        raise
+
+    return full_path
+
+
+def remove_ds_path(path):
+    """
+    Remove disk swap directory.
+
+    Args:
+        path (str): folder path.
+    """
+    try:
+        if os.path.exists(path):
+            for root, dirs, files in os.walk(path, topdown=False):
+                for name in files:
+                    file_path = os.path.join(root, name)
+                    os.remove(file_path)
+                for name in dirs:
+                    dir_path = os.path.join(root, name)
+                    os.rmdir(dir_path)
+            os.rmdir(path)
+        else:
+            return
+    except Exception as e:
+        print(f"Error while removing '{path}': {e}")
+        raise
