@@ -2,7 +2,7 @@ import numpy as np
 import cgen
 import os
 import socket as sc
-from sympy import Mod, Not
+from sympy import Mod, Not, sympify
 from pdb import set_trace
 from ctypes import c_int32, POINTER, c_int, c_void_p
 from functools import reduce 
@@ -145,7 +145,7 @@ def get_slices_build(spt_array, nthreads, metas_array, nthreads_dim, i_symbol, s
     
     # Get size of the file
     f_size = Symbol(name='fsize', dtype=off_t)
-    lseek_call = Call(name="lseek", arguments=[metas_array[i_symbol], cast_mapper[size_t](0), Macro("SEEK_END")], retobj=f_size)
+    lseek_call = Call(name="lseek", arguments=[metas_array[i_symbol], 0, Macro("SEEK_END")], retobj=f_size)
     it_nodes.append(lseek_call)
     
     # Get number of slices per thread file
@@ -160,7 +160,6 @@ def get_slices_build(spt_array, nthreads, metas_array, nthreads_dim, i_symbol, s
     if_nodes.append(Call(name="perror", arguments=String("\"Error to allocate slices\\n\"")))
     if_nodes.append(Call(name="exit", arguments=1))
     it_nodes.append(Conditional(CondEq(String(r"slices_size"), Macro("NULL")), if_nodes))
-    
     # Return to begin of the file
     it_nodes.append(Call(name="lseek", arguments=[metas_array[i_symbol], 0, Macro("SEEK_SET")]))
     
