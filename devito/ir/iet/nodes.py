@@ -1134,10 +1134,11 @@ class Section(List):
 
     is_Section = True
 
-    def __init__(self, name, body=None, is_subsection=False):
+    def __init__(self, name, body=None, is_subsection=False, time_only_profiling=False):
         super().__init__(body=body)
         self.name = name
         self.is_subsection = is_subsection
+        self.time_only_profiling = time_only_profiling
 
     def __repr__(self):
         return "<Section (%s)>" % self.name

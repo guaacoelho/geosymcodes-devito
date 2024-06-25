@@ -485,7 +485,7 @@ def open_build(files_array_dict, counters_array_dict, metas_dict, spt_dict, offs
         open_iteration_grad = Iteration(offset_inits + close_metas, nthreads_dim, nthreads-1)
         body.append(open_iteration_grad)
         
-    return Section("open", body)
+    return Section("open", body, time_only_profiling=True)
 
 
 def func_size_build(func_stencil, func_size, float_size):
@@ -552,7 +552,7 @@ def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, fun
         
         iterations.append(io_iteration)
     
-    io_section = Section(sec_name, iterations)
+    io_section = Section(sec_name, iterations, time_only_profiling=True)
 
     dswap_update_iet(iet_body, sec_name + "_temp", io_section)      
     
@@ -730,7 +730,7 @@ def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_sym
             func_read = read_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func], t0, counters_dict[func])
             io_body.append(func_read)
           
-    io_section = Section(name, io_body)
+    io_section = Section(name, io_body, time_only_profiling=True)
     dswap_update_iet(iet_body, temp_name, io_section)     
 
 
@@ -866,7 +866,7 @@ def close_build(nthreads, files_dict, i_symbol, nthreads_dim):
     
     close_iteration = Iteration(it_nodes, nthreads_dim, nthreads-1)
     
-    return Section("close", close_iteration)
+    return Section("close", close_iteration, time_only_profiling=True)
 
 
 def close_slices_build(nthreads, i_symbol, slices_dict, nthreads_dim):
