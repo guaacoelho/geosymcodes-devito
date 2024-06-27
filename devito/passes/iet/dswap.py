@@ -1,7 +1,8 @@
+import os
 import numpy as np
 import cgen
-import os
-import socket as sc
+
+from socket import gethostname
 from sympy import Mod, Not, sympify
 from pdb import set_trace
 from ctypes import c_int32, POINTER, c_int, c_void_p
@@ -50,12 +51,32 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
     if io_folder:
         exec_id_path = f"{io_path}/{io_folder}"
     else:
+        # Get pid
         try:
             pid = os.getppid() if is_mpi else os.getpid()
-            exec_id = os.getlogin() + "_" + str(pid)
-            exec_id_path = f"{io_path}/{exec_id}"
         except:
-            raise ValueError("Unable to get operating system login (os.getlogin()) or pid (os.getpid()) during folder creation. Please, provide a folder name for the output files.")
+            raise RuntimeError(
+                "Unable to retrieve pid (os.getpid()) during folder creation. Please, provide a folder name for the output files.")
+        
+        # Get host name
+        try:
+            host_name = gethostname()
+        except:
+            raise RuntimeError(
+                "Unable to retrieve host name (socket.gethostname) during folder creation. Please, provide a folder name for the output files.")
+        
+        # Get username
+        try:
+           user_name = os.getlogin()
+        except:
+            try:
+               user_name = os.getpwuid(os.getuid())[0]
+            except:
+                raise RuntimeError(
+                    "Unable to retrieve username (os.getlogin() or os.getpwuid(os.getuid())[0]) during folder creation. Please, provide a folder name for the output files.")
+
+        exec_id = "_".join([host_name, user_name, str(pid)])
+        exec_id_path = f"{io_path}/{exec_id}"
     
     rank = MPI.COMM_WORLD.Get_rank() if is_mpi else 0
     

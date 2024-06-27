@@ -15,7 +15,35 @@ C = 0.1
 STEPS = 50
 
 
-def test_regular_mean(self):
+'''
+@pytest.fixture(scope='module')
+def ram_mean():
+    grid = Grid(shape=(200, 200, 200))
+    t = grid.stepping_dim
+    x, y, z = grid.dimensions
+    
+    #RAM Functions and equations
+    u_func = TimeFunction(name="u", grid=grid, space_order=2, save=STEPS+1)
+    v_func = TimeFunction(name="v", grid=grid, space_order=2, save=STEPS+1)
+    w_func = TimeFunction(name='w', grid=grid, space_order=2)
+    
+    eq_u = Eq(u_func[t+1, x, y, z], ALPHA*u_func[t, x, y, z] + C)
+    eq_v = Eq(v_func[t+1, x, y, z], ALPHA*v_func[t, x, y, z] + C)
+    eq_w = Inc(w_func, (v_func + u_func) * 1/ALPHA)
+    
+    #RAM write and read
+    write_op = Operator([eq_u, eq_v], opt=('advanced', {'disk-swap': None}),
+                        name="write_op", language='openmp')
+    write_op.apply()
+    
+    read_op = Operator(eq_w, opt=('advanced', {'disk-swap': None}),
+                    name="read_op", language='openmp')
+    read_op.apply()
+    
+    yield np.mean(w_func.data[-1])
+'''
+
+def test_regular_mean():
     grid = Grid(shape=(200, 200, 200))
     t = grid.stepping_dim
     x, y, z = grid.dimensions
@@ -75,7 +103,7 @@ def test_regular_mean(self):
 
 
 @pytest.mark.parallel(mode=4)
-def test_mpi_means(self, mode):
+def test_mpi_means(mode):
     grid = Grid(shape=(200, 200, 200))
     
     comm = MPI.COMM_WORLD
@@ -155,19 +183,10 @@ def test_mpi_means(self, mode):
                           ('accuracy', 1),
                           ('accuracy', 2),
                           ('accuracy', 10),])
-def test_compression_means(mode, value):
+def test_compression_means(ram_mean, mode, value):
     grid = Grid(shape=(200, 200, 200))
     t = grid.stepping_dim
     x, y, z = grid.dimensions
-    
-    #RAM Functions and equations
-    u_func = TimeFunction(name="u", grid=grid, space_order=2, save=STEPS+1)
-    v_func = TimeFunction(name="v", grid=grid, space_order=2, save=STEPS+1)
-    w_func = TimeFunction(name='w', grid=grid, space_order=2)
-    
-    eq_u = Eq(u_func[t+1, x, y, z], ALPHA*u_func[t, x, y, z] + C)
-    eq_v = Eq(v_func[t+1, x, y, z], ALPHA*v_func[t, x, y, z] + C)
-    eq_w = Inc(w_func, (v_func + u_func) * 1/ALPHA)
     
     #DISK Functions and equations
     u_ds_func = TimeFunction(name="u", grid=grid, space_order=2)
@@ -178,11 +197,16 @@ def test_compression_means(mode, value):
     eq_ds_v = Eq(v_ds_func[t+1, x, y, z], ALPHA*v_ds_func[t, x, y, z] + C)
     eq_ds_w = Inc(w_ds_func, (v_ds_func + u_ds_func) * 1/ALPHA)
 
+    #Compression configuration
+    value_type = "RATE" if mode == "rate" else "value"
+    compression_args = {"method":mode, value_type:value}
+    cc = CompressionConfig(**compression_args)
+    
     #DISK write and read
     ds_path = create_ds_path("test_dswap_folder")
     write_config = DiskSwapConfig(functions=[u_ds_func, v_ds_func],
                                 mode="write",
-                                compression=False,
+                                compression=cc,
                                 path=ds_path,
                                 odirect=1)
 
@@ -192,7 +216,7 @@ def test_compression_means(mode, value):
     
     read_config = DiskSwapConfig(functions=[u_ds_func, v_ds_func],
                                 mode="read",
-                                compression=False,
+                                compression=cc,
                                 path=ds_path,
                                 odirect=1)
 
@@ -201,16 +225,6 @@ def test_compression_means(mode, value):
     read_ds_op.apply(time_M=STEPS)
     
     remove_ds_path(ds_path)
-    
-    #RAM write and read
-    write_op = Operator([eq_u, eq_v], opt=('advanced', {'disk-swap': None}),
-                        name="write_op", language='openmp')
-    write_op.apply()
-    
-    read_op = Operator(eq_w, opt=('advanced', {'disk-swap': None}),
-                    name="read_op", language='openmp')
-    read_op.apply()
 
-    assert np.mean(w_func.data[-1]) == np.mean(w_ds_func.data[-1])
-    
-'''
+    assert ram_mean == np.mean(w_ds_func.data[-1])
+    '''
