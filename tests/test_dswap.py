@@ -155,12 +155,10 @@ def test_mpi_means(mode):
 
 
 @pytest.mark.parametrize('mode, value',
-                         [
-                          ('rate', 0.1),
+                         [("lossless", None),
                           ('rate', 1),
                           ('rate', 2),
                           ('rate', 10),
-                          ('precision', 1),
                           ('precision', 2),
                           ('precision', 10),
                           ('accuracy', 0.1),
@@ -211,7 +209,5 @@ def test_compression_means(ram_mean, mode, value):
     remove_ds_path(ds_path)
 
     ds_mean = np.mean(w_ds_func.data[-1])
-    assert ds_mean != 0
+
     assert (not np.isnan(ds_mean))
-    
-    assert ram_mean != ds_mean

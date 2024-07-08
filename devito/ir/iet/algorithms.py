@@ -49,8 +49,7 @@ def iet_build(stree, **kwargs):
                 time_iterators = i.sub_iterators
             elif isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'read':
                 if dswap.compression:
-                    # TODO: Move decompress section to the top (idx 0) and test
-                    iteration_nodes.append(Section("decompress_temp"))
+                    iteration_nodes.insert(0, Section("decompress_temp"))
                 else:
                     iteration_nodes.insert(0, Section("read_temp"))
                 time_iterators = i.sub_iterators
