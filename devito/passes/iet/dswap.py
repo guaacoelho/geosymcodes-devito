@@ -324,7 +324,7 @@ def disk_swap_build(iet_body, dswap, nt, is_mpi, language, time_iterators):
             raise ValueError("Disk swap incompatible with TimeFunction save functionality on %s" % func.name)
 
     if is_mpi and dswap_compression:
-        raise ValueError("Disk swap currently does not support MPI and compression working togheter")
+        raise NotImplementedError("Disk swap currently does not support MPI and compression working togheter")
     
     funcs_dict = dict((func.name, func) for func in funcs)
     is_write = disk_swap == 'write'
