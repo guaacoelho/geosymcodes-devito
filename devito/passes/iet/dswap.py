@@ -1,4 +1,5 @@
 import os
+import pwd
 import numpy as np
 import cgen
 
@@ -70,7 +71,7 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
            user_name = os.getlogin()
         except:
             try:
-               user_name = os.getpwuid(os.getuid())[0]
+               user_name = pwd.getpwuid(os.getuid())[0]
             except:
                 raise RuntimeError(
                     "Unable to retrieve username (os.getlogin() or os.getpwuid(os.getuid())[0]) during folder creation. Please, provide a folder name for the output files.")
@@ -393,7 +394,7 @@ def disk_swap_build(iet_body, dswap, nt, is_mpi, language, time_iterators):
     
     
     ######## Build close section ########
-    close_section = close_build(nthreads, files_dict, i_symbol, nthreads_dim)
+    close_section = close_build(nthreads, files_dict, metas_dict, i_symbol, nthreads_dim, dswap_compression)
     
     #TODO: Generate blank lines between sections
     for size_init in func_sizes_dict.values():
@@ -864,7 +865,7 @@ def read_build(nthreads, files_array, func_size, func_stencil, t0, counters):
     return Iteration(it_nodes, i_dim, func_size1-1, direction=Backward, pragmas=[pragma])
 
 
-def close_build(nthreads, files_dict, i_symbol, nthreads_dim):
+def close_build(nthreads, files_dict, metas_dict, i_symbol, nthreads_dim, dswap_compression):
     """
     This method inteds to ls read.c close section.
     Obs: maybe the desciption of the variables should be better
@@ -872,8 +873,10 @@ def close_build(nthreads, files_dict, i_symbol, nthreads_dim):
     Args:
         nthreads (NThreads): symbol of number of threads
         files_dict (dict): dictionary with file pointers arrays
+        metas_dict (dict): dictionary with meta file pointers arrays
         i_symbol (Symbol): symbol of the iterator index i
         nthreads_dim (CustomDimension): dimension from 0 to nthreads
+        dswap_compression (CompressionConfig): object representing compression settings
 
     Returns:
         Section: complete close section
@@ -883,7 +886,12 @@ def close_build(nthreads, files_dict, i_symbol, nthreads_dim):
     
     for func in files_dict:
         files = files_dict[func]
-        it_nodes.append(Call(name="close", arguments=[files[i_symbol]])) 
+        it_nodes.append(Call(name="close", arguments=[files[i_symbol]]))
+        
+    if dswap_compression:
+        for func in metas_dict:
+            metas = metas_dict[func]
+            it_nodes.append(Call(name="close", arguments=[metas[i_symbol]])) 
     
     close_iteration = Iteration(it_nodes, nthreads_dim, nthreads-1)
     

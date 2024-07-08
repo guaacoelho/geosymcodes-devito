@@ -1,4 +1,7 @@
+import errno
 import os
+import shutil
+import subprocess
 
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -394,25 +397,18 @@ def create_ds_path(folder, path=None, generate_only=False):
     return full_path
 
 
-def remove_ds_path(path):
+def remove_ds_path(fpath):
     """
     Remove disk swap directory.
 
     Args:
-        path (str): folder path.
+        fpath (str): folder path.
     """
     try:
-        if os.path.exists(path):
-            for root, dirs, files in os.walk(path, topdown=False):
-                for name in files:
-                    file_path = os.path.join(root, name)
-                    os.remove(file_path)
-                for name in dirs:
-                    dir_path = os.path.join(root, name)
-                    os.rmdir(dir_path)
-            os.rmdir(path)
+        if os.path.exists(fpath):
+            shutil.rmtree(fpath)
         else:
             return
     except Exception as e:
-        print(f"Error while removing '{path}': {e}")
+        print(f"Error while removing '{fpath}': {e}")
         raise

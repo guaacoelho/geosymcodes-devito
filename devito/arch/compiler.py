@@ -211,6 +211,10 @@ class Compiler(GCCToolchain):
         else:
             raise NotImplementedError("Unsupported platform %s" % platform)
 
+        options = kwargs.get('opt_options')
+        if options and options['disk-swap'] and options['disk-swap'].compression:
+            self.libraries.append('zfp')
+            
         self.__init_finalize__(**kwargs)
 
     def __init_finalize__(self, **kwargs):
@@ -445,7 +449,7 @@ class GNUCompiler(Compiler):
         except (TypeError, ValueError):
             if language == 'openmp':
                 self.ldflags += ['-fopenmp']
-
+        
     def __lookup_cmds__(self):
         self.CC = 'gcc'
         self.CXX = 'g++'

@@ -1217,14 +1217,16 @@ def parse_kwargs(**kwargs):
             raise InvalidOperator("Illegal `compiler=%s`" % str(compiler))
         kwargs['compiler'] = compiler_registry[compiler](platform=kwargs['platform'],
                                                          language=kwargs['language'],
-                                                         mpi=configuration['mpi'])
+                                                         mpi=configuration['mpi'],
+                                                         opt_options=kwargs['options'])
     elif any([platform, language]):
         kwargs['compiler'] =\
             configuration['compiler'].__new_with__(platform=kwargs['platform'],
                                                    language=kwargs['language'],
-                                                   mpi=configuration['mpi'])
+                                                   mpi=configuration['mpi'],
+                                                   opt_options=kwargs['options'])
     else:
-        kwargs['compiler'] = configuration['compiler'].__new_with__()
+        kwargs['compiler'] = configuration['compiler'].__new_with__(opt_options=kwargs['options'])
 
     # `allocator`
     kwargs['allocator'] = default_allocator(
