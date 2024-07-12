@@ -312,6 +312,7 @@ def disk_swap_build(iet_body, dswap, nt, is_mpi, language, time_iterators):
     Returns:
         List : iet_body is a list of nodes
     """
+    
     funcs = dswap.functions
     disk_swap = dswap.mode
     dswap_compression = dswap.compression    
@@ -570,7 +571,7 @@ def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, fun
                                          func_size_dim, tid, c_tid_eq, ispace, time_iterators[0], dswap_compression, type_var)
         else:
             io_iteration = decompress_build(files_dict[func], funcs_dict[func], i_symbol, pragma, func_size_dim, tid, c_tid_eq,
-                                ispace, time_iterators[-1], spt_dict[func], offset_dict[func], dswap_compression, slices_dict[func], type_var)
+                                ispace, time_iterators[0], spt_dict[func], offset_dict[func], dswap_compression, slices_dict[func], type_var)
         
         iterations.append(io_iteration)
     

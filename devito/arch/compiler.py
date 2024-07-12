@@ -212,7 +212,7 @@ class Compiler(GCCToolchain):
             raise NotImplementedError("Unsupported platform %s" % platform)
 
         options = kwargs.get('opt_options')
-        if options and options['disk-swap'] and options['disk-swap'].compression:
+        if options and options.get('disk-swap') and options['disk-swap'].compression:
             self.libraries.append('zfp')
             
         self.__init_finalize__(**kwargs)
