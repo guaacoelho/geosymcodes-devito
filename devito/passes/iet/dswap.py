@@ -15,9 +15,9 @@ from devito.passes.iet.engine import iet_pass
 from devito.symbolics import (CondEq, CondNe, Macro, String, Null, Byref, cast_mapper, SizeOf)
 from devito.symbolics.extended_sympy import Byref
 from devito.types import (CustomDimension, Array, Symbol, Pointer, TimeDimension, PointerArray, ThreadID,
-                          NThreads, off_t, zfp_type, size_t, zfp_field, bitstream, zfp_stream, Eq)
+                          Indexed, NThreads, off_t, zfp_type, size_t, zfp_field, bitstream, zfp_stream, Eq)
 from devito.ir import (Expression, Increment, Iteration, List, Conditional, Call, Conditional, CallableBody, Callable,
-                            Section, FindNodes, Transformer, Return, Definition, EntryFunction)
+                            Section, FindNodes, FindSymbols, Transformer, Return, Definition, EntryFunction)
 from devito.ir.iet.utils import dswap_array_alloc_check, dswap_update_iet, dswap_get_compress_mode_function
 from devito.ir.equations import IREq, LoweredEq, ClusterizedEq
 from devito.ir.support import (Interval, IntervalGroup, IterationSpace, Backward)
@@ -329,7 +329,7 @@ def disk_swap_build(iet_body, dswap, nt, is_mpi, language, time_iterators):
     
     funcs_dict = dict((func.name, func) for func in funcs)
     is_write = disk_swap == 'write'
-    time_iterator = time_iterators[0]
+    time_iterator = time_iterators[-1 if len(time_iterators) != 2 else 0]
 
     ######## Dimension and symbol for iteration spaces ########
     nthreads = nt or NThreads()
@@ -384,6 +384,12 @@ def disk_swap_build(iet_body, dswap, nt, is_mpi, language, time_iterators):
         func_sizes_dict.update({func.name: func_size_exp})
         func_sizes_symb_dict.update({func.name: func_size})
 
+    ######## Build initial offload or initial offset section ########
+    if is_write:
+        pre_time_io_section = init_offload_build(funcs_dict, nthreads, files_dict, func_sizes_symb_dict, is_mpi)
+    else:
+        pre_time_io_section = init_offset_build(funcs_dict, nthreads, counters_dict)
+    
     if dswap_compression:                     
         ######## Build compress/decompress section ########
         compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, funcs_dict, nthreads,
@@ -396,6 +402,10 @@ def disk_swap_build(iet_body, dswap, nt, is_mpi, language, time_iterators):
     
     ######## Build close section ########
     close_section = close_build(nthreads, files_dict, metas_dict, i_symbol, nthreads_dim, dswap_compression)
+    
+    
+    
+    iet_body.insert(0, pre_time_io_section)
     
     #TODO: Generate blank lines between sections
     for size_init in func_sizes_dict.values():
@@ -530,6 +540,91 @@ def func_size_build(func_stencil, func_size, float_size):
 
     return func_size_exp
 
+
+def init_offload_build(funcs_dict, nthreads, files_dict, func_sizes_symb_dict, is_mpi):
+    """
+    Builds the section responsable for offloading the initial timesteps to disk
+
+    Args:
+        funcs_dict (Dictonary): dict with Functions defined by user for the operator
+        nthreads (NThreads): number of threads
+        files_dict (Dictonary): dict with arrays of files
+        func_sizes_symb_dict (Dictonary): dict with Function sizes symbols
+        is_mpi (bool): MPI execution flag
+
+    Returns:
+        init_offload_section: Section offloading initial timesteps
+    """
+    to_inits = []
+    iterations = []
+    for func in funcs_dict:
+        time_order = Symbol(name=func+"_time_order", dtype=np.int16)
+        time_dim_size = funcs_dict[func].symbolic_shape[0]
+        time_order_eq = IREq(time_order, time_dim_size - 1)
+        time_order_exp = Expression(ClusterizedEq(time_order_eq, ispace=None), init=True)
+        to_inits.append(time_order_exp)
+        
+        time = Symbol(name="time", dtype=np.int32, ignoreDefinition=True)
+        write_iteration = write_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func], time, is_mpi)
+        time_dim = CustomDimension(name="time", symbolic_size=time_dim_size)
+        time_iteration = Iteration(write_iteration, time_dim, time_order-1)
+        iterations.append(time_iteration)
+    
+    return Section("offload", to_inits + iterations, time_only_profiling=True)
+        
+def init_offset_build(funcs_dict, nthreads, counters_dict):
+    """
+    Builds the section responsable for performing the initial timesteps displacement
+    from disk
+
+    Args:
+        funcs_dict (Dictonary): dict with Functions defined by user for the operator
+        nthreads (NThreads): number of threads
+        counters_dict (Dictonary): dict with counter arrays for each Function
+
+    Returns:
+        init_offset_section: Section displacing initial timesteps
+    """
+    to_inits = []
+    iterations = []
+    for func in funcs_dict:   
+        # Time order expression
+        time_order = Symbol(name=func+"_time_order", dtype=np.int16)
+        time_dim_size = funcs_dict[func].symbolic_shape[0]
+        time_order_eq = IREq(time_order, time_dim_size - 1)
+        time_order_exp = Expression(ClusterizedEq(time_order_eq, ispace=None), init=True)
+        to_inits.append(time_order_exp)
+        
+        # Iteration space creation
+        func_size1 = funcs_dict[func].symbolic_shape[1]
+        i_dim = CustomDimension(name="i", symbolic_size=func_size1)
+        interval = Interval(i_dim, 0, func_size1)
+        interval_group = IntervalGroup((interval))
+        ispace = IterationSpace(interval_group)
+
+        # Initialize tid
+        tid = Symbol(name="tid", dtype=np.int32)
+        tid_eq = IREq(tid, Mod(i_dim, nthreads))
+        c_tid_eq = ClusterizedEq(tid_eq, ispace=ispace)
+        tid_exp = Expression(c_tid_eq, None, True)
+        
+        # Counters increment
+        counters = counters_dict[func]
+        counters_inc = IREq(counters[tid], 1)
+        c_new_counters_eq = ClusterizedEq(counters_inc, ispace=ispace)
+        counters_exp = Increment(c_new_counters_eq)
+        
+        #Read iteration
+        pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
+        read_iteration = Iteration([tid_exp, counters_exp], i_dim, func_size1-1, direction=Backward, pragmas=[pragma])
+        
+        #Time iteration
+        time_dim = CustomDimension(name="time", symbolic_size=time_dim_size)
+        time_iteration = Iteration(read_iteration, time_dim, time_order-2)
+        iterations.append(time_iteration)
+        
+        
+    return Section("offset", to_inits + iterations, time_only_profiling=True) 
 
 def compress_or_decompress_build(files_dict, metas_dict, iet_body, is_write, funcs_dict, nthreads, time_iterators, spt_dict, offset_dict, dswap_compression, slices_dict, type_var):
     """
@@ -749,8 +844,10 @@ def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_sym
     else: # read
         temp_name = "read_temp"
         name = "read"
+        expressions = FindNodes(Expression).visit(iet_body)
         for func in funcs_dict:
-            func_read = read_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func], t0, counters_dict[func])
+            func_read = read_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func], t0,
+                                   counters_dict[func], expressions)
             io_body.append(func_read)
           
     io_section = Section(name, io_body, time_only_profiling=True)
@@ -805,7 +902,7 @@ def write_build(nthreads, files_array, func_size, func_stencil, t0, is_mpi):
 
     return Iteration(it_nodes, func_size_dim, func_size1-1, pragmas=[pragma])
 
-def read_build(nthreads, files_array, func_size, func_stencil, t0, counters):
+def read_build(nthreads, files_array, func_size, func_stencil, t0, counters, expressions):
     """
     This method inteds to code read.c read section.
     Obs: maybe the desciption of the variables should be better    
@@ -821,6 +918,18 @@ def read_build(nthreads, files_array, func_size, func_stencil, t0, counters):
     Returns:
         Iteration: read loop
     """
+    # Grad time iterator recover
+    grad = next((exp for exp in expressions if func_stencil in exp.reads), None)
+    
+    if not grad:
+        raise RuntimeError("Function {} provided as beeing read from disk, but no reading found".format(func_stencil))
+        
+    rhs = grad.expr.rhs
+    indexing = next((symb for symb in rhs.free_symbols if
+                        (isinstance(symb, Indexed) and symb.function == func_stencil)),
+                    None)
+    time_iter = indexing.indices[0]
+    
     
     func_size1 = func_stencil.symbolic_shape[1]
     pragma = cgen.Pragma("omp parallel for schedule(static,1) num_threads(nthreads)")
@@ -845,7 +954,7 @@ def read_build(nthreads, files_array, func_size, func_stencil, t0, counters):
 
     # Initialize ret
     ret = Symbol(name="ret", dtype=np.int32)
-    read_call = Call(name="read", arguments=[files_array[tid], func_stencil[t0, i_dim], func_size], retobj=ret)
+    read_call = Call(name="read", arguments=[files_array[tid], func_stencil[time_iter, i_dim], func_size], retobj=ret)
     it_nodes.append(read_call)
 
     # Error conditional print
@@ -859,8 +968,8 @@ def read_build(nthreads, files_array, func_size, func_stencil, t0, counters):
     it_nodes.append(cond)
     
     # Counters increment
-    newCountersEq = IREq(counters[tid], 1)
-    c_new_counters_eq = ClusterizedEq(newCountersEq, ispace=ispace)
+    counters_inc = IREq(counters[tid], 1)
+    c_new_counters_eq = ClusterizedEq(counters_inc, ispace=ispace)
     it_nodes.append(Increment(c_new_counters_eq))
         
     return Iteration(it_nodes, i_dim, func_size1-1, direction=Backward, pragmas=[pragma])
