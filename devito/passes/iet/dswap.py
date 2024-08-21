@@ -329,7 +329,7 @@ def disk_swap_build(iet_body, dswap, nt, is_mpi, language, time_iterators):
     
     funcs_dict = dict((func.name, func) for func in funcs)
     is_write = disk_swap == 'write'
-    time_iterator = time_iterators[-1 if len(time_iterators) != 2 else 0]
+    time_iterator = time_iterators[-1]
 
     ######## Dimension and symbol for iteration spaces ########
     nthreads = nt or NThreads()
@@ -818,7 +818,7 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
 
 def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_symb_dict, funcs_dict, t0, counters_dict, is_mpi):
     """
-    Builds the read or write section of the operator, depending on the disk_swap mode.
+    Builds operator's read or write section, depending on the disk_swap mode.
     Replaces the temporary section at the end of the time iteration by the read or write section.   
 
     Args:
@@ -846,7 +846,7 @@ def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_sym
         name = "read"
         expressions = FindNodes(Expression).visit(iet_body)
         for func in funcs_dict:
-            func_read = read_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func], t0,
+            func_read = read_build(nthreads, files_dict[func], func_sizes_symb_dict[func], funcs_dict[func],
                                    counters_dict[func], expressions)
             io_body.append(func_read)
           
@@ -856,8 +856,7 @@ def write_or_read_build(iet_body, is_write, nthreads, files_dict, func_sizes_sym
 
 def write_build(nthreads, files_array, func_size, func_stencil, t0, is_mpi):
     """
-    This method inteds to code read.c write section.
-    Obs: maybe the desciption of the variables should be better    
+    Builds write iteration of given Function   
 
     Args:
         nthreads (NThreads): symbol of number of threads
@@ -902,19 +901,17 @@ def write_build(nthreads, files_array, func_size, func_stencil, t0, is_mpi):
 
     return Iteration(it_nodes, func_size_dim, func_size1-1, pragmas=[pragma])
 
-def read_build(nthreads, files_array, func_size, func_stencil, t0, counters, expressions):
+def read_build(nthreads, files_array, func_size, func_stencil, counters, expressions):
     """
-    This method inteds to code read.c read section.
-    Obs: maybe the desciption of the variables should be better    
+    Builds read iteration of given Function  
 
     Args:
         nthreads (NThreads): symbol of number of threads
         files_array (files): pointer of allocated memory of nthreads dimension. Each place has a size of int
         func_size (Symbol): the func_stencil size
         func_stencil (u): a stencil we call u
-        t0 (ModuloDimension): time t0
         counters (array): pointer of allocated memory of nthreads dimension. Each place has a size of int
-
+        expressions(array): list of all expressions in iet_body
     Returns:
         Iteration: read loop
     """
@@ -922,7 +919,7 @@ def read_build(nthreads, files_array, func_size, func_stencil, t0, counters, exp
     grad = next((exp for exp in expressions if func_stencil in exp.reads), None)
     
     if not grad:
-        raise RuntimeError("Function {} provided as beeing read from disk, but no reading found".format(func_stencil))
+        raise RuntimeError("Function {} provided as being read from disk, but no reading found".format(func_stencil))
         
     rhs = grad.expr.rhs
     indexing = next((symb for symb in rhs.free_symbols if
