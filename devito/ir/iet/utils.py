@@ -1,11 +1,12 @@
 from devito.ir.iet import FindSections, FindSymbols, Call, Conditional, FindNodes, Transformer, Iteration, Section
 from devito.symbolics import Keyword, Macro, CondEq, String, Null
 from devito.tools import filter_ordered
-from devito.types import Global, SpaceDimension, TimeDimension
+from devito.types import Global, SpaceDimension, TimeDimension, Indexed
 from sympy import Or
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias', 'dswap_array_alloc_check', 'get_first_space_dim_index', 'dswap_update_iet', 'dswap_get_compress_mode_function']
+           'maybe_alias', 'dswap_array_alloc_check', 'get_first_space_dim_index',
+           'dswap_update_iet', 'dswap_get_compress_mode_function', 'dswap_get_read_time_iterator']
 
 
 class IterationTree(tuple):
@@ -247,3 +248,25 @@ def dswap_get_compress_mode_function(compress_config, zfp, field, type_symbol):
         arguments.append(compress_config.value)     
         
     return Call(name="zfp_stream_"+compress_config.method, arguments=arguments)
+
+
+def dswap_get_read_time_iterator(expressions, func):
+    """
+    D
+    Args:
+
+    Returns:
+        
+    """
+    grad = next((exp for exp in expressions if func in exp.reads), None)
+    
+    if not grad:
+        raise RuntimeError("Function {} provided as being read from disk, but no reading found".format(func))
+        
+    rhs = grad.expr.rhs
+    indexing = next((symb for symb in rhs.free_symbols if
+                        (isinstance(symb, Indexed) and symb.function == func)),
+                    None)
+    time_iterator = indexing.indices[0]
+    
+    return time_iterator
