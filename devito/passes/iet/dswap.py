@@ -761,8 +761,13 @@ def compress_build(files_array, metas_array, func_stencil, i_symbol, pragma, fun
     stream = Pointer(name="stream", dtype=POINTER(bitstream))
     zfpsize = Symbol(name="zfpsize", dtype=size_t)
     
-    it_nodes.append(Call(name="zfp_field_2d", arguments=[func_stencil[write_iterator,i_symbol], type_var, func_stencil.symbolic_shape[2],
-                                                         func_stencil.symbolic_shape[3]], retobj=field))
+    arguments_field = [func_stencil[write_iterator,i_symbol], type_var, func_stencil.symbolic_shape[-1]]
+    if len(func_stencil.symbolic_shape) == 4:
+        dim = 2
+        arguments_field.insert(2, func_stencil.symbolic_shape[-2])
+    else:
+        dim = 1
+    it_nodes.append(Call(name=f"zfp_field_{dim}d", arguments=arguments_field, retobj=field))
     it_nodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
     it_nodes.append(dswap_get_compress_mode_function(dswap_compression, zfp, field, type_var))
     it_nodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
@@ -824,7 +829,13 @@ def decompress_build(files_array, func_stencil, i_symbol, pragma, func_size_dim,
     slice_symbol = Symbol(name="slice", dtype=np.int32)
     ret = Symbol(name="ret", dtype=np.int32)
     
-    it_nodes.append(Call(name="zfp_field_2d", arguments=[func_stencil[t2,i_symbol], type_var, func_stencil.symbolic_shape[2], func_stencil.symbolic_shape[3]], retobj=field))
+    arguments_field = [func_stencil[t2,i_symbol], type_var, func_stencil.symbolic_shape[-1]]
+    if len(func_stencil.symbolic_shape) == 4:
+        dim = 2
+        arguments_field.insert(2, func_stencil.symbolic_shape[-2])
+    else:
+        dim = 1
+    it_nodes.append(Call(name=f"zfp_field_{dim}d", arguments=arguments_field, retobj=field))
     it_nodes.append(Call(name="zfp_stream_open", arguments=[Null], retobj=zfp))
     it_nodes.append(dswap_get_compress_mode_function(dswap_compression, zfp, field, type_var))
     it_nodes.append(Call(name="zfp_stream_maximum_size", arguments=[zfp, field], retobj=bufsize))
