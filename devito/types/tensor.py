@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from cached_property import cached_property
+from functools import cached_property
 
 import numpy as np
 from sympy.core.sympify import converter as sympify_converter
@@ -29,8 +29,8 @@ class TensorFunction(AbstractTensor):
         Carries shape, dimensions, and dtype of the TensorFunction. When grid is not
         provided, shape and dimensions must be given. For MPI execution, a
         Grid is compulsory.
-    space_order : int or 3-tuple of ints, optional
-        Discretisation order for space derivatives. Defaults to 1. ``space_order`` also
+    space_order : int or 3-tuple of ints, optional, default=1
+        Discretisation order for space derivatives. ``space_order`` also
         impacts the number of points available around a generic point of interest.  By
         default, ``space_order`` points are available on both sides of a generic point of
         interest, including those nearby the grid boundary. Sometimes, fewer points
@@ -42,11 +42,11 @@ class TensorFunction(AbstractTensor):
         Shape of the domain region in grid points. Only necessary if ``grid`` isn't given.
     dimensions : tuple of Dimension, optional
         Dimensions associated with the object. Only necessary if ``grid`` isn't given.
-    dtype : data-type, optional
-        Any object that can be interpreted as a numpy data type. Defaults
-        to ``np.float32``.
+    dtype : data-type, optional, default=np.float32
+        Any object that can be interpreted as a numpy data type.
     staggered : Dimension or tuple of Dimension or Stagger, optional
-        Define how the TensorFunction is staggered.
+        Staggering of each component, needs to have the size of the tensor. Defaults
+        to the Dimensions.
     initializer : callable or any object exposing the buffer interface, optional
         Data initializer. If a callable is provided, data is allocated lazily.
     allocator : MemoryAllocator, optional
@@ -54,16 +54,12 @@ class TensorFunction(AbstractTensor):
         to take advantage of the memory hierarchy in a NUMA architecture. Refer to
         `default_allocator.__doc__` for more information.
     padding : int or tuple of ints, optional
-        .. deprecated:: shouldn't be used; padding is now automatically inserted.
         Allocate extra grid points to maximize data access alignment. When a tuple
         of ints, one int per Dimension should be provided.
-    symmetric : bool, optional
-        Whether the tensor is symmetric or not. Defaults to True.
-    diagonal : Bool, optional
-        Whether the tensor is diagonal or not. Defaults to False.
-    staggered: tuple of Dimension, optional
-        Staggering of each component, needs to have the size of the tensor. Defaults
-        to the Dimensions.
+    symmetric : bool, optional, default=True
+        Whether the tensor is symmetric or not.
+    diagonal : Bool, optional, default=False
+        Whether the tensor is diagonal or not.
     """
 
     _is_TimeDependent = False
@@ -187,12 +183,12 @@ class TensorFunction(AbstractTensor):
         if self.is_diagonal:
             return [self[i, i] for i in range(self.shape[0])]
         elif self.is_symmetric:
-            val = super(TensorFunction, self).values()
+            val = super().values()
             return list(OrderedDict.fromkeys(val))
         else:
-            return super(TensorFunction, self).values()
+            return super().values()
 
-    def div(self, shift=None, order=None):
+    def div(self, shift=None, order=None, method='FD'):
         """
         Divergence of the TensorFunction (is a VectorFunction).
 
@@ -203,6 +199,9 @@ class TensorFunction(AbstractTensor):
         order: int, optional, default=None
             Discretization order for the finite differences.
             Uses `func.space_order` when not specified
+        method: str, optional, default='FD'
+            Discretization method. Options are 'FD' (default) and
+            'RSFD' (rotated staggered grid finite-difference).
         """
         comps = []
         func = vec_func(self)
@@ -211,7 +210,8 @@ class TensorFunction(AbstractTensor):
         order = order or self.space_order
         for i in range(len(self.space_dimensions)):
             comps.append(sum([getattr(self[j, i], 'd%s' % d.name)
-                              (x0=shift_x0(shift, d, i, j), fd_order=order)
+                              (x0=shift_x0(shift, d, i, j), fd_order=order,
+                               method=method)
                               for j, d in enumerate(self.space_dimensions)]))
         return func._new(comps)
 
@@ -257,11 +257,8 @@ class TensorFunction(AbstractTensor):
         func = tens_func(self)
         return func._new(self.rows, self.cols, mat)
 
-    def classof_prod(self, other, mat):
-        try:
-            is_mat = len(mat[0]) > 1
-        except TypeError:
-            is_mat = False
+    def classof_prod(self, other, cols):
+        is_mat = cols > 1
         is_time = (getattr(self, '_is_TimeDependent', False) or
                    getattr(other, '_is_TimeDependent', False))
         return mat_time_dict[(is_time, is_mat)]
@@ -316,7 +313,7 @@ class VectorFunction(TensorFunction):
 
     __repr__ = __str__
 
-    def div(self, shift=None, order=None):
+    def div(self, shift=None, order=None, method='FD'):
         """
         Divergence of the VectorFunction, creates the divergence Function.
 
@@ -327,11 +324,14 @@ class VectorFunction(TensorFunction):
         order: int, optional, default=None
             Discretization order for the finite differences.
             Uses `func.space_order` when not specified
+        method: str, optional, default='FD'
+            Discretization method. Options are 'FD' (default) and
+            'RSFD' (rotated staggered grid finite-difference).
         """
         shift_x0 = make_shift_x0(shift, (len(self.space_dimensions),))
         order = order or self.space_order
         return sum([getattr(self[i], 'd%s' % d.name)(x0=shift_x0(shift, d, None, i),
-                                                     fd_order=order)
+                                                     fd_order=order, method=method)
                     for i, d in enumerate(self.space_dimensions)])
 
     @property
@@ -362,7 +362,7 @@ class VectorFunction(TensorFunction):
                  for s in self]
         return func._new(comps)
 
-    def curl(self, shift=None, order=None):
+    def curl(self, shift=None, order=None, method='FD'):
         """
         Gradient of the (3D) VectorFunction, creates the curl VectorFunction.
 
@@ -373,6 +373,9 @@ class VectorFunction(TensorFunction):
         order: int, optional, default=None
             Discretization order for the finite differences.
             Uses `func.space_order` when not specified
+        method: str, optional, default='FD'
+            Discretization method. Options are 'FD' (default) and
+            'RSFD' (rotated staggered grid finite-difference).
         """
         if len(self.space_dimensions) != 3:
             raise AttributeError("Curl only supported for 3D VectorFunction")
@@ -382,21 +385,21 @@ class VectorFunction(TensorFunction):
         shift_x0 = make_shift_x0(shift, (len(dims), len(dims)))
         order = order or self.space_order
         comp1 = (getattr(self[2], derivs[1])(x0=shift_x0(shift, dims[1], 2, 1),
-                                             fd_order=order) -
+                                             fd_order=order, method=method) -
                  getattr(self[1], derivs[2])(x0=shift_x0(shift, dims[2], 1, 2),
-                                             fd_order=order))
+                                             fd_order=order, method=method))
         comp2 = (getattr(self[0], derivs[2])(x0=shift_x0(shift, dims[2], 0, 2),
-                                             fd_order=order) -
+                                             fd_order=order, method=method) -
                  getattr(self[2], derivs[0])(x0=shift_x0(shift, dims[0], 2, 0),
-                                             fd_order=order))
+                                             fd_order=order, method=method))
         comp3 = (getattr(self[1], derivs[0])(x0=shift_x0(shift, dims[0], 1, 0),
-                                             fd_order=order) -
+                                             fd_order=order, method=method) -
                  getattr(self[0], derivs[1])(x0=shift_x0(shift, dims[1], 0, 1),
-                                             fd_order=order))
+                                             fd_order=order, method=method))
         func = vec_func(self)
         return func._new(3, 1, [comp1, comp2, comp3])
 
-    def grad(self, shift=None, order=None):
+    def grad(self, shift=None, order=None, method='FD'):
         """
         Gradient of the VectorFunction, creates the gradient TensorFunction.
 
@@ -407,13 +410,16 @@ class VectorFunction(TensorFunction):
         order: int, optional, default=None
             Discretization order for the finite differences.
             Uses `func.space_order` when not specified
+        method: str, optional, default='FD'
+            Discretization method. Options are 'FD' (default) and
+            'RSFD' (rotated staggered grid finite-difference).
         """
         func = tens_func(self)
         ndim = len(self.space_dimensions)
         shift_x0 = make_shift_x0(shift, (ndim, ndim))
         order = order or self.space_order
         comps = [[getattr(f, 'd%s' % d.name)(x0=shift_x0(shift, d, i, j),
-                                             fd_order=order)
+                                             fd_order=order, method=method)
                   for j, d in enumerate(self.space_dimensions)]
                  for i, f in enumerate(self)]
         return func._new(comps)

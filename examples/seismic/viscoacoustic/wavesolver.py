@@ -1,13 +1,12 @@
 from devito import (VectorTimeFunction, TimeFunction, Function, NODE,
                     DevitoCheckpoint, CheckpointOperator, Revolver)
 from devito.tools import memoized_meth
-from examples.seismic import PointSource
 from examples.seismic.viscoacoustic.operators import (
     ForwardOperator, AdjointOperator, GradientOperator, BornOperator
 )
 
 
-class ViscoacousticWaveSolver(object):
+class ViscoacousticWaveSolver:
     """
     Solver object that provides operators for seismic inversion problems
     and encapsulates the time and space discretization for a given problem
@@ -181,9 +180,7 @@ class ViscoacousticWaveSolver(object):
         Adjoint source, wavefield and performance summary.
         """
         # Create a new adjoint source and receiver symbol
-        srca = srca or PointSource(name='srca', grid=self.model.grid,
-                                   time_range=self.geometry.time_axis,
-                                   coordinates=self.geometry.src_positions)
+        srca = srca or self.geometry.new_src(name='srca', src_type=None)
 
         if self.time_order == 1:
             va = va or VectorTimeFunction(name="va", grid=self.model.grid,

@@ -1,18 +1,14 @@
 from collections import OrderedDict
-try:
-    from collections.abc import Iterable
-except ImportError:
-    # Before python 3.10
-    from collections import Iterable
 from itertools import product
 
 import sympy
 import numpy as np
-from cached_property import cached_property
+from functools import cached_property
 
 from devito.finite_differences import generate_fd_shortcuts
 from devito.mpi import MPI, SparseDistributor
-from devito.operations import LinearInterpolator, PrecomputedInterpolator
+from devito.operations import (LinearInterpolator, PrecomputedInterpolator,
+                               SincInterpolator)
 from devito.symbolics import indexify, retrieve_function_carriers
 from devito.tools import (ReducerMap, as_tuple, flatten, prod, filter_ordered,
                           is_integer, dtype_to_mpidtype)
@@ -27,6 +23,18 @@ from devito.types.utils import IgnoreDimSort
 
 __all__ = ['SparseFunction', 'SparseTimeFunction', 'PrecomputedSparseFunction',
            'PrecomputedSparseTimeFunction', 'MatrixSparseTimeFunction']
+
+
+_interpolators = {'linear': LinearInterpolator, 'sinc': SincInterpolator}
+_default_radius = {'linear': 1, 'sinc': 4}
+
+
+class SparseSubFunction(SubFunction):
+
+    def _arg_apply(self, dataobj, **kwargs):
+        if self.parent is not None:
+            return self.parent._dist_subfunc_gather(dataobj, self)
+        return super()._arg_apply(dataobj, **kwargs)
 
 
 class AbstractSparseFunction(DiscreteFunction):
@@ -44,10 +52,11 @@ class AbstractSparseFunction(DiscreteFunction):
     _sub_functions = ()
     """SubFunctions encapsulated within this AbstractSparseFunction."""
 
-    __rkwargs__ = DiscreteFunction.__rkwargs__ + ('npoint_global', 'space_order')
+    __rkwargs__ = (DiscreteFunction.__rkwargs__ +
+                   ('dimensions', 'npoint_global', 'space_order'))
 
     def __init_finalize__(self, *args, **kwargs):
-        super(AbstractSparseFunction, self).__init_finalize__(*args, **kwargs)
+        super().__init_finalize__(*args, **kwargs)
         self._npoint = kwargs.get('npoint', kwargs.get('npoint_global'))
         self._space_order = kwargs.get('space_order', 0)
 
@@ -56,9 +65,24 @@ class AbstractSparseFunction(DiscreteFunction):
 
     @classmethod
     def __indices_setup__(cls, *args, **kwargs):
+        # Need this not to break MatrixSparseFunction
+        try:
+            _sub_funcs = tuple(cls._sub_functions)
+        except TypeError:
+            _sub_funcs = ()
+        # If a subfunction provided use the sparse dimension
+        for f in _sub_funcs:
+            try:
+                sparse_dim = kwargs[f].indices[0]
+                break
+            except (KeyError, AttributeError):
+                continue
+        else:
+            sparse_dim = Dimension(name='p_%s' % kwargs["name"])
+
         dimensions = as_tuple(kwargs.get('dimensions'))
         if not dimensions:
-            dimensions = (Dimension(name='p_%s' % kwargs["name"]),)
+            dimensions = (sparse_dim,)
 
         if args:
             return tuple(dimensions), tuple(args)
@@ -72,11 +96,22 @@ class AbstractSparseFunction(DiscreteFunction):
         if grid is None:
             raise TypeError('Need `grid` argument')
         shape = kwargs.get('shape')
+        dimensions = kwargs.get('dimensions')
         npoint = kwargs.get('npoint', kwargs.get('npoint_global'))
+        glb_npoint = SparseDistributor.decompose(npoint, grid.distributor)
         if shape is None:
-            glb_npoint = SparseDistributor.decompose(npoint, grid.distributor)
-            shape = (glb_npoint[grid.distributor.myrank],)
-        return shape
+            loc_shape = (glb_npoint[grid.distributor.myrank],)
+        else:
+            loc_shape = []
+            assert len(dimensions) == len(shape)
+            for i, (d, s) in enumerate(zip(dimensions, shape)):
+                if i == cls._sparse_position:
+                    loc_shape.append(glb_npoint[grid.distributor.myrank])
+                elif d in grid.dimensions:
+                    loc_shape.append(grid.dimension_map[d].loc)
+                else:
+                    loc_shape.append(s)
+        return tuple(loc_shape)
 
     def __fd_setup__(self):
         """
@@ -89,11 +124,13 @@ class AbstractSparseFunction(DiscreteFunction):
         A `SparseDistributor` handles the SparseFunction decomposition based on
         physical ownership, and allows to convert between global and local indices.
         """
-        return SparseDistributor(
-            kwargs.get('npoint', kwargs.get('npoint_global')),
-            self._sparse_dim,
-            kwargs['grid'].distributor
-        )
+        distributor = kwargs.get('distributor')
+        if distributor is None:
+            distributor = SparseDistributor(
+                kwargs.get('npoint', kwargs.get('npoint_global')),
+                self._sparse_dim, kwargs['grid'].distributor)
+
+        return distributor
 
     def __subfunc_setup__(self, key, suffix, dtype=None):
         # Shape and dimensions from args
@@ -102,6 +139,22 @@ class AbstractSparseFunction(DiscreteFunction):
         if key is not None and not isinstance(key, SubFunction):
             key = np.array(key)
 
+        # Check if already a SubFunction
+        if isinstance(key, SubFunction):
+            d = self.indices[self._sparse_position]
+            if d in key.indices:
+                # Can use as is, dimension already matches
+                if self.alias:
+                    return key._rebuild(alias=self.alias, name=name)
+                else:
+                    return key
+            else:
+                # Need to rebuild so the dimensions match the parent
+                # SparseFunction, for example we end up here via `.subs(d, new_d)`
+                indices = (d, *key.indices[1:])
+                return key._rebuild(*indices, name=name, alias=self.alias)
+
+        # Given an array or nothing, create dimension and SubFunction
         if key is not None:
             dimensions = (self._sparse_dim, Dimension(name='d'))
             if key.ndim > 2:
@@ -114,22 +167,13 @@ class AbstractSparseFunction(DiscreteFunction):
             dimensions = (self._sparse_dim, Dimension(name='d'))
             shape = (self.npoint, self.grid.dim)
 
-        # Check if already a SubFunction
-        if isinstance(key, SubFunction):
-            # Need to rebuild so the dimensions match the parent SparseFunction
-            indices = (self.indices[self._sparse_position], *key.indices[1:])
-            return key._rebuild(*indices, name=name, shape=shape,
-                                alias=self.alias, halo=None)
-        elif key is not None and not isinstance(key, Iterable):
-            raise ValueError("`%s` must be either SubFunction "
-                             "or iterable (e.g., list, np.ndarray)" % key)
-
         if key is None:
             # Fallback to default behaviour
             dtype = dtype or self.dtype
         else:
-            if (shape != key.shape and key.shape != (shape[1],)) and \
-                    self._distributor.nprocs == 1:
+            if shape != key.shape and \
+               key.shape != (shape[1],) and \
+               self._distributor.nprocs == 1:
                 raise ValueError("Incompatible shape for %s, `%s`; expected `%s`" %
                                  (suffix, key.shape[:2], shape))
 
@@ -139,10 +183,10 @@ class AbstractSparseFunction(DiscreteFunction):
             else:
                 dtype = dtype or self.dtype
 
-        sf = SubFunction(
+        sf = SparseSubFunction(
             name=name, dtype=dtype, dimensions=dimensions,
             shape=shape, space_order=0, initializer=key, alias=self.alias,
-            distributor=self._distributor
+            distributor=self._distributor, parent=self
         )
 
         if self.npoint == 0:
@@ -155,8 +199,12 @@ class AbstractSparseFunction(DiscreteFunction):
         return sf
 
     @property
+    def sparse_position(self):
+        return self._sparse_position
+
+    @property
     def _sparse_dim(self):
-        return self.dimensions[self._sparse_position]
+        return self.dimensions[self.sparse_position]
 
     @property
     def _mpitype(self):
@@ -280,16 +328,6 @@ class AbstractSparseFunction(DiscreteFunction):
                                                   self.grid.origin_symbols)])
 
     @cached_property
-    def _dist_reorder_mask(self):
-        """
-        An ordering mask that puts ``self._sparse_position`` at the front.
-        """
-        ret = (self._sparse_position,)
-        ret += tuple(i for i, d in enumerate(self.dimensions)
-                     if d is not self._sparse_dim)
-        return ret
-
-    @cached_property
     def dist_origin(self):
         return self._dist_origin
 
@@ -345,6 +383,16 @@ class AbstractSparseFunction(DiscreteFunction):
             out = indexify(expr).subs({f._sparse_dim: cd for f in functions})
 
         return out, temps
+
+    @cached_property
+    def _dist_reorder_mask(self):
+        """
+        An ordering mask that puts ``self._sparse_position`` at the front.
+        """
+        ret = (self._sparse_position,)
+        ret += tuple(i for i, d in enumerate(self.dimensions)
+                     if d is not self._sparse_dim)
+        return ret
 
     def _dist_scatter_mask(self, dmap=None):
         """
@@ -562,12 +610,6 @@ class AbstractSparseFunction(DiscreteFunction):
                 mapper.update(self._dist_subfunc_scatter(getattr(self, i)))
         return mapper
 
-    def _dist_gather(self, data, *subfunc):
-        self._dist_data_gather(data)
-        for (sg, s) in zip(subfunc, self._sub_functions):
-            if getattr(self, s) is not None:
-                self._dist_subfunc_gather(sg, getattr(self, s))
-
     def _eval_at(self, func):
         return self
 
@@ -615,11 +657,11 @@ class AbstractSparseFunction(DiscreteFunction):
 
         return values
 
-    def _arg_apply(self, dataobj, *subfuncs, alias=None):
+    def _arg_apply(self, dataobj, alias=None):
         key = alias if alias is not None else self
         if isinstance(key, AbstractSparseFunction):
             # Gather into `self.data`
-            key._dist_gather(dataobj, *subfuncs)
+            key._dist_data_gather(dataobj)
         elif self._distributor.nprocs > 1:
             raise NotImplementedError("Don't know how to gather data from an "
                                       "object of type `%s`" % type(key))
@@ -674,9 +716,10 @@ class AbstractSparseTimeFunction(AbstractSparseFunction):
     @classmethod
     def __indices_setup__(cls, *args, **kwargs):
         dimensions = as_tuple(kwargs.get('dimensions'))
+        time_dim = kwargs.get('time_dim', kwargs['grid'].time_dim)
         if not dimensions:
-            dimensions = (kwargs['grid'].time_dim,
-                          Dimension(name='p_%s' % kwargs["name"]),)
+            dimensions = (time_dim,
+                          *super().__indices_setup__(*args, **kwargs)[0])
 
         if args:
             return tuple(dimensions), tuple(args)
@@ -717,22 +760,26 @@ class SparseFunction(AbstractSparseFunction):
         The computational domain from which the sparse points are sampled.
     coordinates : np.ndarray, optional
         The coordinates of each sparse point.
-    space_order : int, optional
-        Discretisation order for space derivatives. Defaults to 0.
-    shape : tuple of ints, optional
-        Shape of the object. Defaults to ``(npoint,)``.
+    space_order : int, optional, default=0
+        Discretisation order for space derivatives.
+    shape : tuple of ints, optional, default=(npoint,)
+        Shape of the object.
     dimensions : tuple of Dimension, optional
         Dimensions associated with the object. Only necessary if the SparseFunction
         defines a multi-dimensional tensor.
-    dtype : data-type, optional
-        Any object that can be interpreted as a numpy data type. Defaults
-        to ``np.float32``.
-    initializer : callable or any object exposing the buffer interface, optional
+    dtype : data-type, optional, default=np.float32
+        Any object that can be interpreted as a numpy data type.
+    initializer : callable or any object exposing the buffer interface, default=None
         Data initializer. If a callable is provided, data is allocated lazily.
     allocator : MemoryAllocator, optional
         Controller for memory allocation. To be used, for example, when one wants
         to take advantage of the memory hierarchy in a NUMA architecture. Refer to
         `default_allocator.__doc__` for more information.
+    interpolation: String, optional, default='linear'
+        The interpolation type to be used by the SparseFunction. Supported types
+        are 'linear' and 'sinc'.
+    r: int, optional, default=1 for 'linear', 4 for 'sinc'
+        The radius of the interpolation operators provided by the SparseFunction.
 
     Examples
     --------
@@ -783,21 +830,35 @@ class SparseFunction(AbstractSparseFunction):
 
     is_SparseFunction = True
 
-    _radius = 1
     """The radius of the stencil operators provided by the SparseFunction."""
 
     _sub_functions = ('coordinates',)
 
-    __rkwargs__ = AbstractSparseFunction.__rkwargs__ + ('coordinates',)
+    __rkwargs__ = AbstractSparseFunction.__rkwargs__ + ('coordinates', 'interpolation')
 
     def __init_finalize__(self, *args, **kwargs):
+        # Interpolation method
+        self.__interp_setup__(**kwargs)
+
+        # Initialization
         super().__init_finalize__(*args, **kwargs)
-        self.interpolator = LinearInterpolator(self)
 
         # Set up sparse point coordinates
         coordinates = kwargs.get('coordinates', kwargs.get('coordinates_data'))
         self._coordinates = self.__subfunc_setup__(coordinates, 'coords')
         self._dist_origin = {self._coordinates: self.grid.origin_offset}
+
+    def __interp_setup__(self, interpolation='linear', r=None, **kwargs):
+        self.interpolation = interpolation
+        self.interpolator = _interpolators[interpolation](self)
+        self._radius = r or _default_radius[interpolation]
+        if interpolation == 'sinc':
+            if self._radius < 2:
+                raise ValueError("'sinc' interpolator requires a radius of at least 2")
+            elif self._radius > 10:
+                raise ValueError("'sinc' interpolator requires a radius of at most 10")
+        elif interpolation == 'linear' and self._radius != 1:
+            self._radius = 1
 
     @cached_property
     def _coordinate_symbols(self):
@@ -810,6 +871,15 @@ class SparseFunction(AbstractSparseFunction):
     def _decomposition(self):
         mapper = {self._sparse_dim: self._distributor.decomposition[self._sparse_dim]}
         return tuple(mapper.get(d) for d in self.dimensions)
+
+    def _arg_defaults(self, alias=None):
+        defaults = super()._arg_defaults(alias=alias)
+
+        key = alias or self
+        coords = defaults.get(key.coordinates.name, key.coordinates.data)
+        defaults.update(key.interpolator._arg_defaults(coords=coords,
+                                                       sfunc=key))
+        return defaults
 
 
 class SparseTimeFunction(AbstractSparseTimeFunction, SparseFunction):
@@ -836,19 +906,18 @@ class SparseTimeFunction(AbstractSparseTimeFunction, SparseFunction):
         The computational domain from which the sparse points are sampled.
     coordinates : np.ndarray, optional
         The coordinates of each sparse point.
-    space_order : int, optional
-        Discretisation order for space derivatives. Defaults to 0.
-    time_order : int, optional
-        Discretisation order for time derivatives. Defaults to 1.
-    shape : tuple of ints, optional
-        Shape of the object. Defaults to ``(nt, npoint)``.
+    space_order : int, optional, default=0
+        Discretisation order for space derivatives.
+    time_order : int, optional, default=1
+        Discretisation order for time derivatives.
+    shape : tuple of ints, optional, default=(nt, npoint)
+        Shape of the object.
     dimensions : tuple of Dimension, optional
         Dimensions associated with the object. Only necessary if the SparseFunction
         defines a multi-dimensional tensor.
-    dtype : data-type, optional
-        Any object that can be interpreted as a numpy data type. Defaults
-        to ``np.float32``.
-    initializer : callable or any object exposing the buffer interface, optional
+    dtype : data-type, optional, default=np.float32
+        Any object that can be interpreted as a numpy data type.
+    initializer : callable or any object exposing the buffer interface, default=None
         Data initializer. If a callable is provided, data is allocated lazily.
     allocator : MemoryAllocator, optional
         Controller for memory allocation. To be used, for example, when one wants
@@ -896,7 +965,7 @@ class SparseTimeFunction(AbstractSparseTimeFunction, SparseFunction):
     __rkwargs__ = tuple(filter_ordered(AbstractSparseTimeFunction.__rkwargs__ +
                                        SparseFunction.__rkwargs__))
 
-    def interpolate(self, expr, u_t=None, p_t=None, increment=False):
+    def interpolate(self, expr, u_t=None, p_t=None, increment=False, implicit_dims=None):
         """
         Generate equations interpolating an arbitrary expression into ``self``.
 
@@ -921,7 +990,8 @@ class SparseTimeFunction(AbstractSparseTimeFunction, SparseFunction):
         if p_t is not None:
             subs = {self.time_dim: p_t}
 
-        return super().interpolate(expr, increment=increment, self_subs=subs)
+        return super().interpolate(expr, increment=increment, self_subs=subs,
+                                   implicit_dims=implicit_dims)
 
     def inject(self, field, expr, u_t=None, p_t=None, implicit_dims=None):
         """
@@ -949,6 +1019,14 @@ class SparseTimeFunction(AbstractSparseTimeFunction, SparseFunction):
             expr = expr.subs({self.time_dim: p_t})
 
         return super().inject(field, expr, implicit_dims=implicit_dims)
+
+    @property
+    def forward(self):
+        """Symbol for the time-forward state of the TimeFunction."""
+        i = int(self.time_order / 2) if self.time_order >= 2 else 1
+        _t = self.dimensions[self._time_position]
+
+        return self._subs(_t, _t + i * _t.spacing)
 
 
 class PrecomputedSparseFunction(AbstractSparseFunction):
@@ -985,16 +1063,15 @@ class PrecomputedSparseFunction(AbstractSparseFunction):
         So for `r=6`, we will store 18 coefficients per sparse point (instead of
         potentially 216).  Must be a three-dimensional array of shape
         `(npoint, grid.ndim, r)`.
-    space_order : int, optional
-        Discretisation order for space derivatives. Defaults to 0.
-    shape : tuple of ints, optional
-        Shape of the object. Defaults to `(npoint,)`.
+    space_order : int, optional, default=0
+        Discretisation order for space derivatives.
+    shape : tuple of ints, optional, default=(npoint,)
+        Shape of the object.
     dimensions : tuple of Dimension, optional
         Dimensions associated with the object. Only necessary if the SparseFunction
         defines a multi-dimensional tensor.
-    dtype : data-type, optional
-        Any object that can be interpreted as a numpy data type. Defaults
-        to `np.float32`.
+    dtype : data-type, optional, default=np.float32
+        Any object that can be interpreted as a numpy data type.
     initializer : callable or any object exposing the buffer interface, optional
         Data initializer. If a callable is provided, data is allocated lazily.
     allocator : MemoryAllocator, optional
@@ -1106,7 +1183,7 @@ class PrecomputedSparseFunction(AbstractSparseFunction):
         the position. We mitigate this problem by computing the positions
         individually (hence the need for a position map).
         """
-        if self.gridpoints is not None:
+        if self.gridpoints_data is not None:
             ddim = self.gridpoints.dimensions[-1]
             return OrderedDict((self.gridpoints._subs(ddim, di), p)
                                for (di, p) in zip(range(self.grid.dim),
@@ -1150,19 +1227,18 @@ class PrecomputedSparseTimeFunction(AbstractSparseTimeFunction,
         So for `r=6`, we will store 18 coefficients per sparse point (instead of
         potentially 216).  Must be a three-dimensional array of shape
         `(npoint, grid.ndim, r)`.
-    space_order : int, optional
-        Discretisation order for space derivatives. Defaults to 0.
-    time_order : int, optional
-        Discretisation order for time derivatives. Default to 1.
-    shape : tuple of ints, optional
-        Shape of the object. Defaults to `(npoint,)`.
+    space_order : int, optional, default=0
+        Discretisation order for space derivatives.
+    time_order : int, optional, default=1
+        Discretisation order for time derivatives.
+    shape : tuple of ints, optional, default=(npoint,)
+        Shape of the object.
     dimensions : tuple of Dimension, optional
         Dimensions associated with the object. Only necessary if the SparseFunction
         defines a multi-dimensional tensor.
-    dtype : data-type, optional
-        Any object that can be interpreted as a numpy data type. Defaults
-        to `np.float32`.
-    initializer : callable or any object exposing the buffer interface, optional
+    dtype : data-type, optional, default=np.float32
+        Any object that can be interpreted as a numpy data type.
+    initializer : callable or any object exposing the buffer interface, default=None
         Data initializer. If a callable is provided, data is allocated lazily.
     allocator : MemoryAllocator, optional
         Controller for memory allocation. To be used, for example, when one wants

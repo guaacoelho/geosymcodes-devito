@@ -1,5 +1,5 @@
 # coding: utf-8
-from devito import (Function, TimeFunction, warning,
+from devito import (Function, TimeFunction, warning, NODE,
                     DevitoCheckpoint, CheckpointOperator, Revolver)
 from devito.tools import memoized_meth
 from examples.seismic.tti.operators import ForwardOperator, AdjointOperator
@@ -7,7 +7,7 @@ from examples.seismic.tti.operators import JacobianOperator, JacobianAdjOperator
 from examples.seismic.tti.operators import particle_velocity_fields
 
 
-class AnisotropicWaveSolver(object):
+class AnisotropicWaveSolver:
     """
     Solver object that provides operators for seismic inversion problems
     and encapsulates the time and space discretization for a given problem
@@ -118,9 +118,7 @@ class AnisotropicWaveSolver(object):
         """
         if self.kernel == 'staggered':
             time_order = 1
-            dims = self.model.space_dimensions
-            stagg_u = (-dims[-1])
-            stagg_v = (-dims[0], -dims[1]) if self.model.grid.dim == 3 else (-dims[0])
+            stagg_u = stagg_v = NODE
         else:
             time_order = 2
             stagg_u = stagg_v = None
@@ -193,9 +191,7 @@ class AnisotropicWaveSolver(object):
         """
         if self.kernel == 'staggered':
             time_order = 1
-            dims = self.model.space_dimensions
-            stagg_p = (-dims[-1])
-            stagg_r = (-dims[0], -dims[1]) if self.model.grid.dim == 3 else (-dims[0])
+            stagg_p = stagg_r = NODE
         else:
             time_order = 2
             stagg_p = stagg_r = None

@@ -1,5 +1,7 @@
 from anytree import NodeMixin, PostOrderIter, RenderTree, ContStyle
 
+from devito.ir.support import WithLock, PrefetchUpdate
+
 __all__ = ["ScheduleTree", "NodeSection", "NodeIteration", "NodeConditional",
            "NodeSync", "NodeExprs", "NodeHalo"]
 
@@ -42,7 +44,7 @@ class NodeIteration(ScheduleTree):
     is_Iteration = True
 
     def __init__(self, ispace, parent=None, properties=None):
-        super(NodeIteration, self).__init__(parent)
+        super().__init__(parent)
         self.ispace = ispace
         self.properties = properties
 
@@ -78,7 +80,7 @@ class NodeConditional(ScheduleTree):
     is_Conditional = True
 
     def __init__(self, guard, parent=None):
-        super(NodeConditional, self).__init__(parent)
+        super().__init__(parent)
         self.guard = guard
 
     @property
@@ -91,12 +93,16 @@ class NodeSync(ScheduleTree):
     is_Sync = True
 
     def __init__(self, sync_ops, parent=None):
-        super(NodeSync, self).__init__(parent)
+        super().__init__(parent)
         self.sync_ops = sync_ops
 
     @property
     def __repr_render__(self):
         return "Sync[%s]" % ",".join(i.__class__.__name__ for i in self.sync_ops)
+
+    @property
+    def is_async(self):
+        return any(isinstance(i, (WithLock, PrefetchUpdate)) for i in self.sync_ops)
 
 
 class NodeExprs(ScheduleTree):
@@ -104,7 +110,7 @@ class NodeExprs(ScheduleTree):
     is_Exprs = True
 
     def __init__(self, exprs, ispace, dspace, ops, traffic, parent=None):
-        super(NodeExprs, self).__init__(parent)
+        super().__init__(parent)
         self.exprs = exprs
         self.ispace = ispace
         self.dspace = dspace

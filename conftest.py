@@ -34,16 +34,12 @@ def skipif(items, whole_module=False):
     accepted.update({'device', 'device-C', 'device-openmp', 'device-openacc',
                      'device-aomp', 'cpu64-icc', 'cpu64-icx', 'cpu64-nvc', 'cpu64-arm',
                      'cpu64-icpx', 'chkpnt'})
-    accepted.update({'nompi', 'nodevice'})
+    accepted.update({'nodevice'})
     unknown = sorted(set(items) - accepted)
     if unknown:
         raise ValueError("Illegal skipif argument(s) `%s`" % unknown)
     skipit = False
     for i in items:
-        # Skip if no MPI
-        if i == 'nompi' and MPI is None:
-            skipit = "mpi4py/MPI not installed"
-            break
         # Skip if won't run on GPUs
         if i == 'device' and isinstance(configuration['platform'], Device):
             skipit = "device `%s` unsupported" % configuration['platform'].name
@@ -126,7 +122,34 @@ def EVAL(exprs, *args):
     return processed[0] if isinstance(exprs, str) else processed
 
 
-def parallel(item):
+def get_testname(item):
+    if item.cls is not None:
+        return "%s::%s::%s" % (item.fspath, item.cls.__name__, item.name)
+    else:
+        return "%s::%s" % (item.fspath, item.name)
+
+
+def set_run_reset(env_vars, call):
+    old_env_vars = {k: os.environ.get(k, None) for k in env_vars}
+
+    os.environ.update(env_vars)
+    os.environ['DEVITO_PYTEST_FLAG'] = '1'
+
+    try:
+        check_call(call)
+        return True
+    except:
+        return False
+    finally:
+        os.environ['DEVITO_PYTEST_FLAG'] = '0'
+        for k, v in old_env_vars.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def parallel(item, m):
     """
     Run a test in parallel. Readapted from:
 
@@ -135,44 +158,54 @@ def parallel(item):
     mpi_exec = 'mpiexec'
     mpi_distro = sniff_mpi_distro(mpi_exec)
 
-    marker = item.get_closest_marker("parallel")
-    mode = as_tuple(marker.kwargs.get("mode", 2))
-    for m in mode:
-        # Parse the `mode`
-        if isinstance(m, int):
-            nprocs = m
-            scheme = 'basic'
+    # Parse the `mode`
+    if isinstance(m, int):
+        nprocs = m
+        scheme = 'basic'
+    else:
+        if len(m) == 2:
+            nprocs, scheme = m
         else:
-            if len(m) == 2:
-                nprocs, scheme = m
-            else:
-                raise ValueError("Can't run test: unexpected mode `%s`" % m)
+            raise ValueError("Can't run test: unexpected mode `%s`" % m)
 
-        pyversion = sys.executable
-        # Only spew tracebacks on rank 0.
-        # Run xfailing tests to ensure that errors are reported to calling process
-        if item.cls is not None:
-            testname = "%s::%s::%s" % (item.fspath, item.cls.__name__, item.name)
-        else:
-            testname = "%s::%s" % (item.fspath, item.name)
-        args = ["-n", "1", pyversion, "-m", "pytest", "--runxfail", "-s",
-                "-q", testname]
-        if nprocs > 1:
-            args.extend([":", "-n", "%d" % (nprocs - 1), pyversion, "-m", "pytest",
-                         "--runxfail", "--tb=no", "-q", testname])
-        # OpenMPI requires an explicit flag for oversubscription. We need it as some
-        # of the MPI tests will spawn lots of processes
-        if mpi_distro == 'OpenMPI':
-            call = [mpi_exec, '--oversubscribe', '--timeout', '300'] + args
-        else:
-            call = [mpi_exec] + args
+    env_vars = {'DEVITO_MPI': scheme}
 
-        # Tell the MPI ranks that they are running a parallel test
-        os.environ['DEVITO_MPI'] = scheme
-        try:
-            check_call(call)
-        finally:
-            os.environ['DEVITO_MPI'] = '0'
+    pyversion = sys.executable
+    testname = get_testname(item)
+    # Only spew tracebacks on rank 0.
+    # Run xfailing tests to ensure that errors are reported to calling process
+    args = ["-n", "1", pyversion, "-m", "pytest", "-s", "--runxfail", "-qq", testname]
+    if nprocs > 1:
+        args.extend([":", "-n", "%d" % (nprocs - 1), pyversion, "-m", "pytest",
+                     "-s", "--runxfail", "--tb=no", "-qq", "--no-summary", testname])
+    # OpenMPI requires an explicit flag for oversubscription. We need it as some
+    # of the MPI tests will spawn lots of processes
+    if mpi_distro == 'OpenMPI':
+        call = [mpi_exec, '--oversubscribe', '--timeout', '300'] + args
+    else:
+        call = [mpi_exec] + args
+
+    return set_run_reset(env_vars, call)
+
+
+def decoupler(item, m):
+    """
+    Run a test in decoupled mode.
+    """
+    mpi_exec = 'mpiexec'
+    assert sniff_mpi_distro(mpi_exec) != 'unknown', "Decoupled tests require MPI"
+
+    env_vars = {'DEVITO_DECOUPLER': '1'}
+    if isinstance(m, int):
+        env_vars['DEVITO_DECOUPLER_WORKERS'] = str(m)
+
+    testname = get_testname(item)
+
+    pyversion = sys.executable
+    args = ["-n", "1", pyversion, "-m", "pytest", "-s", "--runxfail", testname]
+    call = [mpi_exec] + args
+
+    return set_run_reset(env_vars, call)
 
 
 def pytest_configure(config):
@@ -181,37 +214,71 @@ def pytest_configure(config):
         "markers",
         "parallel(mode): mark test to run in parallel"
     )
+    config.addinivalue_line(
+        "markers",
+        "decoupler(mode): mark test to run in decoupled mode",
+    )
 
 
-def pytest_runtest_setup(item):
-    partest = os.environ.get('DEVITO_MPI', 0)
-    try:
-        partest = int(partest)
-    except ValueError:
-        pass
-    if item.get_closest_marker("parallel") and not partest:
-        # Blow away function arg in "master" process, to ensure
-        # this test isn't run on only one process
-        dummy_test = lambda *args, **kwargs: True
-        # For pytest <7
-        if item.cls is not None:
-            attr = item.originalname or item.name
-            setattr(item.cls, attr, dummy_test)
-        else:
-            item.obj = dummy_test
-        # For pytest >= 7
-        setattr(item, '_obj', dummy_test)
+def pytest_generate_tests(metafunc):
+    # Process custom parallel marker as a parametrize to avoid
+    # running a single test for all modes
+    if 'mode' in metafunc.fixturenames:
+        markers = metafunc.definition.iter_markers()
+        for marker in markers:
+            if marker.name in ('parallel', 'decoupler'):
+                mode = list(as_tuple(marker.kwargs.get('mode', 2)))
+                metafunc.parametrize("mode", mode)
 
 
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_call(item):
-    partest = os.environ.get('DEVITO_MPI', 0)
+    inside_pytest_marker = os.environ.get('DEVITO_PYTEST_FLAG', 0)
     try:
-        partest = int(partest)
+        inside_pytest_marker = int(inside_pytest_marker)
     except ValueError:
         pass
-    if item.get_closest_marker("parallel") and not partest:
+
+    if inside_pytest_marker:
+        outcome = yield
+
+    elif item.get_closest_marker("parallel"):
         # Spawn parallel processes to run test
-        parallel(item)
+
+        outcome = parallel(item, item.funcargs['mode'])
+        if outcome:
+            pytest.skip(f"{item} success in parallel")
+        else:
+            pytest.fail(f"{item} failed in parallel")
+
+    elif item.get_closest_marker("decoupler"):
+        outcome = decoupler(item, item.funcargs.get('mode'))
+        if outcome:
+            pytest.skip(f"{item} success in decoupled mode")
+        else:
+            pytest.fail(f"{item} failed in decoupled mode")
+
+    else:
+        outcome = yield
+
+
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    result = outcome.get_result()
+
+    inside_pytest_marker = os.environ.get('DEVITO_PYTEST_FLAG', 0)
+    try:
+        inside_pytest_marker = int(inside_pytest_marker)
+    except ValueError:
+        pass
+    if inside_pytest_marker:
+        return
+
+    if item.get_closest_marker("parallel") or \
+       item.get_closest_marker("decoupler"):
+        if call.when == 'call' and result.outcome == 'skipped':
+            result.outcome = 'passed'
 
 
 # A list of optimization options/pipelines to be used in testing

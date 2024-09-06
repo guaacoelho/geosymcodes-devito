@@ -7,16 +7,20 @@ import sympy
 from sympy import Expr, Function, Number, Tuple, sympify
 from sympy.core.decorators import call_highest_priority
 
-from devito.tools import (Pickable, as_tuple, is_integer, float2, float3, float4,  # noqa
-                          double2, double3, double4, int2, int3, int4)
 from devito.finite_differences.elementary import Min, Max
+from devito.tools import (Pickable, Bunch, as_tuple, is_integer, float2,  # noqa
+                          float3, float4, double2, double3, double4, int2, int3,
+                          int4)
 from devito.types import Symbol
+from devito.types.basic import Basic
 
-__all__ = ['CondEq', 'CondNe', 'IntDiv', 'CallFromPointer', 'FieldFromPointer',  # noqa
-           'FieldFromComposite', 'ListInitializer', 'Byref', 'IndexedPointer', 'Cast',
-           'DefFunction', 'InlineIf', 'Keyword', 'String', 'Macro', 'MacroArgument',
-           'CustomType', 'Deref', 'INT', 'FLOAT', 'DOUBLE', 'VOID',
-           'Null', 'SizeOf', 'rfunc', 'cast_mapper', 'BasicWrapperMixin']
+__all__ = ['CondEq', 'CondNe', 'IntDiv', 'CallFromPointer',  # noqa
+           'CallFromComposite', 'FieldFromPointer', 'FieldFromComposite',
+           'ListInitializer', 'Byref', 'IndexedPointer', 'Cast', 'DefFunction',
+           'MathFunction', 'InlineIf', 'ReservedWord', 'Keyword', 'String',
+           'Macro', 'Class', 'MacroArgument', 'CustomType', 'Deref', 'Namespace',
+           'Rvalue', 'INT', 'FLOAT', 'DOUBLE', 'VOID', 'Null', 'SizeOf', 'rfunc',
+           'cast_mapper', 'BasicWrapperMixin', 'ValueLimit', 'limits_mapper']
 
 
 class CondEq(sympy.Eq):
@@ -86,8 +90,7 @@ class IntDiv(sympy.Expr):
             # Perhaps it's a symbolic RHS -- but we wanna be sure it's of type int
             if not hasattr(rhs, 'dtype'):
                 raise ValueError("Symbolic RHS `%s` lacks dtype" % rhs)
-            if not issubclass(rhs.dtype, np.integer) or \
-                    not (rhs.is_Constant and issubclass(rhs.dtype, np.integer)):
+            if not issubclass(rhs.dtype, np.integer):
                 raise ValueError("Symbolic RHS `%s` must be of type `int`, found "
                                  "`%s` instead" % (rhs, rhs.dtype))
         rhs = sympify(rhs)
@@ -112,7 +115,7 @@ class IntDiv(sympy.Expr):
         return super().__mul__(other)
 
 
-class BasicWrapperMixin(object):
+class BasicWrapperMixin:
 
     """
     Abstract mixin class for objects wrapping types.Basic objects.
@@ -164,11 +167,9 @@ class CallFromPointer(sympy.Expr, Pickable, BasicWrapperMixin):
             pointer = Symbol(pointer)
         if isinstance(call, str):
             call = Symbol(call)
-        elif not isinstance(call, (CallFromPointer, DefFunction, sympy.Symbol)):
-            # NOTE: we need `sympy.Symbol`, rather than just (devito) `Symbol`
-            # because otherwise it breaks upon certain reconstructions on SymPy-1.8,
-            # due to the way `bound_symbols` and `canonical_variables` interact
-            raise ValueError("`call` must be CallFromPointer, DefFunction, or Symbol")
+        elif not isinstance(call, Basic):
+            raise ValueError("`call` must be a `devito.Basic` or a type "
+                             "with compatible interface")
         _params = []
         for p in as_tuple(params):
             if isinstance(p, str):
@@ -196,8 +197,7 @@ class CallFromPointer(sympy.Expr, Pickable, BasicWrapperMixin):
     __repr__ = __str__
 
     def _hashable_content(self):
-        return super(CallFromPointer, self)._hashable_content() +\
-            (self.call, self.pointer) + self.params
+        return super()._hashable_content() + (self.call, self.pointer) + self.params
 
     @property
     def base(self):
@@ -219,6 +219,19 @@ class CallFromPointer(sympy.Expr, Pickable, BasicWrapperMixin):
 
     # Pickling support
     __reduce_ex__ = Pickable.__reduce_ex__
+
+
+class CallFromComposite(CallFromPointer, Pickable):
+
+    """
+    Symbolic representation of the C notation ``composite.call(params)``.
+    """
+
+    def __str__(self):
+        return '%s.%s(%s)' % (self.pointer, self.call,
+                              ", ".join(str(i) for i in as_tuple(self.params)))
+
+    __repr__ = __str__
 
 
 class FieldFromPointer(CallFromPointer, Pickable):
@@ -375,6 +388,17 @@ class Cast(UnaryOp):
     __rkwargs__ = ('stars',)
 
     def __new__(cls, base, stars=None, **kwargs):
+        # Attempt simplifcation
+        # E.g., `FLOAT(32) -> 32.0` of type `sympy.Float`
+        try:
+            return sympify(eval(cls._base_typ)(base))
+        except (NameError, SyntaxError):
+            # E.g., `_base_typ` is "char" or "unsigned long"
+            pass
+        except TypeError:
+            # `base` ain't a number
+            pass
+
         obj = super().__new__(cls, base)
         obj._stars = stars
         return obj
@@ -474,6 +498,9 @@ class ReservedWord(sympy.Atom, Pickable):
     def _hashable_content(self):
         return (self.value,)
 
+    def _sympystr(self, printer):
+        return str(self)
+
     # Pickling support
     __reduce_ex__ = Pickable.__reduce_ex__
 
@@ -494,12 +521,38 @@ class Macro(ReservedWord):
     pass
 
 
+class Class(ReservedWord):
+
+    def __str__(self):
+        return "class %s" % self.value
+
+    __repr__ = __str__
+
+
 class MacroArgument(sympy.Symbol):
 
     def __str__(self):
         return "(%s)" % self.name
 
     __repr__ = __str__
+
+
+class ValueLimit(ReservedWord, sympy.Expr):
+
+    """
+    Symbolic representation of the so called limits macros, which provide the
+    minimum and maximum limits for various types, such as INT_MIN, INT_MAX etc.
+    """
+
+    pass
+
+
+limits_mapper = {
+    np.int32: Bunch(min=ValueLimit('INT_MIN'), max=ValueLimit('INT_MAX')),
+    np.int64: Bunch(min=ValueLimit('LONG_MIN'), max=ValueLimit('LONG_MAX')),
+    np.float32: Bunch(min=-ValueLimit('FLT_MAX'), max=ValueLimit('FLT_MAX')),
+    np.float64: Bunch(min=-ValueLimit('DBL_MAX'), max=ValueLimit('DBL_MAX')),
+}
 
 
 class DefFunction(Function, Pickable):
@@ -510,9 +563,12 @@ class DefFunction(Function, Pickable):
         https://github.com/sympy/sympy/issues/4297
     """
 
-    __rargs__ = ('name', 'arguments')
+    __rargs__ = ('name', 'arguments', 'template')
 
-    def __new__(cls, name, arguments=None, **kwargs):
+    def __new__(cls, name, arguments=None, template=None, **kwargs):
+        if isinstance(name, str):
+            name = Keyword(name)
+
         _arguments = []
         for i in as_tuple(arguments):
             if isinstance(i, str):
@@ -522,12 +578,25 @@ class DefFunction(Function, Pickable):
                 _arguments.append(ReservedWord(i))
             else:
                 _arguments.append(i)
-        arguments = tuple(_arguments)
-        if isinstance(name, str):
-            name = Keyword(name)
-        obj = Function.__new__(cls, name, Tuple(*arguments))
+
+        _template = []
+        for i in as_tuple(template):
+            if isinstance(i, str):
+                # Same story as above
+                _template.append(ReservedWord(i))
+            else:
+                _template.append(i)
+
+        args = [name]
+        args.append(Tuple(*_arguments))
+        if _template:
+            args.append(Tuple(*_template))
+
+        obj = Function.__new__(cls, *args)
         obj._name = name
-        obj._arguments = arguments
+        obj._arguments = tuple(_arguments)
+        obj._template = tuple(_template)
+
         return obj
 
     @property
@@ -538,8 +607,17 @@ class DefFunction(Function, Pickable):
     def arguments(self):
         return self._arguments
 
+    @property
+    def template(self):
+        return self._template
+
     def __str__(self):
-        return "%s(%s)" % (self.name, ', '.join(str(i) for i in self.arguments))
+        if self.template:
+            template = '<%s>' % ','.join(str(i) for i in self.template)
+        else:
+            template = ''
+        arguments = ', '.join(str(i) for i in self.arguments)
+        return "%s%s(%s)" % (self.name, template, arguments)
 
     __repr__ = __str__
 
@@ -550,6 +628,12 @@ class DefFunction(Function, Pickable):
 
     # Pickling support
     __reduce_ex__ = Pickable.__reduce_ex__
+
+
+class MathFunction(DefFunction):
+
+    # Supposed to involve real operands
+    is_commutative = True
 
 
 class InlineIf(sympy.Expr, Pickable):
@@ -594,9 +678,93 @@ class InlineIf(sympy.Expr, Pickable):
     __reduce_ex__ = Pickable.__reduce_ex__
 
 
+class Namespace(sympy.Expr, Pickable):
+
+    """
+    Symbolic representation of a C++ namespace `ns0::ns1::...`.
+    """
+
+    __rargs__ = ('items',)
+
+    def __new__(cls, items, **kwargs):
+        normalized_items = []
+        for i in as_tuple(items):
+            if isinstance(i, str):
+                normalized_items.append(ReservedWord(i))
+            elif isinstance(i, ReservedWord):
+                normalized_items.append(i)
+            else:
+                raise ValueError("`items` must be iterable of str or ReservedWord")
+
+        obj = sympy.Expr.__new__(cls)
+        obj._items = tuple(items)
+
+        return obj
+
+    def _hashable_content(self):
+        return super()._hashable_content() + self.items
+
+    @property
+    def items(self):
+        return self._items
+
+    def __str__(self):
+        return "::".join(str(i) for i in self.items)
+
+    __repr__ = __str__
+
+
+class Rvalue(sympy.Expr, Pickable):
+
+    """
+    A generic C++ rvalue, that is a value that occupies a temporary location in
+    memory.
+    """
+
+    __rargs__ = ('expr',)
+    __rkwargs__ = ('namespace', 'init')
+
+    def __new__(cls, expr, namespace=None, init=None):
+        args = [expr]
+        if namespace is not None:
+            args.append(namespace)
+        if init is not None:
+            args.append(init)
+
+        obj = sympy.Expr.__new__(cls, *args)
+
+        obj._expr = expr
+        obj._namespace = namespace
+        obj._init = init
+
+        return obj
+
+    @property
+    def expr(self):
+        return self._expr
+
+    @property
+    def namespace(self):
+        return self._namespace
+
+    @property
+    def init(self):
+        return self._init
+
+    def __str__(self):
+        rvalue = str(self.expr)
+        if self.namespace:
+            rvalue = "%s::%s" % (self.namespace, rvalue)
+        if self.init:
+            rvalue = "%s%s" % (rvalue, self.init)
+        return rvalue
+
+    __repr__ = __str__
+
+
 # *** Casting
 
-class CastStar(object):
+class CastStar:
 
     base = None
 
@@ -619,6 +787,18 @@ class CHAR(Cast):
     _base_typ = 'char'
 
 
+class SHORT(Cast):
+    _base_typ = 'short'
+
+
+class USHORT(Cast):
+    _base_typ = 'unsigned short'
+
+
+class UCHAR(Cast):
+    _base_typ = 'unsigned char'
+
+
 class LONG(Cast):
     _base_typ = 'long'
 
@@ -635,9 +815,23 @@ class CHARP(CastStar):
     base = CHAR
 
 
+class UCHARP(CastStar):
+    base = UCHAR
+
+
+class SHORTP(CastStar):
+    base = SHORT
+
+
+class USHORTP(CastStar):
+    base = USHORT
+
+
 cast_mapper = {
     np.int8: CHAR,
-    np.uint8: CHAR,
+    np.uint8: UCHAR,
+    np.int16: SHORT,  # noqa
+    np.uint16: USHORT,  # noqa
     int: INT,  # noqa
     np.int32: INT,  # noqa
     np.int64: LONG,
@@ -647,8 +841,10 @@ cast_mapper = {
     np.float64: DOUBLE,  # noqa
 
     (np.int8, '*'): CHARP,
-    (np.uint8, '*'): CHARP,
+    (np.uint8, '*'): UCHARP,
     (int, '*'): INTP,  # noqa
+    (np.uint16, '*'): USHORTP,  # noqa
+    (np.int16, '*'): SHORTP,  # noqa
     (np.int32, '*'): INTP,  # noqa
     (np.int64, '*'): INTP,  # noqa
     (np.float32, '*'): FLOATP,  # noqa

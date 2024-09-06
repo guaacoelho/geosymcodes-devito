@@ -26,10 +26,10 @@ class IterationTree(tuple):
         return [i.dim for i in self]
 
     def __repr__(self):
-        return "IterationTree%s" % super(IterationTree, self).__repr__()
+        return "IterationTree%s" % super().__repr__()
 
     def __getitem__(self, key):
-        ret = super(IterationTree, self).__getitem__(key)
+        ret = super().__getitem__(key)
         return IterationTree(ret) if isinstance(key, slice) else ret
 
 
@@ -92,11 +92,13 @@ def filter_iterations(tree, key=lambda i: i):
     return filtered
 
 
-def derive_parameters(iet, drop_locals=False):
+def derive_parameters(iet, drop_locals=False, ordering='default'):
     """
     Derive all input parameters (function call arguments) from an IET
     by collecting all symbols not defined in the tree itself.
     """
+    assert ordering in ('default', 'canonical')
+
     # Extract all candidate parameters
     candidates = FindSymbols().visit(iet)
 
@@ -104,7 +106,8 @@ def derive_parameters(iet, drop_locals=False):
     basics = FindSymbols('basics').visit(iet)
     candidates.extend(i.function for i in basics)
 
-    # Filter off duplicates (e.g., `x_size` is extracted by both calls to FindSymbols)
+    # Filter off duplicates (e.g., `x_size` is extracted by both calls to
+    # FindSymbols)
     candidates = filter_ordered(candidates)
 
     # Filter off symbols which are defined somewhere within `iet`
@@ -120,7 +123,16 @@ def derive_parameters(iet, drop_locals=False):
 
     # Maybe filter out all other compiler-generated objects
     if drop_locals:
-        parameters = [p for p in parameters if not (p.is_ArrayBasic or p.is_LocalObject)]
+        parameters = [p for p in parameters if not p.is_LocalType]
+
+    # NOTE: This is requested by the caller when the parameters are used to
+    # construct Callables whose signature only depends on the object types,
+    # rather than on their name
+    # TODO: It should maybe be done systematically... but it's gonna change a huge
+    # amount of tests and examples; plus, it might break compatibility those
+    # using devito as a library-generator to be embedded within legacy codes
+    if ordering == 'canonical':
+        parameters = sorted(parameters, key=lambda p: str(type(p)))
 
     return parameters
 

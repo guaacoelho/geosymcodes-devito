@@ -1,4 +1,9 @@
+import atexit
 from itertools import product
+import os
+from . import _version
+
+import numpy as np
 
 # Import the global `configuration` dict
 from devito.parameters import *  # noqa
@@ -17,6 +22,7 @@ from devito.types.tensor import *  # noqa
 from devito.finite_differences import *  # noqa
 from devito.operations.solve import *
 from devito.operator import Operator  # noqa
+from devito.symbolics import CondEq, CondNe  # noqa
 
 # Other stuff exposed to the user
 from devito.builtins import *  # noqa
@@ -59,18 +65,24 @@ def reinit_compiler(val):
 # Setup target platform and compiler
 configuration.add('platform', 'cpu64', list(platform_registry),
                   callback=lambda i: platform_registry[i]())
-configuration.add('compiler', 'custom', list(compiler_registry),
+configuration.add('compiler', 'custom', compiler_registry,
                   callback=lambda i: compiler_registry[i]())
 
 # Setup language for shared-memory parallelism
 preprocessor = lambda i: {0: 'C', 1: 'openmp'}.get(i, i)  # Handles DEVITO_OPENMP deprec
 configuration.add('language', 'C', [0, 1] + list(operator_registry._languages),
-                  preprocessor=preprocessor, callback=reinit_compiler, deprecate='openmp')
+                  preprocessor=preprocessor, callback=reinit_compiler,
+                  deprecate='openmp')
 
 # MPI mode (0 => disabled, 1 == basic)
 preprocessor = lambda i: bool(i) if isinstance(i, int) else i
 configuration.add('mpi', 0, [0, 1] + list(mpi_registry),
                   preprocessor=preprocessor, callback=reinit_compiler)
+
+# Domain decomposition topology. Only relevant with MPI
+preprocessor = lambda i: CustomTopology._shortcuts.get(i)
+configuration.add('topology', None, [None] + list(CustomTopology._shortcuts),
+                  preprocessor=preprocessor)
 
 # Should Devito run a first-touch Operator upon data allocation?
 configuration.add('first-touch', 0, [0, 1], preprocessor=bool, impacts_jit=False)
@@ -96,8 +108,21 @@ configuration.add('jit-backdoor', 0, [0, 1], preprocessor=bool, impacts_jit=Fals
 # optimisations.
 configuration.add('safe-math', 0, [0, 1], preprocessor=bool, callback=reinit_compiler)
 
+
 # Enable/disable automatic padding for allocated data
-configuration.add('autopadding', False, [False, True])
+def _preprocess_autopadding(v):
+    return {
+        '0': False,
+        '1': np.float32,
+        True: np.float32,
+        'fp16': np.float16,
+        'fp32': np.float32,
+        'fp64': np.float64
+    }.get(v, v)
+
+configuration.add('autopadding', False,  # noqa: E305
+                  [False, True, 0, 1, np.float16, np.float32, np.float64],
+                  preprocessor=_preprocess_autopadding)
 
 # Select target device
 configuration.add('deviceid', -1, preprocessor=int, impacts_jit=False)
@@ -121,9 +146,10 @@ configuration.add('autotuning', 'off', accepted, callback=autotune_callback,
                   impacts_jit=False)
 
 # In develop-mode:
-# - Some optimizations may not be applied to the generated code.
-# - The compiler performs more type and value checking
-configuration.add('develop-mode', True, [False, True])
+# - The ALLOC_GUARD data allocator is used. This will trigger segfaults as soon
+#   as an out-of-bounds memory access is performed
+# - Some autoi-tuning optimizations are disabled
+configuration.add('develop-mode', False, [False, True])
 
 # Setup optimization level
 configuration.add('opt', 'advanced', list(operator_registry._accepted), deprecate='dle')
@@ -155,3 +181,23 @@ def mode_performance():
     # With the autotuner in `aggressive` mode, a more aggressive blocking strategy
     # which also tiles the innermost loop) is beneficial
     configuration['opt-options']['blockinner'] = True
+
+
+if "PYTEST_VERSION" in os.environ and np.version.full_version.startswith('2'):
+    # Avoid change in repr break docstring tests
+    # Only sets it here for testing
+    # https://numpy.org/devdocs/release/2.0.0-notes.html#representation-of-numpy-scalars-changed  # noqa
+    np.set_printoptions(legacy="1.25")
+
+
+# Ensure the SymPy caches are purged at exit
+# For whatever reason, if we don't do this the garbage collector won't its
+# job properly and thus we may end up missing some custom __del__'s
+atexit.register(clear_cache)
+
+
+__version__ = _version.get_versions()['version']
+
+
+# Clean up namespace
+del atexit, product

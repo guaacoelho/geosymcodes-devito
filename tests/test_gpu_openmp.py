@@ -11,7 +11,7 @@ from examples.seismic import TimeAxis, RickerSource, Receiver
 pytestmark = skipif(['nodevice'], whole_module=True)
 
 
-class TestCodeGeneration(object):
+class TestCodeGeneration:
 
     def test_init_omp_env(self):
         grid = Grid(shape=(3, 3, 3))
@@ -24,7 +24,7 @@ class TestCodeGeneration(object):
             'if (deviceid != -1)\n{\n  omp_set_default_device(deviceid);\n}'
 
     @pytest.mark.parallel(mode=1)
-    def test_init_omp_env_w_mpi(self):
+    def test_init_omp_env_w_mpi(self, mode):
         grid = Grid(shape=(3, 3, 3))
 
         u = TimeFunction(name='u', grid=grid)
@@ -50,15 +50,15 @@ class TestCodeGeneration(object):
         trees = retrieve_iteration_tree(op)
         assert len(trees) == 1
 
-        assert trees[0][1].pragmas[0].value ==\
+        assert trees[0][1].pragmas[0].ccode.value ==\
             'omp target teams distribute parallel for collapse(3)'
-        assert op.body.maps[0].pragmas[0].value ==\
+        assert op.body.maps[0].ccode.value ==\
             ('omp target enter data map(to: u[0:u_vec->size[0]*'
              'u_vec->size[1]*u_vec->size[2]*u_vec->size[3]])')
-        assert op.body.unmaps[0].pragmas[0].value ==\
+        assert op.body.unmaps[0].ccode.value ==\
             ('omp target update from(u[0:u_vec->size[0]*'
              'u_vec->size[1]*u_vec->size[2]*u_vec->size[3]])')
-        assert op.body.unmaps[1].pragmas[0].value ==\
+        assert op.body.unmaps[1].ccode.value ==\
             ('omp target exit data map(release: u[0:u_vec->size[0]*'
              'u_vec->size[1]*u_vec->size[2]*u_vec->size[3]]) if(devicerm)')
 
@@ -76,7 +76,7 @@ class TestCodeGeneration(object):
         trees = retrieve_iteration_tree(op)
         assert len(trees) == 1
 
-        assert trees[0][1].pragmas[0].value ==\
+        assert trees[0][1].pragmas[0].ccode.value ==\
             'omp target teams distribute parallel for collapse(3)'
 
         try:
@@ -105,7 +105,7 @@ class TestCodeGeneration(object):
         assert op.parameters[7] is tree[2].step
         assert op.parameters[10] is tree[3].step
 
-        assert tree[1].pragmas[0].value ==\
+        assert tree[1].pragmas[0].ccode.value ==\
             'omp target teams distribute parallel for collapse(3)'
 
     def test_multiple_eqns(self):
@@ -120,18 +120,18 @@ class TestCodeGeneration(object):
         trees = retrieve_iteration_tree(op)
         assert len(trees) == 1
 
-        assert trees[0][1].pragmas[0].value ==\
+        assert trees[0][1].pragmas[0].ccode.value ==\
             'omp target teams distribute parallel for collapse(3)'
         for i, f in enumerate([u, v]):
-            assert op.body.maps[i].pragmas[0].value ==\
+            assert op.body.maps[i].ccode.value ==\
                 ('omp target enter data map(to: %(n)s[0:%(n)s_vec->size[0]*'
                  '%(n)s_vec->size[1]*%(n)s_vec->size[2]*%(n)s_vec->size[3]])' %
                  {'n': f.name})
-            assert op.body.unmaps[2*i + 0].pragmas[0].value ==\
+            assert op.body.unmaps[2*i + 0].ccode.value ==\
                 ('omp target update from(%(n)s[0:%(n)s_vec->size[0]*'
                  '%(n)s_vec->size[1]*%(n)s_vec->size[2]*%(n)s_vec->size[3]])' %
                  {'n': f.name})
-            assert op.body.unmaps[2*i + 1].pragmas[0].value ==\
+            assert op.body.unmaps[2*i + 1].ccode.value ==\
                 ('omp target exit data map(release: %(n)s[0:%(n)s_vec->size[0]*'
                  '%(n)s_vec->size[1]*%(n)s_vec->size[2]*%(n)s_vec->size[3]]) '
                  'if(devicerm)' % {'n': f.name})
@@ -154,45 +154,45 @@ class TestCodeGeneration(object):
         assert len(trees) == 3
 
         # All loop nests must have been parallelized
-        assert trees[0][0].pragmas[0].value ==\
+        assert trees[0][0].pragmas[0].ccode.value ==\
             'omp target teams distribute parallel for collapse(3)'
-        assert trees[1][1].pragmas[0].value ==\
+        assert trees[1][1].pragmas[0].ccode.value ==\
             'omp target teams distribute parallel for collapse(3)'
-        assert trees[2][1].pragmas[0].value ==\
+        assert trees[2][1].pragmas[0].ccode.value ==\
             'omp target teams distribute parallel for collapse(3)'
 
         # Check `u` and `v`
         for i, f in enumerate([u, v], 1):
-            assert op.body.maps[i].pragmas[0].value ==\
+            assert op.body.maps[i].ccode.value ==\
                 ('omp target enter data map(to: %(n)s[0:%(n)s_vec->size[0]]'
                  '[0:%(n)s_vec->size[1]][0:%(n)s_vec->size[2]][0:%(n)s_vec->size[3]])' %
                  {'n': f.name})
-            assert op.body.unmaps[2*i + 0].pragmas[0].value ==\
+            assert op.body.unmaps[2*i + 0].ccode.value ==\
                 ('omp target update from(%(n)s[0:%(n)s_vec->size[0]]'
                  '[0:%(n)s_vec->size[1]][0:%(n)s_vec->size[2]][0:%(n)s_vec->size[3]])' %
                  {'n': f.name})
-            assert op.body.unmaps[2*i + 1].pragmas[0].value ==\
+            assert op.body.unmaps[2*i + 1].ccode.value ==\
                 ('omp target exit data map(release: %(n)s[0:%(n)s_vec->size[0]]'
                  '[0:%(n)s_vec->size[1]][0:%(n)s_vec->size[2]][0:%(n)s_vec->size[3]]) '
                  'if(devicerm)' % {'n': f.name})
 
         # Check `f`
-        assert op.body.maps[0].pragmas[0].value ==\
+        assert op.body.maps[0].ccode.value ==\
             ('omp target enter data map(to: f[0:f_vec->size[0]]'
              '[0:f_vec->size[1]][0:f_vec->size[2]])')
-        assert op.body.unmaps[0].pragmas[0].value ==\
+        assert op.body.unmaps[0].ccode.value ==\
             ('omp target update from(f[0:f_vec->size[0]]'
              '[0:f_vec->size[1]][0:f_vec->size[2]])')
-        assert op.body.unmaps[1].pragmas[0].value ==\
+        assert op.body.unmaps[1].ccode.value ==\
             ('omp target exit data map(release: f[0:f_vec->size[0]]'
              '[0:f_vec->size[1]][0:f_vec->size[2]]) if(devicerm)')
 
         # Check `g` -- note that unlike `f`, this one should be `delete` upon
         # exit, not `from`
-        assert op.body.maps[3].pragmas[0].value ==\
+        assert op.body.maps[3].ccode.value ==\
             ('omp target enter data map(to: g[0:g_vec->size[0]]'
              '[0:g_vec->size[1]][0:g_vec->size[2]])')
-        assert op.body.unmaps[6].pragmas[0].value ==\
+        assert op.body.unmaps[6].ccode.value ==\
             ('omp target exit data map(delete: g[0:g_vec->size[0]]'
              '[0:g_vec->size[1]][0:g_vec->size[2]])'
              ' if(devicerm && g_vec->size[0] != 0 && g_vec->size[1] != 0'
@@ -222,30 +222,6 @@ class TestCodeGeneration(object):
         assert len(op.body.unmaps) == 3
         assert all('r0' not in str(i) for i in op.body.unmaps)
 
-    def test_function_wo(self):
-        grid = Grid(shape=(3, 3, 3))
-        i = Dimension(name='i')
-
-        f = Function(name='f', shape=(1,), dimensions=(i,), grid=grid)
-        u = TimeFunction(name='u', grid=grid)
-
-        eqns = [Eq(u.forward, u + 1),
-                Eq(f[0], u[0, 0, 0, 0])]
-
-        op = Operator(eqns, opt='noop', language='openmp')
-
-        assert len(op.body.maps) == 1
-        assert op.body.maps[0].pragmas[0].value ==\
-            ('omp target enter data map(to: u[0:u_vec->size[0]]'
-             '[0:u_vec->size[1]][0:u_vec->size[2]][0:u_vec->size[3]])')
-        assert len(op.body.unmaps) == 2
-        assert op.body.unmaps[0].pragmas[0].value ==\
-            ('omp target update from(u[0:u_vec->size[0]]'
-             '[0:u_vec->size[1]][0:u_vec->size[2]][0:u_vec->size[3]])')
-        assert op.body.unmaps[1].pragmas[0].value ==\
-            ('omp target exit data map(release: u[0:u_vec->size[0]]'
-             '[0:u_vec->size[1]][0:u_vec->size[2]][0:u_vec->size[3]]) if(devicerm)')
-
     def test_timeparallel_reduction(self):
         grid = Grid(shape=(3, 3, 3))
         i = Dimension(name='i')
@@ -264,12 +240,12 @@ class TestCodeGeneration(object):
         # The time loop is not in OpenMP canonical form, so it won't be parallelized
         assert not tree.root.pragmas
         assert len(tree[1].pragmas) == 1
-        assert tree[1].pragmas[0].value ==\
+        assert tree[1].pragmas[0].ccode.value ==\
             ('omp target teams distribute parallel for collapse(3)'
              ' reduction(+:f[0])')
 
 
-class TestOperator(object):
+class TestOperator:
 
     def test_op_apply(self):
         grid = Grid(shape=(3, 3, 3))
@@ -342,10 +318,10 @@ class TestOperator(object):
         TestOperator().iso_acoustic(opt=opt)
 
 
-class TestMPI(object):
+class TestMPI:
 
     @pytest.mark.parallel(mode=[2, 4])
-    def test_mpi_nocomms(self):
+    def test_mpi_nocomms(self, mode):
         grid = Grid(shape=(3, 3, 3))
 
         u = TimeFunction(name='u', grid=grid, dtype=np.int32)
@@ -361,5 +337,5 @@ class TestMPI(object):
         assert np.all(np.array(u.data[0, :, :, :]) == time_steps)
 
     @pytest.mark.parallel(mode=[2, 4])
-    def test_iso_ac(self):
+    def test_iso_ac(self, mode):
         TestOperator().iso_acoustic(opt='advanced')

@@ -1,12 +1,13 @@
 from abc import ABC, abstractmethod
 from ctypes import c_int, c_void_p, sizeof
 from itertools import groupby, product
+from functools import cached_property
+
 from math import ceil, pow
 from sympy import factorint
 
 import atexit
 
-from cached_property import cached_property
 import numpy as np
 from cgen import Struct, Value
 
@@ -36,17 +37,21 @@ try:
     # will be called only at the very end and only if necessary, after all cloned
     # communicators will have been freed
     def cleanup():
-        global init_by_devito
-        if init_by_devito and MPI.Is_initialized() and not MPI.Is_finalized():
-            MPI.Finalize()
+        devito_mpi_finalize()
     atexit.register(cleanup)
-except ImportError:
+except ImportError as e:
     # Dummy fallback in case mpi4py/MPI aren't available
     class NoneMetaclass(type):
         def __getattr__(self, name):
             return None
 
-    class MPI(object, metaclass=NoneMetaclass):
+    class MPI(metaclass=NoneMetaclass):
+        init_error = e
+
+        @classmethod
+        def Init(cls):
+            raise cls.init_error
+
         @classmethod
         def Is_initialized(cls):
             return False
@@ -58,7 +63,36 @@ except ImportError:
             return None
 
 
-__all__ = ['Distributor', 'SparseDistributor', 'MPI', 'CustomTopology']
+__all__ = ['Distributor', 'SparseDistributor', 'MPI', 'CustomTopology',
+           'devito_mpi_init', 'devito_mpi_finalize']
+
+
+def devito_mpi_init():
+    """
+    Initialize MPI, if not already initialized.
+    """
+    if not MPI.Is_initialized():
+        try:
+            thread_level = mpi4py_thread_levels[mpi4py.rc.thread_level]
+        except KeyError:
+            assert False
+
+        MPI.Init_thread(thread_level)
+
+        global init_by_devito
+        init_by_devito = True
+
+        return True
+    return False
+
+
+def devito_mpi_finalize():
+    """
+    Finalize MPI, if initialized by Devito.
+    """
+    global init_by_devito
+    if init_by_devito and MPI.Is_initialized() and not MPI.Is_finalized():
+        MPI.Finalize()
 
 
 class AbstractDistributor(ABC):
@@ -189,29 +223,26 @@ class Distributor(AbstractDistributor):
 
         if configuration['mpi']:
             # First time we enter here, we make sure MPI is initialized
-            if not MPI.Is_initialized():
-                MPI.Init()
-                global init_by_devito
-                init_by_devito = True
+            devito_mpi_init()
 
             # Note: the cloned communicator doesn't need to be explicitly freed;
             # mpi4py takes care of that when the object gets out of scope
             self._input_comm = (input_comm or MPI.COMM_WORLD).Clone()
 
             if topology is None:
-                # `MPI.Compute_dims` sets the dimension sizes to be as close to each other
-                # as possible, using an appropriate divisibility algorithm. Thus, in 3D:
+                # `MPI.Compute_dims` sets the dimension sizes to be as close to
+                # each other as possible, using an appropriate divisibility
+                # algorithm. Thus, in 3D:
                 # * topology[0] >= topology[1] >= topology[2]
                 # * topology[0] * topology[1] * topology[2] == self._input_comm.size
-                # However, `MPI.Compute_dims` is distro-dependent, so we have to enforce
-                # some properties through our own wrapper (e.g., OpenMPI v3 does not
-                # guarantee that 9 ranks are arranged into a 3x3 grid when shape=(9, 9))
+                # However, `MPI.Compute_dims` is distro-dependent, so we have
+                # to enforce some properties through our own wrapper (e.g.,
+                # OpenMPI v3 does not guarantee that 9 ranks are arranged into
+                # a 3x3 grid when shape=(9, 9))
                 self._topology = compute_dims(self._input_comm.size, len(shape))
             else:
                 # A custom topology may contain integers or the wildcard '*'
-                topology = CustomTopology(topology, self._input_comm)
-
-                self._topology = topology
+                self._topology = CustomTopology(topology, self._input_comm)
 
             if self._input_comm is not input_comm:
                 # By default, Devito arranges processes into a cartesian topology.
@@ -449,7 +480,9 @@ class SparseDistributor(AbstractDistributor):
     def decompose(cls, npoint, distributor):
         """Distribute `npoint` points over `nprocs` MPI ranks."""
         nprocs = distributor.nprocs
-        if isinstance(npoint, int):
+        if nprocs == 1:
+            return (npoint,)
+        elif isinstance(npoint, int):
             # `npoint` is a global count. The `npoint` are evenly distributed
             # across the various MPI ranks. Note that there is nothing smart
             # in the following -- it's entirely possible that the MPI rank 0,
@@ -471,6 +504,20 @@ class SparseDistributor(AbstractDistributor):
         else:
             raise TypeError('Need `npoint` int or tuple argument')
         return tuple(glb_npoint)
+
+    @cached_property
+    def all_ranges(self):
+        """The global ranges of all MPI ranks."""
+        ret = []
+        for i in self.decomposition[0]:
+            # i might be empty if there is less receivers than rank such as for a
+            # point source
+            try:
+                ret.append(EnrichedTuple(range(min(i), max(i) + 1),
+                                         getters=self.dimensions))
+            except ValueError:
+                ret.append(EnrichedTuple(range(0, 0), getters=self.dimensions))
+        return tuple(ret)
 
     @property
     def distributor(self):
@@ -585,8 +632,9 @@ class CustomTopology(tuple):
 
     Examples
     --------
-    For example, let's consider a domain with three distributed dimensions: x, y, and z,
-    and an MPI communicator with N processes. Here are a few examples of CustomTopology:
+    For example, let's consider a domain with three distributed dimensions: x,
+    y, and z, and an MPI communicator with N processes. Here are a few examples
+    of CustomTopology:
 
     With N known, say N=4:
     * `(1, 1, 4)`: the z Dimension is decomposed into 4 chunks
@@ -594,14 +642,15 @@ class CustomTopology(tuple):
                    is decomposed into 2 chunks
 
     With N unknown:
-    * `(1, '*', 1)`: the wildcard `'*'` indicates that the runtime should decompose the y
-                     Dimension into N chunks
-    * `('*', '*', 1)`: the wildcard `'*'` indicates that the runtime should decompose both
-                       the x and y Dimensions in `nstars` factors of N, prioritizing
-                       the outermost dimension
+    * `(1, '*', 1)`: the wildcard `'*'` indicates that the runtime should
+                     decompose the y Dimension into N chunks
+    * `('*', '*', 1)`: the wildcard `'*'` indicates that the runtime should
+                       decompose both the x and y Dimensions in `nstars` factors
+                       of N, prioritizing the outermost dimension
 
-    Assuming that the number of ranks `N` cannot evenly be decomposed to the requested
-    stars=6 we decompose as evenly as possible by prioritising the outermost dimension
+    Assuming that the number of ranks `N` cannot evenly be decomposed to the
+    requested stars=6 we decompose as evenly as possible by prioritising the
+    outermost dimension
 
     For N=3
     * `('*', '*', 1)` gives: (3, 1, 1)
@@ -624,6 +673,13 @@ class CustomTopology(tuple):
     Users should not directly use the CustomTopology class. It is instantiated
     by the Devito runtime based on user input.
     """
+
+    _shortcuts = {
+        'x': ('*', 1, 1),
+        'y': (1, '*', 1),
+        'z': (1, 1, '*'),
+        'xy': ('*', '*', 1),
+    }
 
     def __new__(cls, items, input_comm):
         # Keep track of nstars and already defined decompositions
@@ -683,3 +739,12 @@ def compute_dims(nprocs, ndim):
     else:
         v = int(v)
     return tuple(v for _ in range(ndim))
+
+
+# Yes, AFAICT, nothing like this is available in mpi4py
+mpi4py_thread_levels = {
+    'single': MPI.THREAD_SINGLE,
+    'funneled': MPI.THREAD_FUNNELED,
+    'serialized': MPI.THREAD_SERIALIZED,
+    'multiple': MPI.THREAD_MULTIPLE
+}

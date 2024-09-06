@@ -5,7 +5,7 @@ import sympy
 from devito.tools import Pickable, as_tuple, sympy_mutex
 from devito.types.args import ArgProvider
 from devito.types.caching import Uncached
-from devito.types.basic import Basic
+from devito.types.basic import Basic, LocalType
 from devito.types.utils import CtypesFactory
 
 __all__ = ['Object', 'LocalObject', 'CompositeObject']
@@ -75,10 +75,6 @@ class AbstractObject(Basic, sympy.Basic, Pickable):
         return self.dtype
 
     @property
-    def base(self):
-        return self
-
-    @property
     def function(self):
         return self
 
@@ -95,7 +91,7 @@ class Object(AbstractObject, ArgProvider, Uncached):
     is_Object = True
 
     def __init__(self, name, dtype, value=None):
-        super(Object, self).__init__(name, dtype)
+        super().__init__(name, dtype)
         self.value = value
 
     __hash__ = Uncached.__hash__
@@ -141,7 +137,7 @@ class CompositeObject(Object):
     def __init__(self, name, pname, pfields, value=None):
         dtype = CtypesFactory.generate(pname, pfields)
         value = self.__value_setup__(dtype, value)
-        super(CompositeObject, self).__init__(name, dtype, value)
+        super().__init__(name, dtype, value)
 
     def __value_setup__(self, dtype, value):
         return value or byref(dtype._type_())
@@ -159,7 +155,7 @@ class CompositeObject(Object):
         return [i for i, _ in self.pfields]
 
 
-class LocalObject(AbstractObject):
+class LocalObject(AbstractObject, LocalType):
 
     """
     Object with derived type defined inside an Operator.
@@ -172,26 +168,46 @@ class LocalObject(AbstractObject):
     LocalObjects encode their dtype as a class attribute.
     """
 
-    __rargs__ = ('name',)
-    __rkwargs__ = ('cargs', 'liveness')
+    default_initvalue = None
+    """
+    The initial value may or may not be a class-level attribute. In the latter
+    case, it is passed to the constructor.
+    """
 
-    def __init__(self, name, cargs=None, **kwargs):
+    __rargs__ = ('name',)
+    __rkwargs__ = ('cargs', 'initvalue', 'liveness', 'is_global')
+
+    def __init__(self, name, cargs=None, initvalue=None, liveness='lazy',
+                 is_global=False, **kwargs):
         self.name = name
         self.cargs = as_tuple(cargs)
+        self.initvalue = initvalue or self.default_initvalue
 
-        self._liveness = kwargs.get('liveness', 'lazy')
-        assert self._liveness in ['eager', 'lazy']
+        assert liveness in ['eager', 'lazy']
+        self._liveness = liveness
+
+        self._is_global = is_global
 
     def _hashable_content(self):
-        return super()._hashable_content() + self.cargs + (self.liveness,)
+        return (super()._hashable_content() +
+                self.cargs +
+                (self.initvalue, self.liveness, self.is_global))
 
     @property
-    def liveness(self):
-        return self._liveness
+    def is_global(self):
+        return self._is_global
 
     @property
     def free_symbols(self):
-        return super().free_symbols | set(self.cargs)
+        ret = set()
+        ret.update(super().free_symbols)
+        for i in self.cargs:
+            try:
+                ret.update(i.free_symbols)
+            except AttributeError:
+                # E.g., pure integers
+                pass
+        return ret
 
     @property
     def _C_init(self):
@@ -216,9 +232,5 @@ class LocalObject(AbstractObject):
         return None
 
     @property
-    def _mem_internal_eager(self):
-        return self._liveness == 'eager'
-
-    @property
-    def _mem_internal_lazy(self):
-        return self._liveness == 'lazy'
+    def _mem_global(self):
+        return self._is_global

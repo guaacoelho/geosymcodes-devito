@@ -6,7 +6,7 @@ class Property(Tag):
     _KNOWN = []
 
     def __init__(self, name, val=None):
-        super(Property, self).__init__(name, val)
+        super().__init__(name, val)
         Property._KNOWN.append(self)
 
 
@@ -48,12 +48,6 @@ iteration space is likely to be very small.
 SKEWABLE = Property('skewable')
 """A fully parallel Dimension that would benefit from wavefront/skewed tiling."""
 
-ROUNDABLE = Property('roundable')
-"""
-A Dimension whose upper limit may be rounded up to a multiple of the SIMD
-vector length thanks to the presence of enough padding.
-"""
-
 AFFINE = Property('affine')
 """
 A Dimension used to index into tensor objects only through affine and regular
@@ -90,6 +84,8 @@ A Dimension defining an iteration space that is guaranteed to generate in-bounds
 array accesses, typically through the use of custom conditionals in the body. This
 is used for iteration spaces that are larger than the data space.
 """
+
+PREFETCHABLE = Property('prefetchable')
 
 
 # Bundles
@@ -130,7 +126,7 @@ def normalize_properties(*args):
 
 
 def relax_properties(properties):
-    return frozenset(properties - {PARALLEL_INDEP, ROUNDABLE})
+    return frozenset(properties - {PARALLEL_INDEP})
 
 
 class Properties(frozendict):
@@ -187,6 +183,12 @@ class Properties(frozendict):
             m[d] = normalize_properties(set(self.get(d, [])), {SEQUENTIAL})
         return Properties(m)
 
+    def prefetchable(self, dims):
+        m = dict(self)
+        for d in as_tuple(dims):
+            m[d] = self.get(d, set()) | {PREFETCHABLE}
+        return Properties(m)
+
     def block(self, dims, kind='default'):
         if kind == 'default':
             p = TILABLE
@@ -229,6 +231,9 @@ class Properties(frozendict):
 
     def is_blockable_small(self, d):
         return TILABLE_SMALL in self.get(d, set())
+
+    def is_prefetchable(self, dims):
+        return any(PREFETCHABLE in self.get(d, set()) for d in as_tuple(dims))
 
     @property
     def nblockable(self):

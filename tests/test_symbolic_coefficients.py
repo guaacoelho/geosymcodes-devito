@@ -11,12 +11,12 @@ from devito.passes.equations.linearity import factorize_derivatives, aggregate_c
 _PRECISION = 9
 
 
-class TestSC(object):
+class TestSC:
     """
     Class for testing symbolic coefficients functionality
     """
 
-    @pytest.mark.parametrize('order', [1, 2, 6])
+    @pytest.mark.parametrize('order', [2, 6])
     @pytest.mark.parametrize('stagger', [True, False])
     def test_default_rules(self, order, stagger):
         """
@@ -40,26 +40,27 @@ class TestSC(object):
                eq1.evaluate.evalf(_PRECISION).__repr__())
 
     @pytest.mark.parametrize('expr, sorder, dorder, dim, weights, expected', [
-        ('u.dx', 2, 1, 0, (-0.6, 0.1, 0.6),
-         '0.1*u(x, y) - 0.6*u(x - h_x, y) + 0.6*u(x + h_x, y)'),
-        ('u.dy2', 3, 2, 1, (0.121, -0.223, 1.648, -2.904),
-         '1.648*u(x, y) + 0.121*u(x, y - 2*h_y) - 0.223*u(x, y - h_y) \
-- 2.904*u(x, y + h_y)')])
+        ('u.dx2', 2, 2, 0, (-0.6, 0.1, 0.6),
+         '0.1*u - 0.6*u._subs(x, x - h_x) + 0.6*u._subs(x, x + h_x)'),
+        ('u.dy2', 4, 2, 1, (0.121, -0.223, 1.648, -2.904, 0),
+         '1.648*u + 0.121*u._subs(y, y - 2*h_y) - 0.223*u._subs(y, y - h_y) \
+- 2.904*u._subs(y, y + h_y)')])
     def test_coefficients(self, expr, sorder, dorder, dim, weights, expected):
         """Test that custom coefficients return the expected result"""
         grid = Grid(shape=(10, 10))
         u = Function(name='u', grid=grid, space_order=sorder, coefficients='symbolic')
-        x = grid.dimensions
+        x, y = grid.dimensions
+        h_x, h_y = grid.spacing_symbols  # noqa
 
         order = dorder
-        dim = x[dim]
+        dim = grid.dimensions[dim]
         weights = np.array(weights)
 
         coeffs = Coefficient(order, u, dim, weights)
 
         eq = Eq(eval(expr), coefficients=Substitutions(coeffs))
         assert isinstance(eq.lhs, Differentiable)
-        assert expected == str(eq.evaluate.lhs)
+        assert sp.simplify(eval(expected) - eq.evaluate.lhs) == 0
 
     def test_function_coefficients(self):
         """Test that custom function coefficients return the expected result"""
@@ -108,20 +109,21 @@ class TestSC(object):
         grid = Grid(shape=(4, 4))
         u = Function(name='u', grid=grid, space_order=2, coefficients='symbolic')
         x = grid.dimensions[0]
+        h_x = x.spacing
 
-        dorder = 1
+        dorder = 2
         weights = np.array([-0.6, 0.1, 0.6])
 
         coeffs = Coefficient(dorder, u, x, weights)
 
         c = sp.Symbol('c')
 
-        eq = Eq(u.dx+c, coefficients=Substitutions(coeffs))
+        eq = Eq(u.dx2+c, coefficients=Substitutions(coeffs))
         eq = eq.xreplace({c: 2})
 
-        expected = '0.1*u(x, y) - 0.6*u(x - h_x, y) + 0.6*u(x + h_x, y) + 2'
+        expected = 0.1*u - 0.6*u._subs(x, x - h_x) + 0.6*u.subs(x, x + h_x) + 2
 
-        assert expected == str(eq.evaluate.lhs)
+        assert sp.simplify(expected - eq.evaluate.lhs) == 0
 
     @pytest.mark.parametrize('order', [1, 2, 6, 8])
     @pytest.mark.parametrize('extent', [1., 10., 100.])
@@ -267,7 +269,8 @@ class TestSC(object):
         eq_f = Eq(f, f.dx2, coefficients=Substitutions(coeffs_f))
         eq_g = Eq(g, g.dx2, coefficients=Substitutions(coeffs_g))
 
-        Operator([eq_f, eq_g])()
+        op = Operator([eq_f, eq_g])
+        op()
 
         assert np.allclose(f.data, g.data, atol=1e-7)
 
@@ -302,6 +305,25 @@ class TestSC(object):
         Operator([eq_f, eq_g])()
 
         assert np.allclose(f.data, g.data, atol=1e-7)
+
+    def test_staggered_function_evalat(self):
+        grid = Grid(shape=(11,), extent=(10.,))
+        x = grid.dimensions[0]
+
+        f = Function(name='f', grid=grid, space_order=2,
+                     coefficients='symbolic')
+        g = Function(name='g', grid=grid, space_order=2,
+                     coefficients='symbolic', staggered=x)
+
+        w = Function(name='w', space_order=0, shape=(3,),
+                     dimensions=(Dimension("p"),))
+        coeffs_g = Coefficient(2, g, x, w)
+
+        eq_fg = Eq(f, g.dx2, coefficients=Substitutions(coeffs_g))
+
+        expected = 'Eq(f(x), g(x - h_x/2)*w[0] + g(x + h_x/2)*w[1])'
+
+        assert str(eq_fg.evaluate) == expected
 
     def test_staggered_equation(self):
         """
@@ -419,10 +441,10 @@ class TestSC(object):
         coeffs0 = np.array([100, 100, 100])
         coeffs1 = np.array([200, 200, 200])
 
-        subs = Substitutions(Coefficient(1, p, x, coeffs0),
-                             Coefficient(1, p, y, coeffs1))
+        subs = Substitutions(Coefficient(2, p, x, coeffs0),
+                             Coefficient(2, p, y, coeffs1))
 
-        eq = Eq(p.forward, p.dx.dy, coefficients=subs)
+        eq = Eq(p.forward, p.dx2.dy2, coefficients=subs)
 
         mul = lambda e: sp.Mul(e, 200, evaluate=False)
         term0 = mul(p*100 +
@@ -436,7 +458,7 @@ class TestSC(object):
                     p.subs({x: x+hx, y: y+hy})*100)
 
         # `str` simply because some objects are of type EvalDerivative
-        assert str(eq.evaluate.rhs) == str(term0 + term1 + term2)
+        assert sp.simplify(eq.evaluate.rhs - term0 - term1 - term2) == 0
 
     def test_compound_subs(self):
         grid = Grid(shape=(11,))
@@ -449,16 +471,16 @@ class TestSC(object):
 
         coeffs0 = np.array([100, 100, 100])
 
-        subs = Substitutions(Coefficient(1, p, x, coeffs0))
+        subs = Substitutions(Coefficient(2, p, x, coeffs0))
 
-        eq = Eq(p.forward, (f*p).dx, coefficients=subs)
+        eq = Eq(p.forward, (f*p).dx2, coefficients=subs)
 
         term0 = f*p*100
         term1 = (f*p*100).subs(x, x-hx)
         term2 = (f*p*100).subs(x, x+hx)
 
         # `str` simply because some objects are of type EvalDerivative
-        assert str(eq.evaluate.rhs) == str(term0 + term1 + term2)
+        assert sp.simplify(eq.evaluate.rhs - (term0 + term1 + term2)) == 0
 
     def test_compound_nested_subs(self):
         grid = Grid(shape=(11, 11))
@@ -472,10 +494,10 @@ class TestSC(object):
         coeffs0 = np.array([100, 100, 100])
         coeffs1 = np.array([200, 200, 200])
 
-        subs = Substitutions(Coefficient(1, p, x, coeffs0),
-                             Coefficient(1, p, y, coeffs1))
+        subs = Substitutions(Coefficient(2, p, x, coeffs0),
+                             Coefficient(2, p, y, coeffs1))
 
-        eq = Eq(p.forward, (f*p.dx).dy, coefficients=subs)
+        eq = Eq(p.forward, (f*p.dx2).dy2, coefficients=subs)
 
         mul = lambda e, i: sp.Mul(f.subs(y, y+i*hy), e, 200, evaluate=False)
         term0 = mul(p*100 +
@@ -489,4 +511,11 @@ class TestSC(object):
                     p.subs({x: x+hx, y: y+hy})*100, 1)
 
         # `str` simply because some objects are of type EvalDerivative
-        assert str(eq.evaluate.rhs) == str(term0 + term1 + term2)
+        assert sp.simplify(eq.evaluate.rhs - (term0 + term1 + term2)) == 0
+
+    def test_priority(self):
+        grid = Grid(shape=(11,))
+        m = Function(name='m', grid=grid, space_order=2, coefficients='symbolic')
+        p = Function(name='p', grid=grid, space_order=2)
+
+        assert (p*m).coefficients == 'taylor'

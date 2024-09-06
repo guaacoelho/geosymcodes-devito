@@ -1,8 +1,8 @@
-from itertools import takewhile
+from collections import defaultdict
+from functools import cached_property
 
 import numpy as np
 import cgen as c
-from cached_property import cached_property
 from sympy import And, Max, true
 
 from devito.data import FULL
@@ -13,7 +13,7 @@ from devito.ir import (Conditional, DummyEq, Dereference, Expression,
                        retrieve_iteration_tree, IMask, VECTORIZED)
 from devito.passes.iet.engine import iet_pass
 from devito.passes.iet.langbase import (LangBB, LangTransformer, DeviceAwareMixin,
-                                        make_sections_from_imask)
+                                        ShmTransformer, make_sections_from_imask)
 from devito.symbolics import INT, ccode
 from devito.tools import as_tuple, flatten, is_integer, prod
 from devito.types import Symbol
@@ -43,15 +43,15 @@ class PragmaSimdTransformer(PragmaTransformer):
         return True
 
     @property
-    def simd_reg_size(self):
-        return self.platform.simd_reg_size
+    def simd_reg_nbytes(self):
+        return self.platform.simd_reg_nbytes
 
     def _make_simd_pragma(self, iet):
         indexeds = FindSymbols('indexeds').visit(iet)
-        aligned = {i.name for i in indexeds if i.function.is_DiscreteFunction}
+        aligned = {i.base for i in indexeds if i.function.is_DiscreteFunction}
         if aligned:
             simd = self.lang['simd-for-aligned']
-            simd = as_tuple(simd(','.join(sorted(aligned)), self.simd_reg_size))
+            simd = as_tuple(simd(self.simd_reg_nbytes, *aligned))
         else:
             simd = as_tuple(self.lang['simd-for'])
 
@@ -146,8 +146,7 @@ class PragmaIteration(ParallelIteration):
             reduction=reduction, schedule=schedule, tile=tile, gpu_fit=gpu_fit,
             **kwargs
         )
-        pragma = c.Pragma(' '.join([construct] + clauses))
-        kwargs['pragmas'] = pragma
+        kwargs['pragmas'] = Pragma(' '.join([construct] + clauses))
 
         super().__init__(*args, **kwargs)
 
@@ -175,7 +174,7 @@ class PragmaIteration(ParallelIteration):
         Build a string representing of a reduction clause given a list of
         2-tuples `(symbol, ir.Operation)`.
         """
-        args = []
+        mapper = defaultdict(list)
         for i, imask, r in reductions:
             if i.is_Indexed:
                 f = i.function
@@ -190,10 +189,13 @@ class PragmaIteration(ParallelIteration):
                     else:
                         assert isinstance(k, tuple) and len(k) == 2
                         bounds.append('[%s:%s]' % k)
-                args.append('%s%s' % (i.name, ''.join(bounds)))
+                mapper[r.name].append('%s%s' % (i.name, ''.join(bounds)))
             else:
-                args.append(str(i))
-        return 'reduction(%s:%s)' % (r.name, ','.join(args))
+                mapper[r.name].append(str(i))
+
+        args = ['reduction(%s:%s)' % (k, ','.join(v)) for k, v in mapper.items()]
+
+        return ' '.join(args)
 
     @cached_property
     def collapsed(self):
@@ -204,164 +206,16 @@ class PragmaIteration(ParallelIteration):
         return tuple(ret)
 
 
-class PragmaShmTransformer(PragmaSimdTransformer):
+class PragmaShmTransformer(ShmTransformer, PragmaSimdTransformer):
 
     """
-    Abstract base class for PragmaTransformers capable of emitting SIMD-parallel
-    and shared-memory-parallel IETs.
+    PragmaTransformer capable of emitting SIMD-parallel and shared-memory-parallel
+    IETs for CPUs.
     """
 
     def __init__(self, sregistry, options, platform, compiler):
-        """
-        Parameters
-        ----------
-        sregistry : SymbolRegistry
-            The symbol registry, to access the symbols appearing in an IET.
-        options : dict
-             The optimization options. Accepted: ['par-collapse-ncores',
-             'par-collapse-work', 'par-chunk-nonaffine', 'par-dynamic-work', 'par-nested']
-             * 'par-collapse-ncores': use a collapse clause if the number of
-               available physical cores is greater than this threshold.
-             * 'par-collapse-work': use a collapse clause if the trip count of the
-               collapsable Iterations is statically known to exceed this threshold.
-             * 'par-chunk-nonaffine': coefficient to adjust the chunk size in
-               non-affine parallel Iterations.
-             * 'par-dynamic-work': use dynamic scheduling if the operation count per
-               iteration exceeds this threshold. Otherwise, use static scheduling.
-             * 'par-nested': nested parallelism if the number of hyperthreads per core
-               is greater than this threshold.
-        platform : Platform
-            The underlying platform.
-        compiler : Compiler
-            The underlying JIT compiler.
-        """
         key = lambda i: i.is_ParallelRelaxed and not i.is_Vectorized
-        super().__init__(key, sregistry, platform, compiler)
-
-        self.collapse_ncores = options['par-collapse-ncores']
-        self.collapse_work = options['par-collapse-work']
-        self.chunk_nonaffine = options['par-chunk-nonaffine']
-        self.dynamic_work = options['par-dynamic-work']
-        self.nested = options['par-nested']
-
-    @property
-    def ncores(self):
-        return self.platform.cores_physical
-
-    @property
-    def nhyperthreads(self):
-        return self.platform.threads_per_core
-
-    @property
-    def nthreads(self):
-        return self.sregistry.nthreads
-
-    @property
-    def nthreads_nested(self):
-        return self.sregistry.nthreads_nested
-
-    @property
-    def nthreads_nonaffine(self):
-        return self.sregistry.nthreads_nonaffine
-
-    @property
-    def threadid(self):
-        return self.sregistry.threadid
-
-    def _score_candidate(self, n0, root, collapsable=()):
-        """
-        The score of a collapsable nest depends on the number of fully-parallel
-        Iterations and their position in the nest (the outer, the better).
-        """
-        nest = [root] + list(collapsable)
-        n = len(nest)
-
-        # Number of fully-parallel collapsable Iterations
-        key = lambda i: i.is_ParallelNoAtomic
-        fp_iters = list(takewhile(key, nest))
-        n_fp_iters = len(fp_iters)
-
-        # Number of parallel-if-atomic collapsable Iterations
-        key = lambda i: i.is_ParallelAtomic
-        pia_iters = list(takewhile(key, nest))
-        n_pia_iters = len(pia_iters)
-
-        # Prioritize the Dimensions that are more likely to define larger
-        # iteration spaces
-        key = lambda d: (not d.is_Derived or
-                         (d.is_Custom and not is_integer(d.symbolic_size)) or
-                         (d.is_Block and d._depth == 1))
-
-        fpdims = [i.dim for i in fp_iters]
-        n_fp_iters_large = len([d for d in fpdims if key(d)])
-
-        piadims = [i.dim for i in pia_iters]
-        n_pia_iters_large = len([d for d in piadims if key(d)])
-
-        return (
-            int(n_fp_iters == n),  # Fully-parallel nest
-            n_fp_iters_large,
-            n_fp_iters,
-            n_pia_iters_large,
-            n_pia_iters,
-            -(n0 + 1),  # The outer, the better
-            n,
-        )
-
-    def _select_candidates(self, candidates):
-        assert candidates
-
-        if self.ncores < self.collapse_ncores:
-            return candidates[0], []
-
-        mapper = {}
-        for n0, root in enumerate(candidates):
-
-            # Score `root` in isolation
-            mapper[(root, ())] = self._score_candidate(n0, root)
-
-            collapsable = []
-            for n, i in enumerate(candidates[n0+1:], n0+1):
-                # The Iteration nest [root, ..., i] must be perfect
-                if not IsPerfectIteration(depth=i).visit(root):
-                    break
-
-                # Loops are collapsable only if none of the iteration variables
-                # appear in initializer expressions. For example, the following
-                # two loops cannot be collapsed
-                #
-                # for (i = ... )
-                #   for (j = i ...)
-                #     ...
-                #
-                # Here, we make sure this won't happen
-                if any(j.dim in i.symbolic_min.free_symbols for j in candidates[n0:n]):
-                    break
-
-                # Can't collapse SIMD-vectorized Iterations
-                if i.is_Vectorized:
-                    break
-
-                # Would there be enough work per parallel iteration?
-                nested = candidates[n+1:]
-                if nested:
-                    try:
-                        work = prod([int(j.dim.symbolic_size) for j in nested])
-                        if work < self.collapse_work:
-                            break
-                    except TypeError:
-                        pass
-
-                collapsable.append(i)
-
-                # Score `root + collapsable`
-                v = tuple(collapsable)
-                mapper[(root, v)] = self._score_candidate(n0, root, v)
-
-        # Retrieve the candidates with highest score
-        root, collapsable = max(mapper, key=mapper.get)
-
-        return root, list(collapsable)
+        super().__init__(key, sregistry, options, platform, compiler)
 
     def _make_reductions(self, partree):
         if not any(i.is_ParallelAtomic for i in partree.collapsed):
@@ -518,7 +372,8 @@ class PragmaShmTransformer(PragmaSimdTransformer):
 
         return partree
 
-    def _make_parallel(self, iet):
+    @iet_pass
+    def _make_parallel(self, iet, sync_mapper=None):
         mapper = {}
         parrays = {}
         for tree in retrieve_iteration_tree(iet, mode='superset'):
@@ -530,6 +385,12 @@ class PragmaShmTransformer(PragmaSimdTransformer):
             # Ignore if already a ParallelIteration (e.g., by-product of
             # recursive compilation)
             if any(isinstance(n, ParallelIteration) for n in candidates):
+                continue
+
+            # Ignore if already part of an asynchronous region of code
+            # (e.g., an Iteartion embedded within a SyncSpot defining an
+            # asynchronous operation)
+            if any(n in sync_mapper for n in candidates):
                 continue
 
             # Outer parallelism
@@ -558,19 +419,19 @@ class PragmaShmTransformer(PragmaSimdTransformer):
 
         return iet, {'includes': [self.lang['header']]}
 
-    @iet_pass
-    def make_parallel(self, iet):
-        return self._make_parallel(iet)
+    def make_parallel(self, graph):
+        return self._make_parallel(graph, sync_mapper=graph.sync_mapper)
 
 
 class PragmaTransfer(Pragma, Transfer):
 
     """
-    A data transfer between host and device expressed by means of one or more pragmas.
+    A data transfer between host and device expressed by means of one or
+    more pragmas.
     """
 
-    def __init__(self, callback, function, imask=None, arguments=None):
-        super().__init__(callback, arguments)
+    def __init__(self, pragma, function, imask=None, arguments=None):
+        super().__init__(pragma, arguments)
 
         self._function = function
         self._imask = imask
@@ -589,13 +450,6 @@ class PragmaTransfer(Pragma, Transfer):
     def sections(self):
         return make_sections_from_imask(self.function, self.imask)
 
-    @cached_property
-    def pragmas(self):
-        # Stringify sections
-        sections = ''.join(['[%s:%s]' % (ccode(i), ccode(j)) for i, j in self.sections])
-        arguments = [ccode(i) for i in self.arguments]
-        return as_tuple(self.callback(self.function.name, sections, *arguments))
-
     @property
     def functions(self):
         return (self.function,)
@@ -609,6 +463,14 @@ class PragmaTransfer(Pragma, Transfer):
             except AttributeError:
                 pass
         return tuple(retval)
+
+    @cached_property
+    def _generate(self):
+        # Stringify sections
+        sections = ''.join(['[%s:%s]' % (ccode(i), ccode(j))
+                            for i, j in self.sections])
+        arguments = [ccode(i) for i in self.arguments]
+        return self.pragma % (self.function.name, sections, *arguments)
 
 
 class PragmaDeviceAwareTransformer(DeviceAwareMixin, PragmaShmTransformer):
@@ -727,13 +589,13 @@ class PragmaLangBB(LangBB):
 
     @classmethod
     def _map_to(cls, f, imask=None, qid=None):
-        return PragmaTransfer(cls.mapper['map-enter-to'], f, imask)
+        return cls.mapper['map-enter-to'](f, imask)
 
     _map_to_wait = _map_to
 
     @classmethod
     def _map_alloc(cls, f, imask=None):
-        return PragmaTransfer(cls.mapper['map-enter-alloc'], f, imask)
+        return cls.mapper['map-enter-alloc'](f, imask)
 
     @classmethod
     def _map_present(cls, f, imask=None):
@@ -744,26 +606,26 @@ class PragmaLangBB(LangBB):
 
     @classmethod
     def _map_update(cls, f, imask=None):
-        return PragmaTransfer(cls.mapper['map-update'], f, imask)
+        return cls.mapper['map-update'](f, imask)
 
     @classmethod
     def _map_update_host(cls, f, imask=None, qid=None):
-        return PragmaTransfer(cls.mapper['map-update-host'], f, imask)
+        return cls.mapper['map-update-host'](f, imask)
 
     _map_update_host_async = _map_update_host
 
     @classmethod
     def _map_update_device(cls, f, imask=None, qid=None):
-        return PragmaTransfer(cls.mapper['map-update-device'], f, imask)
+        return cls.mapper['map-update-device'](f, imask)
 
     _map_update_device_async = _map_update_device
 
     @classmethod
     def _map_release(cls, f, imask=None, devicerm=None):
         if devicerm:
-            return PragmaTransfer(cls.mapper['map-release-if'], f, imask, devicerm)
+            return cls.mapper['map-release-if'](f, imask, devicerm)
         else:
-            return PragmaTransfer(cls.mapper['map-release'], f, imask)
+            return cls.mapper['map-release'](f, imask)
 
 
 # Utils

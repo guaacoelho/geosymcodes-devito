@@ -6,15 +6,18 @@ import numpy as np
 
 from sympy import Expr, Symbol
 from devito import (Constant, Dimension, Grid, Function, solve, TimeFunction, Eq,  # noqa
-                    Operator, SubDimension, norm, Le, Ge, Gt, Lt, Abs, sin, cos, Min, Max)
+                    Operator, SubDimension, norm, Le, Ge, Gt, Lt, Abs, sin, cos,
+                    Min, Max)
 from devito.ir import Expression, FindNodes
 from devito.symbolics import (retrieve_functions, retrieve_indexed, evalrel,  # noqa
                               CallFromPointer, Cast, DefFunction, FieldFromPointer,
-                              INT, FieldFromComposite, IntDiv, ccode, uxreplace,
+                              INT, FieldFromComposite, IntDiv, Namespace, Rvalue,
+                              ReservedWord, ListInitializer, ccode, uxreplace,
                               retrieve_derivatives)
 from devito.tools import as_tuple
 from devito.types import (Array, Bundle, FIndexed, LocalObject, Object,
                           Symbol as dSymbol)
+from devito.types.basic import AbstractSymbol
 
 
 def test_float_indices():
@@ -66,6 +69,46 @@ def test_floatification_issue_1627(dtype, expected):
     exprs = FindNodes(Expression).visit(op)
     assert len(exprs) == 2
     assert str(exprs[0]) == expected
+
+
+def test_sympy_assumptions():
+    """
+    Ensure that AbstractSymbol assumptions are set correctly and
+    preserved during rebuild.
+    """
+    s0 = AbstractSymbol('s')
+    s1 = AbstractSymbol('s', nonnegative=True, integer=False, real=True)
+
+    assert s0.is_negative is None
+    assert s0.is_positive is None
+    assert s0.is_integer is None
+    assert s0.is_real is True
+    assert s1.is_negative is False
+    assert s1.is_positive is True
+    assert s1.is_integer is False
+    assert s1.is_real is True
+
+    s0r = s0._rebuild()
+    s1r = s1._rebuild()
+
+    assert s0.assumptions0 == s0r.assumptions0
+    assert s0 == s0r
+
+    assert s1.assumptions0 == s1r.assumptions0
+    assert s1 == s1r
+
+
+def test_modified_sympy_assumptions():
+    """
+    Check that sympy assumptions can be changed during a rebuild.
+    """
+    s0 = AbstractSymbol('s')
+    s1 = AbstractSymbol('s', nonnegative=True, integer=False, real=True)
+
+    s2 = s0._rebuild(nonnegative=True, integer=False, real=True)
+
+    assert s2.assumptions0 == s1.assumptions0
+    assert s2 == s1
 
 
 def test_constant():
@@ -258,6 +301,18 @@ def test_integer_abs():
     assert ccode(Abs(i1 - .5)) == "fabs(i1 - 5.0e-1F)"
 
 
+def test_cos_vs_cosf():
+    a = dSymbol('a', dtype=np.float32)
+    assert ccode(cos(a)) == "cosf(a)"
+
+    b = dSymbol('b', dtype=np.float64)
+    assert ccode(cos(b)) == "cos(b)"
+
+    # Doesn't make much sense, but it's legal
+    c = dSymbol('c', dtype=np.int32)
+    assert ccode(cos(c)) == "cos(c)"
+
+
 def test_intdiv():
     a = Symbol('a')
     b = Symbol('b')
@@ -287,6 +342,52 @@ def test_intdiv():
     assert ccode(v) == 'b*((a + b) / 2) + 3'
 
 
+def test_def_function():
+    foo0 = DefFunction('foo', arguments=['a', 'b'], template=['int'])
+    foo1 = DefFunction('foo', arguments=['a', 'b'], template=['int'])
+    foo2 = DefFunction('foo', arguments=['a', 'b'])
+    foo3 = DefFunction('foo', arguments=['a'])
+
+    # Code generation
+    assert str(foo0) == 'foo<int>(a, b)'
+    assert str(foo3) == 'foo(a)'
+
+    # Hashing and equality
+    assert hash(foo0) == hash(foo1)
+    assert foo0 == foo1
+    assert hash(foo0) != hash(foo2)
+    assert hash(foo2) != hash(foo3)
+
+    # Reconstruction
+    assert foo0 == foo0._rebuild()
+    assert str(foo0._rebuild('bar', template=['float'])) == 'bar<float>(a, b)'
+
+
+def test_namespace():
+    ns0 = Namespace(['std', 'algorithms', 'parallel'])
+    assert str(ns0) == 'std::algorithms::parallel'
+
+    ns1 = Namespace(['std'])
+    ns2 = Namespace(['std', 'algorithms', 'parallel'])
+
+    # Test hashing and equality
+    assert hash(ns0) != hash(ns1)  # Same reason as above
+    assert ns0 != ns1
+    assert hash(ns0) == hash(ns2)
+    assert ns0 == ns2
+
+    # Free symbols
+    assert not ns0.free_symbols
+
+
+def test_rvalue():
+    ctype = ReservedWord('dummytype')
+    ns = Namespace(['my', 'namespace'])
+    init = ListInitializer(())
+
+    assert str(Rvalue(ctype, ns, init)) == 'my::namespace::dummytype{}'
+
+
 def test_cast():
     s = Symbol(name='s', dtype=np.float32)
 
@@ -305,14 +406,28 @@ def test_cast():
 
 def test_findexed():
     grid = Grid(shape=(3, 3, 3))
+    x, y, z = grid.dimensions
+
     f = Function(name='f', grid=grid)
 
-    fi = FIndexed.from_indexed(f.indexify(), "foo", strides=(1, 2))
-    new_fi = fi.func(strides=(3, 4))
+    strides_map = {x: 1, y: 2, z: 3}
+    fi = FIndexed(f.base, x+1, y, z-2, strides_map=strides_map)
+    assert ccode(fi) == 'f(x + 1, y, z - 2)'
+
+    # Binding
+    _, fi1 = fi.bind('fL')
+    assert fi1.base is f.base
+    assert ccode(fi1) == 'fL(x + 1, y, z - 2)'
+
+    # Reconstruction
+    strides_map = {x: 3, y: 2, z: 1}
+    new_fi = fi.func(strides_map=strides_map, accessor=fi1.accessor)
 
     assert new_fi.name == fi.name == 'f'
+    assert new_fi.accessor == fi1.accessor
+    assert new_fi.accessor.name == 'fL'
     assert new_fi.indices == fi.indices
-    assert new_fi.strides == (3, 4)
+    assert new_fi.strides_map == strides_map
 
 
 def test_symbolic_printing():
@@ -329,9 +444,9 @@ def test_symbolic_printing():
 
     grid = Grid((10,))
     f = Function(name="f", grid=grid)
-    fi = FIndexed.from_indexed(f.indexify(), "foo", strides=(1, 2))
+    fi = FIndexed(f.base, grid.dimensions[0])
     df = DefFunction('aaa', arguments=[fi])
-    assert ccode(df) == 'aaa(foo(x))'
+    assert ccode(df) == 'aaa(f(x))'
 
 
 def test_is_on_grid():
@@ -340,9 +455,9 @@ def test_is_on_grid():
     x0 = x + .5 * x.spacing
     u = Function(name="u", grid=grid, space_order=2)
 
-    assert u._is_on_grid
-    assert not u.subs({x: x0})._is_on_grid
-    assert all(uu._is_on_grid for uu in retrieve_functions(u.subs({x: x0}).evaluate))
+    assert u._grid_map == {}
+    assert u.subs({x: x0})._grid_map == {x: x0}
+    assert all(uu._grid_map == {} for uu in retrieve_functions(u.subs({x: x0}).evaluate))
 
 
 @pytest.mark.parametrize('expr,expected', [
@@ -447,7 +562,7 @@ def test_minmax():
     assert np.all(f.data == 4)
 
 
-class TestRelationsWithAssumptions(object):
+class TestRelationsWithAssumptions:
 
     def test_multibounds_op(self):
         """

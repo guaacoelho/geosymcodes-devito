@@ -1,4 +1,5 @@
-from cached_property import cached_property
+from functools import cached_property
+
 import sympy
 
 from devito.ir.equations.algorithms import dimension_sort, lower_exprs
@@ -7,7 +8,7 @@ from devito.ir.support import (GuardFactor, Interval, IntervalGroup, IterationSp
                                Stencil, detect_io, detect_accesses)
 from devito.symbolics import IntDiv, uxreplace
 from devito.tools import Pickable, Tag, frozendict
-from devito.types import Eq, Inc, ReduceMax, ReduceMin
+from devito.types import Eq, Inc, ReduceMax, ReduceMin, relational_min
 
 __all__ = ['LoweredEq', 'ClusterizedEq', 'DummyEq', 'OpInc', 'OpMin', 'OpMax']
 
@@ -70,7 +71,10 @@ class IREq(sympy.Eq, Pickable):
         """
         args = [func(self.lhs), func(self.rhs)]
         kwargs = dict(self.state)
-        kwargs['conditionals'] = {k: func(v) for k, v in self.conditionals.items()}
+
+        conditionals = {k: func(v) for k, v in self.conditionals.items()}
+        kwargs['conditionals'] = frozendict(conditionals)
+
         return self.func(*args, **kwargs)
 
     def __repr__(self):
@@ -79,7 +83,7 @@ class IREq(sympy.Eq, Pickable):
         elif self.operation is OpInc:
             return '%s += %s' % (self.lhs, self.rhs)
         else:
-            return '%s = %s(%s, %s)' % (self.lhs, self.operation, self.lhs, self.rhs)
+            return '%s = %s(%s)' % (self.lhs, self.operation, self.rhs)
 
     # Pickling support
     __reduce_ex__ = Pickable.__reduce_ex__
@@ -190,16 +194,23 @@ class LoweredEq(IREq):
             if d.condition is None:
                 conditionals[d] = GuardFactor(d)
             else:
-                conditionals[d] = diff2sympy(lower_exprs(d.condition))
-            if d.factor is not None:
-                expr = uxreplace(expr, {d: IntDiv(d.index, d.factor)})
+                cond = diff2sympy(lower_exprs(d.condition))
+                if d._factor is not None:
+                    cond = sympy.And(cond, GuardFactor(d))
+                conditionals[d] = cond
+            # Replace dimension with index
+            index = d.index
+            if d.condition is not None and d in expr.free_symbols:
+                index = index - relational_min(d.condition, d.parent)
+            expr = uxreplace(expr, {d: IntDiv(index, d.factor)})
+
         conditionals = frozendict(conditionals)
 
         # Lower all Differentiable operations into SymPy operations
         rhs = diff2sympy(expr.rhs)
 
         # Finally create the LoweredEq with all metadata attached
-        expr = super(LoweredEq, cls).__new__(cls, expr.lhs, rhs, evaluate=False)
+        expr = super().__new__(cls, expr.lhs, rhs, evaluate=False)
 
         expr._ispace = ispace
         expr._conditionals = conditionals

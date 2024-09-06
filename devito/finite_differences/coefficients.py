@@ -1,14 +1,15 @@
+from functools import cached_property
+
 import numpy as np
-from cached_property import cached_property
 
 from devito.finite_differences import Weights, generate_indices
-from devito.finite_differences.tools import numeric_weights, symbolic_weights
+from devito.finite_differences.tools import numeric_weights
 from devito.tools import filter_ordered, as_tuple
 
 __all__ = ['Coefficient', 'Substitutions', 'default_rules']
 
 
-class Coefficient(object):
+class Coefficient:
     """
     Prepare custom coefficients to pass to a Substitutions object.
 
@@ -89,7 +90,7 @@ class Coefficient(object):
         The dimension to which the coefficients will be applied plus the offset
         in that dimension if the function is staggered.
         """
-        return self._function.indices_ref[self._dimension]
+        return self._dimension
 
     @property
     def weights(self):
@@ -117,7 +118,7 @@ class Coefficient(object):
         return
 
 
-class Substitutions(object):
+class Substitutions:
     """
     Devito class to convert Coefficient objects into replacent rules
     to be applied when constructing a Devito Eq.
@@ -131,7 +132,7 @@ class Substitutions(object):
 
     Now define some partial d/dx FD coefficients of the Function u:
 
-    >>> u_x_coeffs = Coefficient(1, u, x, np.array([-0.6, 0.1, 0.6]))
+    >>> u_x_coeffs = Coefficient(2, u, x, np.array([-0.6, 0.1, 0.6]))
 
     And now create our Substitutions object to pass to equation:
 
@@ -141,7 +142,7 @@ class Substitutions(object):
     Now create a Devito equation and pass to it 'subs'
 
     >>> from devito import Eq
-    >>> eq = Eq(u.dt+u.dx, coefficients=subs)
+    >>> eq = Eq(u.dt+u.dx2, coefficients=subs)
 
     When evaluated, the derivatives will use the custom coefficients. We can
     check that by
@@ -231,7 +232,7 @@ def default_rules(obj, functions):
 
     from devito.symbolics.search import retrieve_dimensions
 
-    def generate_subs(deriv_order, function, index):
+    def generate_subs(deriv_order, function, index, indices):
         dim = retrieve_dimensions(index)[0]
 
         if dim.is_Time:
@@ -244,38 +245,29 @@ def default_rules(obj, functions):
 
         subs = {}
 
-        mapper = {dim: index}
-        # Get full range of indices and weights
-        indices, x0 = generate_indices(function, dim,
-                                       fd_order, side=None, x0=mapper)
-        sweights = symbolic_weights(function, deriv_order, indices, x0)
-
         # Actual FD used indices and weights
         if deriv_order == 1 and fd_order == 2:
             fd_order = 1
 
-        indices, x0 = generate_indices(function, dim,
-                                       fd_order, side=None, x0=mapper)
-
-        coeffs = numeric_weights(deriv_order, indices, x0)
+        coeffs = numeric_weights(function, deriv_order, indices, index)
 
         for (c, i) in zip(coeffs, indices):
             subs.update({function._coeff_symbol(i, deriv_order, function, index): c})
 
-        # Set all unused weights to zero
-        subs.update({w: 0 for w in sweights if w not in subs})
-
         return subs
 
     # Determine which 'rules' are missing
-
     sym = get_sym(functions)
     terms = obj.find(sym)
     for i in obj.find(Weights):
         for w in i.weights:
             terms.update(w.find(sym))
 
-    args_present = filter_ordered(term.args[1:] for term in terms)
+    args_present = {}
+    for term in terms:
+        key = term.args[1:]
+        idx = term.args[0]
+        args_present.setdefault(key, []).append(idx)
 
     subs = obj.substitutions
     if subs:
@@ -289,7 +281,7 @@ def default_rules(obj, functions):
     args_provided = list(set(args_provided))
 
     rules = {}
-    not_provided = []
+    not_provided = {}
     for i0 in args_present:
         if any(i0 == i1 for i1 in args_provided):
             # Perfect match, as expected by the legacy custom coeffs API
@@ -304,18 +296,20 @@ def default_rules(obj, functions):
         try:
             for k, v in subs.rules.items():
                 ofs, do, f, d = k.args
-                if deriv_order == do and dim is d and f in expr._functions:
-                    mapper[k.func(ofs, do, expr, d)] = v
+                is_dim = dim == expr.indices_ref[d]
+                if deriv_order == do and is_dim and f in expr._functions:
+                    mapper[k.func(ofs, do, expr, expr.indices_ref[d])] = v
         except AttributeError:
-            assert subs is None
+            # assert subs is None
+            pass
 
         if mapper:
             rules.update(mapper)
         else:
-            not_provided.append(i0)
+            not_provided.update({i0: args_present[i0]})
 
-    for i in not_provided:
-        rules = {**rules, **generate_subs(*i)}
+    for i, indices in not_provided.items():
+        rules = {**rules, **generate_subs(*i, indices)}
 
     return rules
 

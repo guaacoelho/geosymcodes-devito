@@ -4,7 +4,6 @@
 ##############################################################
 
 ARG ROCM_VERSION=5.5.1
-ARG arch="aomp"
 
 FROM rocm/dev-ubuntu-22.04:${ROCM_VERSION}-complete as sdk-base
 
@@ -38,9 +37,6 @@ RUN rm /etc/apt/sources.list.d/* \
     hwloc \
   && apt-get clean
 
-# Until rocm base has it fixed
-RUN ln -s /opt/rocm/llvm/bin/offload-arch /opt/rocm/bin/offload-arch
-
 # Requires cmake > 3.22 
 RUN mkdir -p /opt/cmake  \
   && wget --no-check-certificate --quiet -O - https://cmake.org/files/v3.22/cmake-3.22.2-linux-x86_64.tar.gz | tar --strip-components=1 -xz -C /opt/cmake
@@ -49,13 +45,15 @@ ENV ROCM_HOME=/opt/rocm \
     UCX_HOME=/opt/ucx \
     OMPI_HOME=/opt/ompi
 
+# Until rocm base has it fixed
+RUN ln -s /opt/rocm/llvm/bin/offload-arch /opt/rocm/bin/offload-arch
+
 # Install tmpi
 RUN curl https://raw.githubusercontent.com/Azrael3000/tmpi/master/tmpi -o /usr/local/bin/tmpi
 
 # Adding rocm/cmake to the Environment 
 ENV PATH=$ROCM_HOME/bin:$ROCM_HOME/profiler/bin:$ROCM_HOME/opencl/bin:/opt/cmake/bin:$PATH \
     LD_LIBRARY_PATH=$ROCM_HOME/lib:$ROCM_HOME/lib64:$ROCM_HOME/llvm/lib:$LD_LIBRARY_PATH \
-    LIBRARY_PATH=$ROCM_HOME/lib:$ROCM_HOME/lib64:$LIBRARY_PATH \
     C_INCLUDE_PATH=$ROCM_HOME/include:$C_INCLUDE_PATH \
     CPLUS_INCLUDE_PATH=$ROCM_HOME/include:$CPLUS_INCLUDE_PATH \
     CPATH=$ROCM_HOME/include:$CPATH \
@@ -106,7 +104,6 @@ RUN rm -rf /tmp/ucx && rm -rf /tmp/ompi
 # Adding OpenMPI and UCX to Environment
 ENV PATH=$OMPI_HOME/bin:$UCX_HOME/bin:$PATH \
     LD_LIBRARY_PATH=$OMPI_HOME/lib:$UCX_HOME/lib:$LD_LIBRARY_PATH \
-    LIBRARY_PATH=$OMPI_HOME/lib:$UCX_HOME/lib:$LIBRARY_PATH \
     C_INCLUDE_PATH=$OMPI_HOME/include:$UCX_HOME/include:$C_INCLUDE_PATH \ 
     CPLUS_INCLUDE_PATH=$OMPI_HOME/include:$UCX_HOME/include:$CPLUS_INCLUDE_PATH \ 
     CPATH=$OMPI_HOME/include:$UCX_HOME/include:$CPATH \

@@ -1,6 +1,7 @@
+from functools import cached_property
+
 import numpy as np
 import pytest
-from cached_property import cached_property
 
 from sympy import Mul  # noqa
 
@@ -11,20 +12,18 @@ from devito import (NODE, Eq, Inc, Constant, Function, TimeFunction,  # noqa
                     ConditionalDimension, DefaultDimension, Grid, Operator,
                     norm, grad, div, dimensions, switchconfig, configuration,
                     centered, first_derivative, solve, transpose, Abs, cos,
-                    sin, sqrt)
+                    sin, sqrt, floor, Ge, Lt)
 from devito.exceptions import InvalidArgument, InvalidOperator
-from devito.finite_differences.differentiable import diffify
 from devito.ir import (Conditional, DummyEq, Expression, Iteration, FindNodes,
                        FindSymbols, ParallelIteration, retrieve_iteration_tree)
 from devito.passes.clusters.aliases import collect
 from devito.passes.clusters.factorization import collect_nested
-from devito.passes.clusters.cse import Temp, _cse
 from devito.passes.iet.parpragma import VExpanded
 from devito.symbolics import (INT, FLOAT, DefFunction, FieldFromPointer,  # noqa
                               IndexedPointer, Keyword, SizeOf, estimate_cost,
                               pow_to_mul, indexify)
-from devito.tools import as_tuple, generator
-from devito.types import Array, Scalar, Symbol, PrecomputedSparseTimeFunction
+from devito.tools import as_tuple
+from devito.types import Scalar, Symbol, PrecomputedSparseTimeFunction
 
 from examples.seismic.acoustic import AcousticWaveSolver
 from examples.seismic import demo_model, AcquisitionGeometry
@@ -53,104 +52,6 @@ def test_scheduling_after_rewrite():
     assert all(trees[1].root.dim is tree.root.dim for tree in trees[1:])
 
 
-@pytest.mark.parametrize('exprs,expected,min_cost', [
-    # Simple cases
-    (['Eq(tu, 2/(t0 + t1))', 'Eq(ti0, t0 + t1)', 'Eq(ti1, t0 + t1)'],
-     ['t0 + t1', '2/r0', 'r0', 'r0'], 0),
-    (['Eq(tu, 2/(t0 + t1))', 'Eq(ti0, 2/(t0 + t1) + 1)', 'Eq(ti1, 2/(t0 + t1) + 1)'],
-     ['2/(t0 + t1)', 'r1', 'r1 + 1', 'r0', 'r0'], 0),
-    (['Eq(tu, (tv + tw + 5.)*(ti0 + ti1) + (t0 + t1)*(ti0 + ti1))'],
-     ['ti0[x, y, z] + ti1[x, y, z]',
-      'r0*(t0 + t1) + r0*(tv[t, x, y, z] + tw[t, x, y, z] + 5.0)'], 0),
-    (['Eq(tu, t0/t1)', 'Eq(ti0, 2 + t0/t1)', 'Eq(ti1, 2 + t0/t1)'],
-     ['t0/t1', 'r1', 'r1 + 2', 'r0', 'r0'], 0),
-    # Across expressions
-    (['Eq(tu, tv*4 + tw*5 + tw*5*t0)', 'Eq(tv, tw*5)'],
-     ['5*tw[t, x, y, z]', 'r0 + 5*t0*tw[t, x, y, z] + 4*tv[t, x, y, z]', 'r0'], 0),
-    # Intersecting
-    pytest.param(['Eq(tu, ti0*ti1 + ti0*ti1*t0 + ti0*ti1*t0*t1)'],
-                 ['ti0*ti1', 'r0', 'r0*t0', 'r0*t0*t1'], 0,
-                 marks=pytest.mark.xfail),
-    # Divisions (== powers with negative exponenet) are always captured
-    (['Eq(tu, tv**-1*(tw*5 + tw*5*t0))', 'Eq(ti0, tv**-1*t0)'],
-     ['1/tv[t, x, y, z]', 'r0*(5*t0*tw[t, x, y, z] + 5*tw[t, x, y, z])', 'r0*t0'], 0),
-    # `compact_temporaries` must detect chains of isolated temporaries
-    (['Eq(t0, tv)', 'Eq(t1, t0)', 'Eq(t2, t1)', 'Eq(tu, t2)'],
-     ['tv[t, x, y, z]'], 0),
-    # Dimension-independent flow+anti dependences should be a stopper for CSE
-    (['Eq(t0, cos(t1))', 'Eq(t1, 5)', 'Eq(t2, cos(t1))'],
-     ['cos(t1)', '5', 'cos(t1)'], 0),
-    (['Eq(tu, tv + 1)', 'Eq(tv, tu)', 'Eq(tw, tv + 1)'],
-     ['tv[t, x, y, z] + 1', 'tu[t, x, y, z]', 'tv[t, x, y, z] + 1'], 0),
-    # Dimension-independent flow (but not anti) dependences are OK instead as
-    # long as the temporaries are introduced after the write
-    (['Eq(tu.forward, tu.dx + 1)', 'Eq(tv.forward, tv.dx + 1)',
-      'Eq(tw.forward, tv.dt + 1)', 'Eq(tz.forward, tv.dt + 2)'],
-     ['1/h_x', '-r1*tu[t, x, y, z] + r1*tu[t, x + 1, y, z] + 1',
-      '-r1*tv[t, x, y, z] + r1*tv[t, x + 1, y, z] + 1',
-      '1/dt', '-r2*tv[t, x, y, z] + r2*tv[t + 1, x, y, z]',
-      'r0 + 1', 'r0 + 2'], 0),
-    # Fancy use case with lots of temporaries
-    (['Eq(tu.forward, tu.dx + 1)', 'Eq(tv.forward, tv.dx + 1)',
-      'Eq(tw.forward, tv.dt.dx2.dy2 + 1)', 'Eq(tz.forward, tv.dt.dy2.dx2 + 2)'],
-     ['1/h_x', '-r11*tu[t, x, y, z] + r11*tu[t, x + 1, y, z] + 1',
-      '-r11*tv[t, x, y, z] + r11*tv[t, x + 1, y, z] + 1',
-      '1/dt', '-r12*tv[t, x - 1, y - 1, z] + r12*tv[t + 1, x - 1, y - 1, z]',
-      '-r12*tv[t, x + 1, y - 1, z] + r12*tv[t + 1, x + 1, y - 1, z]',
-      '-r12*tv[t, x, y - 1, z] + r12*tv[t + 1, x, y - 1, z]',
-      '-r12*tv[t, x - 1, y + 1, z] + r12*tv[t + 1, x - 1, y + 1, z]',
-      '-r12*tv[t, x + 1, y + 1, z] + r12*tv[t + 1, x + 1, y + 1, z]',
-      '-r12*tv[t, x, y + 1, z] + r12*tv[t + 1, x, y + 1, z]',
-      '-r12*tv[t, x - 1, y, z] + r12*tv[t + 1, x - 1, y, z]',
-      '-r12*tv[t, x + 1, y, z] + r12*tv[t + 1, x + 1, y, z]',
-      '-r12*tv[t, x, y, z] + r12*tv[t + 1, x, y, z]',
-      'h_x**(-2)', '-2.0*r13', 'h_y**(-2)', '-2.0*r14',
-      'r10*(r13*r6 + r13*r7 + r8*r9) + r14*(r0*r13 + r1*r13 + r2*r9) + ' +
-      'r14*(r13*r3 + r13*r4 + r5*r9) + 1',
-      'r13*(r0*r14 + r10*r6 + r14*r3) + r13*(r1*r14 + r10*r7 + r14*r4) + ' +
-      'r9*(r10*r8 + r14*r2 + r14*r5) + 2'], 0),
-    # Existing temporaries from nested Function as index
-    (['Eq(e0, fx[x])', 'Eq(tu, cos(-tu[t, e0, y, z]) + tv[t, x, y, z])',
-      'Eq(tv, cos(tu[t, e0, y, z]) + tw)'],
-     ['fx[x]', 'cos(tu[t, e0, y, z])', 'r0 + tv[t, x, y, z]', 'r0 + tw[t, x, y, z]'], 0),
-    # Make sure -x isn't factorized with default minimum cse cost
-    (['Eq(e0, fx[x])', 'Eq(tu, -tu[t, e0, y, z] + tv[t, x, y, z])',
-      'Eq(tv, -tu[t, e0, y, z] + tw)'],
-     ['fx[x]', '-tu[t, e0, y, z] + tv[t, x, y, z]',
-      '-tu[t, e0, y, z] + tw[t, x, y, z]'], 1)
-])
-def test_cse(exprs, expected, min_cost):
-    """Test common subexpressions elimination."""
-    grid = Grid((3, 3, 3))
-    x, y, z = grid.dimensions
-    t = grid.stepping_dim  # noqa
-
-    tu = TimeFunction(name="tu", grid=grid, space_order=2)  # noqa
-    tv = TimeFunction(name="tv", grid=grid, space_order=2)  # noqa
-    tw = TimeFunction(name="tw", grid=grid, space_order=2)  # noqa
-    tz = TimeFunction(name="tz", grid=grid, space_order=2)  # noqa
-    fx = Function(name="fx", grid=grid, dimensions=(x,), shape=(3,))  # noqa
-    ti0 = Array(name='ti0', shape=(3, 5, 7), dimensions=(x, y, z)).indexify()  # noqa
-    ti1 = Array(name='ti1', shape=(3, 5, 7), dimensions=(x, y, z)).indexify()  # noqa
-    t0 = Temp(name='t0')  # noqa
-    t1 = Temp(name='t1')  # noqa
-    t2 = Temp(name='t2')  # noqa
-    # Needs to not be a Temp to mimic nested index extraction and prevent
-    # cse to compact the temporary back.
-    e0 = Symbol(name='e0')  # noqa
-
-    # List comprehension would need explicit locals/globals mappings to eval
-    for i, e in enumerate(list(exprs)):
-        exprs[i] = DummyEq(indexify(diffify(eval(e).evaluate)))
-
-    counter = generator()
-    make = lambda: Temp(name='r%d' % counter()).indexify()
-    processed = _cse(exprs, make, min_cost)
-
-    assert len(processed) == len(expected)
-    assert all(str(i.rhs) == j for i, j in zip(processed, expected))
-
-
 @pytest.mark.parametrize('expr,expected', [
     ('2*fa[x] + fb[x]', '2*fa[x] + fb[x]'),
     ('fa[x]**2', 'fa[x]*fa[x]'),
@@ -170,6 +71,9 @@ def test_cse(exprs, expected, min_cost):
     ('Mul(SizeOf("char"), '
      '-IndexedPointer(FieldFromPointer("size", fa._C_symbol), x), evaluate=False)',
      'sizeof(char)*(-fa_vec->size[x])'),
+    ('sqrt(fa[x]**4)', 'sqrt(fa[x]*fa[x]*fa[x]*fa[x])'),
+    ('sqrt(fa[x])**2', 'fa[x]'),
+    ('fa[x]**-2', '1/(fa[x]*fa[x])'),
 ])
 def test_pow_to_mul(expr, expected):
     grid = Grid((4, 5))
@@ -184,13 +88,19 @@ def test_pow_to_mul(expr, expected):
 
 @pytest.mark.parametrize('expr,expected', [
     ('s - SizeOf("int")*fa[x]', 's - fa[x]*sizeof(int)'),
+    ('foo(4*fa[x] + 4*fb[x])', 'foo(4*(fa[x] + fb[x]))'),
+    ('floor(0.1*a + 0.1*fa[x])', 'floor(0.1*(a + fa[x]))'),
+    ('floor(0.1*(a + fa[x]))', 'floor(0.1*(a + fa[x]))'),
 ])
 def test_factorize(expr, expected):
     grid = Grid((4, 5))
     x, y = grid.dimensions
 
-    s = Scalar(name='s')  # noqa
+    s = Scalar(name='s', dtype=np.float32)  # noqa
+    a = Symbol(name='a', dtype=np.float32)  # noqa
     fa = Function(name='fa', grid=grid, dimensions=(x,), shape=(4,))  # noqa
+    fb = Function(name='fb', grid=grid, dimensions=(x,), shape=(4,))  # noqa
+    foo = lambda *args: DefFunction('foo', tuple(args))  # noqa
 
     assert str(collect_nested(eval(expr))) == expected
 
@@ -253,7 +163,9 @@ def test_factorize(expr, expected):
     ('Eq(fb, fd.dx)', 10, False),
     ('Eq(fb, fd.dx)', 10, True),
     ('Eq(fb, fd.dx._evaluate(expand=False))', 10, False),
-    ('Eq(fb, fd.dx.dy + fa.dx)', 66, False),
+    ('Eq(fb, fd.dx.dy + fa.dx)', 65, False),
+    # Ensure redundancies aren't counted
+    ('Eq(t0, fd.dx.dy + fa*fd.dx.dy)', 62, True),
 ])
 def test_estimate_cost(expr, expected, estimate):
     # Note: integer arithmetic isn't counted
@@ -278,44 +190,6 @@ def test_estimate_cost(expr, expected, estimate):
     assert estimate_cost(eval(expr), estimate) == expected
 
 
-@pytest.mark.parametrize('exprs,exp_u,exp_v', [
-    (['Eq(s, 0, implicit_dims=(x, y))', 'Eq(s, s + 4, implicit_dims=(x, y))',
-      'Eq(u, s)'], 4, 0),
-    (['Eq(s, 0, implicit_dims=(x, y))', 'Eq(s, s + s + 4, implicit_dims=(x, y))',
-      'Eq(s, s + 4, implicit_dims=(x, y))', 'Eq(u, s)'], 8, 0),
-    (['Eq(s, 0, implicit_dims=(x, y))', 'Inc(s, 4, implicit_dims=(x, y))',
-      'Eq(u, s)'], 4, 0),
-    (['Eq(s, 0, implicit_dims=(x, y))', 'Inc(s, 4, implicit_dims=(x, y))', 'Eq(v, s)',
-      'Eq(u, s)'], 4, 4),
-    (['Eq(s, 0, implicit_dims=(x, y))', 'Inc(s, 4, implicit_dims=(x, y))', 'Eq(v, s)',
-      'Eq(s, s + 4, implicit_dims=(x, y))', 'Eq(u, s)'], 8, 4),
-    (['Eq(s, 0, implicit_dims=(x, y))', 'Inc(s, 4, implicit_dims=(x, y))', 'Eq(v, s)',
-      'Inc(s, 4, implicit_dims=(x, y))', 'Eq(u, s)'], 8, 4),
-    (['Eq(u, 0)', 'Inc(u, 4)', 'Eq(v, u)', 'Inc(u, 4)'], 8, 4),
-    (['Eq(u, 1)', 'Eq(v, 4)', 'Inc(u, v)', 'Inc(v, u)'], 5, 9),
-])
-def test_makeit_ssa(exprs, exp_u, exp_v):
-    """
-    A test building Operators with non-trivial sequences of input expressions
-    that push hard on the `makeit_ssa` utility function.
-    """
-    grid = Grid(shape=(4, 4))
-    x, y = grid.dimensions  # noqa
-    u = Function(name='u', grid=grid)  # noqa
-    v = Function(name='v', grid=grid)  # noqa
-    s = Scalar(name='s')  # noqa
-
-    # List comprehension would need explicit locals/globals mappings to eval
-    for i, e in enumerate(list(exprs)):
-        exprs[i] = eval(e)
-
-    op = Operator(exprs)
-    op.apply()
-
-    assert np.all(u.data == exp_u)
-    assert np.all(v.data == exp_v)
-
-
 @pytest.mark.parametrize('opt', ['noop', 'advanced'])
 def test_time_dependent_split(opt):
     grid = Grid(shape=(10, 10))
@@ -337,7 +211,7 @@ def test_time_dependent_split(opt):
     assert np.allclose(v.data[1, 1:-1, 1:-1], 1.0)
 
 
-class TestLifting(object):
+class TestLifting:
 
     @pytest.mark.parametrize('exprs,expected', [
         # none (different distance)
@@ -454,7 +328,7 @@ class TestLifting(object):
         assert trees[1].dimensions == [time]
 
 
-class TestAliases(object):
+class TestAliases:
 
     @pytest.mark.parametrize('exprs,expected', [
         # none (different distance)
@@ -1271,53 +1145,6 @@ class TestAliases(object):
         assert np.all(u.data == u1.data)
         assert np.all(v.data == v1.data)
 
-    @skipif('cpu64-arm')
-    @pytest.mark.parametrize('rotate', [False, True])
-    @switchconfig(autopadding=True, platform='knl7210')  # Platform is to fix pad value
-    def test_minimize_remainders_due_to_autopadding(self, rotate):
-        """
-        Check that the bounds of the Iteration computing an aliasing expression are
-        relaxed (i.e., slightly larger) so that backend-compiler-generated remainder
-        loops are avoided.
-        """
-        grid = Grid(shape=(3, 3, 3))
-        x, y, z = grid.dimensions
-        t = grid.stepping_dim
-
-        u = TimeFunction(name='u', grid=grid, space_order=3)
-        u1 = TimeFunction(name='u1', grid=grid, space_order=3)
-
-        u.data_with_halo[:] = 0.5
-        u1.data_with_halo[:] = 0.5
-
-        # Leads to 3D aliases
-        eqn = Eq(u.forward, _R(_R(u[t, x, y, z] + u[t, x+1, y+1, z+1])*3. +
-                               _R(u[t, x+2, y+2, z+2] + u[t, x+3, y+3, z+3])*3. + 1.))
-
-        op0 = Operator(eqn, opt=('noop', {'openmp': False}))
-        op1 = Operator(eqn, opt=('advanced', {'openmp': False, 'cire-mingain': 0,
-                                              'cire-rotate': rotate}))
-
-        # Check code generation
-        bns, pbs = assert_blocking(op1, {'x0_blk0'})
-        xs, ys, zs = get_params(op1, 'x0_blk0_size', 'y0_blk0_size', 'z_size')
-        arrays = [i for i in FindSymbols().visit(bns['x0_blk0']) if i.is_Array]
-        assert len(arrays) == 1
-        assert len(FindNodes(VExpanded).visit(pbs['x0_blk0'])) == 0
-        assert arrays[0].padding == ((0, 0), (0, 0), (0, 30))
-        check_array(arrays[0], ((1, 1), (1, 1), (1, 1)), (xs+2, ys+2, zs+32), rotate)
-        # Check loop bounds
-        trees = retrieve_iteration_tree(bns['x0_blk0'])
-        assert len(trees) == 2
-        expected_rounded = trees[0].inner
-        assert expected_rounded.symbolic_max ==\
-            z.symbolic_max + (z.symbolic_max - z.symbolic_min + 3) % 16 + 1
-
-        # Check numerical output
-        op0(time_M=1)
-        op1(time_M=1, u=u1)
-        assert np.all(u.data == u1.data)
-
     def test_catch_best_invariant_v1(self):
         """
         Make sure the best time-invariant sub-expressions are extracted.
@@ -1714,7 +1541,7 @@ class TestAliases(object):
         op1 = Operator(eqn, opt=('advanced-fsg', {'openmp': True, 'cire-mingain': 0}))
 
         # Check code generation
-        bns, _ = assert_blocking(op1, {'x0_blk0', 'x1_blk0'})
+        bns, _ = assert_blocking(op1, {'x0_blk0'})
         xs, ys, zs = get_params(op1, 'x_size', 'y_size', 'z_size')
         arrays = [i for i in FindSymbols().visit(bns['x0_blk0']) if i.is_Array]
         assert len(arrays) == 1
@@ -1741,7 +1568,7 @@ class TestAliases(object):
         so = 8
         grid = Grid(shape=(6, 6, 6))
 
-        f = Function(name='f', grid=grid, space_order=so, is_param=True)
+        f = Function(name='f', grid=grid, space_order=so, parameter=True)
         v = TimeFunction(name="v", grid=grid, space_order=so)
         v1 = TimeFunction(name="v1", grid=grid, space_order=so)
         p = TimeFunction(name="p", grid=grid, space_order=so, staggered=NODE)
@@ -1898,7 +1725,7 @@ class TestAliases(object):
         assert len([i for i in FindSymbols().visit(bns['x0_blk0']) if i.is_Array]) == 7
         assert len(FindNodes(VExpanded).visit(pbs['x0_blk0'])) == 3
 
-    @pytest.mark.parametrize('so_ops', [(4, 146), (8, 210)])
+    @pytest.mark.parametrize('so_ops', [(4, 147), (8, 211)])
     @switchconfig(profiling='advanced')
     def test_tti_J_akin_complete(self, so_ops):
         grid = Grid(shape=(16, 16, 16))
@@ -1966,7 +1793,7 @@ class TestAliases(object):
         assert len(arrays) == 10
         assert len(FindNodes(VExpanded).visit(pbs['x0_blk0'])) == 6
 
-    @pytest.mark.parametrize('so_ops', [(4, 33), (8, 69)])
+    @pytest.mark.parametrize('so_ops', [(4, 31), (8, 69)])
     @pytest.mark.parametrize('rotate', [False, True])
     @switchconfig(profiling='advanced')
     def test_tti_adjoint_akin(self, so_ops, rotate):
@@ -2158,9 +1985,9 @@ class TestAliases(object):
         ('v.dx.dx + p.dx.dx',
          (2, 2, (0, 2)), (61, 61, 25)),
         ('(v.dx + v.dy).dx - (v.dx + v.dy).dy + 2*f.dx.dx + f*f.dy.dy + f.dx.dx(x0=1)',
-         (3, 3, (0, 3)), (218, 202, 75)),
+         (3, 3, (0, 3)), (218, 202, 66)),
         ('(g*(1 + f)*v.dx).dx + (2*g*f*v.dx).dx',
-         (1, 1, (0, 1)), (52, 70, 20)),
+         (1, 1, (0, 1)), (52, 66, 20)),
         ('g*(f.dx.dx + g.dx.dx)',
          (1, 2, (0, 1)), (47, 62, 17)),
     ])
@@ -2364,10 +2191,10 @@ class TestAliases(object):
         if rotate:
             assert_structure(
                 op1,
-                prefix + ['t,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,xx,y,z',
-                          't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,y,yy,z',
+                prefix + ['t,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,xc,y,z',
+                          't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,y,yc,z',
                           't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,y,z'],
-                't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,xx,y,z,y,yy,z,z'
+                't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,xc,y,z,y,yc,z,z'
             )
         else:
             assert_structure(
@@ -2400,8 +2227,6 @@ class TestAliases(object):
         t = grid.stepping_dim
 
         nthreads = 2
-        x0_blk0_size = 8
-        y0_blk0_size = 8
 
         u = TimeFunction(name='u', grid=grid, space_order=3)
         u1 = TimeFunction(name="u", grid=grid, space_order=3)
@@ -2427,6 +2252,12 @@ class TestAliases(object):
         # TempFunctions expect an override
         with pytest.raises(InvalidArgument):
             op1(time_M=1, u=u1)
+
+        block_dims = [i for i in op1.dimensions if i.is_Block and i._depth == 1]
+        assert len(block_dims) == 2
+        mapper = {d.root: d for d in block_dims}
+        x0_blk0_size = mapper[x]._arg_defaults()[mapper[x].step.name]
+        y0_blk0_size = mapper[y]._arg_defaults()[mapper[y].step.name]
 
         # Prepare to run op1
         shape = [nthreads, x0_blk0_size, y0_blk0_size, grid.shape[-1]]
@@ -2652,7 +2483,7 @@ class TestAliases(object):
         u = TimeFunction(name="u", grid=grid)
         op = Operator(Eq(u.forward, u.dy.dy.subs(mapper),
                          subdomain=grid.interior))
-        assert_structure(op, ['t,i0x,i0y'], 'ti0xi0y')
+        assert_structure(op, ['t,x,y'], 'txy')
 
     def test_dtype_aliases(self):
         a = np.arange(64).reshape((8, 8))
@@ -2689,7 +2520,7 @@ class TestAliases(object):
         assert np.all(src.data == 8)
 
 
-class TestIsoAcoustic(object):
+class TestIsoAcoustic:
 
     def run_acoustic_forward(self, opt=None):
         shape = (50, 50, 50)
@@ -2743,14 +2574,14 @@ class TestIsoAcoustic(object):
         assert np.allclose(rec0.data, rec1.data, atol=10e-5)
 
 
-class TestTTI(object):
+class TestTTI:
 
     @cached_property
     def model(self):
         # TTI layered model for the tti test, no need for a smooth interace
         # bewtween the two layer as the compilation passes are tested, not the
         # physical prettiness of the result -- which ultimately saves time
-        return demo_model('layers-tti', nlayers=3, nbl=10, space_order=4,
+        return demo_model('layers-tti', nlayers=3, nbl=10, space_order=8,
                           shape=(50, 50, 50), spacing=(20., 20., 20.), smooth=False)
 
     @cached_property
@@ -2798,7 +2629,7 @@ class TestTTI(object):
 
         # Check expected opcount/oi
         assert summary[('section1', None)].ops == 92
-        assert np.isclose(summary[('section1', None)].oi, 2.074, atol=0.001)
+        assert np.isclose(summary[('section1', None)].oi, 1.99, atol=0.001)
 
         # With optimizations enabled, there should be exactly four BlockDimensions
         op = wavesolver.op_fwd()
@@ -2828,10 +2659,9 @@ class TestTTI(object):
         vexpanded = 2 if configuration['language'] == 'openmp' else 0
         assert len(FindNodes(VExpanded).visit(pbs['x0_blk0'])) == vexpanded
 
-    @skipif(['nompi'])
     @switchconfig(profiling='advanced')
     @pytest.mark.parallel(mode=[(1, 'full')])
-    def test_fullopt_w_mpi(self):
+    def test_fullopt_w_mpi(self, mode):
         tti_noopt = self.tti_operator(opt=None)
         rec0, u0, v0, _ = tti_noopt.forward()
         tti_agg = self.tti_operator(opt='advanced')
@@ -2856,7 +2686,7 @@ class TestTTI(object):
 
     @switchconfig(profiling='advanced')
     @pytest.mark.parametrize('space_order,exp_ops,exp_arrays', [
-        (4, 122, 6), (8, 221, 7)
+        (4, 122, 6), (8, 225, 7)
     ])
     def test_opcounts_adjoint(self, space_order, exp_ops, exp_arrays):
         wavesolver = self.tti_operator(space_order=space_order,
@@ -2867,7 +2697,7 @@ class TestTTI(object):
         assert len([i for i in FindSymbols().visit(op) if i.is_Array]) == exp_arrays
 
 
-class TestTTIv2(object):
+class TestTTIv2:
 
     @switchconfig(profiling='advanced')
     @pytest.mark.parametrize('space_order,expected', [

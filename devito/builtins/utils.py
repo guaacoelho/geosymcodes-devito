@@ -6,47 +6,46 @@ import devito as dv
 from devito.symbolics import uxreplace
 from devito.tools import as_tuple
 
-__all__ = ['MPIReduction', 'nbl_to_padsize', 'pad_outhalo', 'abstract_args']
+__all__ = ['make_retval', 'nbl_to_padsize', 'pad_outhalo', 'abstract_args']
 
 
-class MPIReduction(object):
+accumulator_mapper = {
+    # Integer accumulates on Float64
+    np.int8: np.float64, np.uint8: np.float64,
+    np.int16: np.float64, np.uint16: np.float64,
+    np.int32: np.float64, np.uint32: np.float64,
+    np.int64: np.float64, np.uint64: np.float64,
+    # FloatX accumulates on Float2X
+    np.float16: np.float32,
+    np.float32: np.float64,
+    # NOTE: np.float128 isn't really a thing, see for example
+    # https://github.com/numpy/numpy/issues/10288
+    # https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html#1070
+    np.float64: np.float64
+}
+
+
+def make_retval(f):
     """
-    A context manager to build MPI-aware reduction Operators.
+    Devito does not support passing values by reference. This function
+    creates a dummy Function of size 1 to store the return value of a builtin
+    applied to `f`.
     """
+    if f.grid is None:
+        raise ValueError("No Grid available")
 
-    def __init__(self, *functions, op=dv.mpi.MPI.SUM, dtype=None):
-        grids = {f.grid for f in functions}
-        if len(grids) == 0:
-            self.grid = None
-        elif len(grids) == 1:
-            self.grid = grids.pop()
-        else:
-            raise ValueError("Multiple Grids found")
-        if dtype is not None:
-            self.dtype = dtype
-        else:
-            dtype = {f.dtype for f in functions}
-            if len(dtype) == 1:
-                self.dtype = dtype.pop()
-            else:
-                raise ValueError("Illegal mixed data types")
-        self.v = None
-        self.op = op
+    cls = make_retval.cls or dv.Function
 
-    def __enter__(self):
-        i = dv.Dimension(name='mri',)
-        self.n = dv.Function(name='n', shape=(1,), dimensions=(i,),
-                             grid=self.grid, dtype=self.dtype)
-        self.n.data[0] = 0
-        return self
+    dtype = accumulator_mapper[f.dtype]
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        if self.grid is None or not dv.configuration['mpi']:
-            assert self.n.data.size == 1
-            self.v = self.n.data[0]
-        else:
-            comm = self.grid.distributor.comm
-            self.v = comm.allreduce(np.asarray(self.n.data), self.op)[0]
+    i = dv.Dimension(name='mri',)
+    n = cls(name='n', shape=(1,), dimensions=(i,), grid=f.grid,
+            dtype=dtype, space='host')
+
+    n.data[:] = 0
+
+    return n
+make_retval.cls = None  # noqa
 
 
 def nbl_to_padsize(nbl, ndim):

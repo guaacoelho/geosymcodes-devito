@@ -1,8 +1,8 @@
 from collections import OrderedDict, namedtuple, defaultdict
 from itertools import product
 from operator import attrgetter
+from functools import cached_property
 
-from cached_property import cached_property
 from sympy import Max, Min
 import sympy
 
@@ -11,7 +11,7 @@ from devito.data import CORE, OWNED, LEFT, CENTER, RIGHT
 from devito.ir.support import Forward, Scope
 from devito.symbolics.manipulation import _uxreplace_registry
 from devito.tools import (Reconstructable, Tag, as_tuple, filter_ordered, flatten,
-                          frozendict, is_integer)
+                          frozendict, is_integer, filter_sorted)
 from devito.types import Grid
 
 __all__ = ['HaloScheme', 'HaloSchemeEntry', 'HaloSchemeException', 'HaloTouch']
@@ -35,7 +35,7 @@ Halo = namedtuple('Halo', 'dim side')
 OMapper = namedtuple('OMapper', 'core owned')
 
 
-class HaloScheme(object):
+class HaloScheme:
 
     """
     A HaloScheme describes a set of halo exchanges through a mapper:
@@ -107,7 +107,7 @@ class HaloScheme(object):
         return len(self._mapper)
 
     def __hash__(self):
-        return (self._mapper.__hash__(), self.honored.__hash__())
+        return hash((self._mapper.__hash__(), self.honored.__hash__()))
 
     @classmethod
     def build(cls, fmapper, honored):
@@ -287,7 +287,8 @@ class HaloScheme(object):
         ranks*, so the output of this method is guaranteed to be consistent
         across *all MPI ranks*.
         """
-        items = [((d, CENTER), (d, LEFT), (d, RIGHT)) for d in self.dimensions]
+        items = [((d, CENTER), (d, LEFT), (d, RIGHT))
+                 for d in filter_sorted(self.dimensions)]
 
         processed = []
         for item in product(*items):
@@ -582,12 +583,20 @@ class HaloTouch(sympy.Function, Reconstructable):
         return str(self)
 
     def __hash__(self):
-        return id(self)
+        return hash(self.halo_scheme)
 
     def __eq__(self, other):
         return isinstance(other, HaloTouch) and self.halo_scheme == other.halo_scheme
 
     func = Reconstructable._rebuild
+
+    @property
+    def fmapper(self):
+        return self.halo_scheme.fmapper
+
+    @property
+    def dims(self):
+        return frozenset().union(*[v.dims for v in self.fmapper.values()])
 
 
 def _uxreplace_dispatch_haloscheme(hs0, rule):
@@ -613,7 +622,14 @@ def _uxreplace_dispatch_haloscheme(hs0, rule):
                         # They indeed do change
                         d1 = g.indices[d0]
                         loc_indices[d1] = v.indices[d0]
-                        loc_dirs[d1] = hse0.loc_dirs[d0]
+
+                        try:
+                            loc_dirs[d1] = hse0.loc_dirs[d0]
+                        except KeyError:
+                            # E.g., `usave(cd, x, y)` and `usave.dx` in an
+                            # adjoint Operator
+                            assert d0.is_Conditional
+                            loc_dirs[d1] = hse0.loc_dirs[d0.root]
 
                 if len(loc_indices) != len(hse0.loc_indices):
                     # Nope, let's try with the next Indexed, if any

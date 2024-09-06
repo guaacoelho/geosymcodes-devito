@@ -3,7 +3,6 @@ from collections.abc import Iterable
 from functools import reduce
 from itertools import chain, combinations, groupby, product, zip_longest
 from operator import attrgetter, mul
-import sys
 import types
 
 import numpy as np
@@ -13,12 +12,7 @@ __all__ = ['prod', 'as_tuple', 'is_integer', 'generator', 'grouper', 'split',
            'roundm', 'powerset', 'invert', 'flatten', 'single_or', 'filter_ordered',
            'as_mapper', 'filter_sorted', 'pprint', 'sweep', 'all_equal', 'as_list',
            'indices_to_slices', 'indices_to_sections', 'transitive_closure',
-           'humanbytes', 'contains_val']
-
-
-# Some utils run faster with Python>=3.7
-vi = sys.version_info
-py_ge_37 = (vi.major, vi.minor) >= (3, 7)
+           'humanbytes', 'contains_val', 'sorted_priority', 'as_set']
 
 
 def prod(iterable, initial=1):
@@ -30,6 +24,13 @@ def as_list(item, type=None, length=None):
     Force item to a list.
     """
     return list(as_tuple(item, type=type, length=length))
+
+
+def as_set(iterable, type=None, length=None):
+    """
+    Force item to a set.
+    """
+    return set(as_tuple(iterable, type=type, length=length))
 
 
 def as_tuple(item, type=None, length=None):
@@ -163,49 +164,24 @@ def single_or(l):
     return any(i) and not any(i)
 
 
-if py_ge_37:
-    def filter_ordered(elements, key=None):
-        # This method exploits the fact that dictionary keys are unique and ordered
-        # (since Python 3.7). It's concise and often faster for larger lists
+def filter_ordered(elements, key=None):
+    """
+    Filter elements in a list while preserving order.
 
-        if isinstance(elements, types.GeneratorType):
-            elements = list(elements)
+    Parameters
+    ----------
+    key : callable, optional
+        Conversion key used during equality comparison.
+    """
+    # This method exploits the fact that dictionary keys are unique and ordered
+    # (since Python 3.7). It's concise and often faster for larger lists
+    if isinstance(elements, types.GeneratorType):
+        elements = list(elements)
 
-        if key is None:
-            return list(dict.fromkeys(elements))
-        else:
-            return list(dict(zip([key(i) for i in elements], elements)).values())
-
-else:
-    def filter_ordered(elements, key=None):
-        if isinstance(elements, types.GeneratorType):
-            elements = list(elements)
-
-        seen = set()
-        if key is None:
-            try:
-                unordered, inds = np.unique(elements, return_index=True)
-                return unordered[np.argsort(inds)].tolist()
-            except:
-                return sorted(list(set(elements)), key=elements.index)
-        else:
-            ret = []
-            for e in elements:
-                k = key(e)
-                if k not in seen:
-                    ret.append(e)
-                    seen.add(k)
-            return ret
-
-
-filter_ordered.__doc__ = """\
-Filter elements in a list while preserving order.
-
-Parameters
-----------
-key : callable, optional
-    Conversion key used during equality comparison.
-"""
+    if key is None:
+        return list(dict.fromkeys(elements))
+    else:
+        return list(dict(zip([key(i) for i in elements], elements)).values())
 
 
 def filter_sorted(elements, key=None):
@@ -332,3 +308,34 @@ def humanbytes(B):
         return '%.1f GB' % round(B / GB, 1)
     elif TB <= B:
         return '%.2f TB' % round(B / TB, 1)
+
+
+def sorted_priority(items, priority):
+    """
+    Sort items based on their type priority.
+
+    Rules:
+
+        * Each type has an integer priority.
+        * Types with higher priority precede types with lower priority.
+        * Types with same priority are sorted based on the type name.
+        * Types with unknown priority are given 0-priority.
+
+    Parameters
+    ----------
+    items : iterable
+        The objects to be sorted.
+    priority : dict
+        A dictionary from types to integer values.
+    """
+
+    def key(i):
+        for cls in sorted(priority, key=priority.get, reverse=True):
+            if isinstance(i, cls):
+                v = priority[cls]
+                break
+        else:
+            v = 0
+        return (v, str(type(i)))
+
+    return sorted(items, key=key, reverse=True)

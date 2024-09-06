@@ -31,12 +31,14 @@ jobs:
       matrix:
         name: [
            pytest-ubuntu-py311-gcc11-noomp,
-           pytest-ubuntu-py38-gcc12-omp,
-           pytest-ubuntu-py37-gcc7-omp,
+           pytest-ubuntu-py312-gcc12-omp,
+           pytest-ubuntu-py39-gcc7-omp,
            pytest-ubuntu-py310-gcc10-noomp,
-           pytest-ubuntu-py38-gcc8-omp,
+           pytest-ubuntu-py312-gcc13-omp,
            pytest-ubuntu-py39-gcc9-omp,
-           pytest-osx-py37-clang-omp,
+           pytest-osx-py312-clang-omp,
+           pytest-docker-py39-gcc-omp,
+           pytest-docker-py39-icx-omp
         ]
         set: [base, adjoint]
         include:
@@ -47,15 +49,15 @@ jobs:
           language: "C"
           sympy: "1.11"
 
-        - name: pytest-ubuntu-py38-gcc12-omp
-          python-version: '3.8'
-          os: ubuntu-22.04
+        - name: pytest-ubuntu-py312-gcc12-omp
+          python-version: '3.12'
+          os: ubuntu-24.04
           arch: "gcc-12"
           language: "openmp"
-          sympy: "1.10"
+          sympy: "1.13"
 
-        - name: pytest-ubuntu-py37-gcc7-omp
-          python-version: '3.7'
+        - name: pytest-ubuntu-py39-gcc7-omp
+          python-version: '3.9'
           os: ubuntu-20.04
           arch: "gcc-7"
           language: "openmp"
@@ -66,28 +68,28 @@ jobs:
           os: ubuntu-20.04
           arch: "gcc-10"
           language: "C"
-          sympy: "1.10"
-
-        - name: pytest-ubuntu-py38-gcc8-omp
-          python-version: '3.8'
-          os: ubuntu-20.04
-          arch: "gcc-8"
-          language: "openmp"
           sympy: "1.11"
+
+        - name: pytest-ubuntu-py312-gcc13-omp
+          python-version: '3.12'
+          os: ubuntu-24.04
+          arch: "gcc-13"
+          language: "openmp"
+          sympy: "1.13"
 
         - name: pytest-ubuntu-py39-gcc9-omp
           python-version: '3.9'
           os: ubuntu-20.04
           arch: "custom"
           language: "openmp"
-          sympy: "1.9"
+          sympy: "1.10"
 
-        - name: pytest-osx-py37-clang-omp
-          python-version: '3.7'
+        - name: pytest-osx-py312-clang-omp
+          python-version: '3.12'
           os: macos-latest
           arch: "clang"
-          language: "C"
-          sympy: "1.9"
+          language: "openmp"
+          sympy: "1.13"
 
         - set: base
           test-set: 'not adjoint'
@@ -96,18 +98,19 @@ jobs:
           test-set: 'adjoint'
 
         exclude:
-        - name: pytest-osx-py37-clang-omp
+        - name: pytest-osx-py312-clang-omp
           set: adjoint
 
     steps:
     - name: Checkout devito
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Python ${{ matrix.python-version }}
       if: "!contains(matrix.name, 'docker')"
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+        allow-prereleases: true
 
     - name: Build docker image
       if: contains(matrix.name, 'docker')
@@ -117,7 +120,7 @@ jobs:
     - name: Set run prefix
       run: |
           if [[ "${{ matrix.name }}" =~ "docker" ]]; then
-              echo "RUN_CMD=docker run --rm -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} --name testrun devito_img"  >> $GITHUB_ENV
+              echo "RUN_CMD=docker run --rm -t -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} --name testrun devito_img"  >> $GITHUB_ENV
           else
               echo "RUN_CMD=" >> $GITHUB_ENV
           fi
@@ -131,18 +134,23 @@ jobs:
     - name: Set tests (reduced number for OSX)
       run : |
           if [ "${{ runner.os }}" == 'macOS' ]; then
-              echo "TESTS=tests/test_operator.py" >> $GITHUB_ENV
-          else
-              echo "TESTS=tests/" >> $GITHUB_ENV
+            brew install llvm libomp
+            echo "/opt/homebrew/bin:/opt/homebrew/opt/llvm/bin" >> $GITHUB_PATH
           fi
       id: set-tests
+    
+    - name: Set pip flags for latest python (3.12)
+      run: |
+          if [ "${{ matrix.python-version }}" == '3.12' ]; then
+              echo "PIPFLAGS='--break-system-packages'" >> $GITHUB_ENV
+          fi
 
     - name: Install dependencies
       if: "!contains(matrix.name, 'docker')"
       run: |
-        pip install --upgrade pip
-        pip install -e .[tests]
-        pip install sympy==${{matrix.sympy}}
+        python3 -m pip install ${{ env.PIPFLAGS }} --upgrade pip
+        python3 -m pip install ${{ env.PIPFLAGS }} sympy==${{matrix.sympy}}
+        python3 -m pip install ${{ env.PIPFLAGS }} -e .[tests,extras]
 
     - name: Check configuration
       run: |
@@ -154,7 +162,7 @@ jobs:
 
     - name: Upload coverage to Codecov
       if: "!contains(matrix.name, 'docker')"
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         name: ${{ matrix.name }}

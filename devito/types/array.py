@@ -1,23 +1,31 @@
-from ctypes import POINTER, Structure, c_void_p, c_ulong
-from math import ceil
+from ctypes import POINTER, Structure, c_void_p, c_ulong, c_uint64
+from functools import cached_property
 
 import numpy as np
-from cached_property import cached_property
 from sympy import Expr
 
-from devito.parameters import configuration
 from devito.tools import (Reconstructable, as_tuple, c_restrict_void_p,
-                          dtype_to_ctype, dtypes_vector_mapper)
-from devito.types.basic import AbstractFunction
+                          dtype_to_ctype, dtypes_vector_mapper, is_integer)
+from devito.types.basic import AbstractFunction, LocalType
 from devito.types.utils import CtypesFactory, DimensionTuple
 
 __all__ = ['Array', 'ArrayMapped', 'ArrayObject', 'PointerArray', 'Bundle',
            'ComponentAccess', 'Bag']
 
 
-class ArrayBasic(AbstractFunction):
+class ArrayBasic(AbstractFunction, LocalType):
 
     is_ArrayBasic = True
+
+    __rkwargs__ = AbstractFunction.__rkwargs__ + ('is_const', 'liveness')
+
+    def __init_finalize__(self, *args, **kwargs):
+        super().__init_finalize__(*args, **kwargs)
+
+        self._liveness = kwargs.get('liveness', 'lazy')
+        assert self._liveness in ['eager', 'lazy']
+
+        self._is_const = kwargs.get('is_const', False)
 
     @classmethod
     def __indices_setup__(cls, *args, **kwargs):
@@ -47,6 +55,10 @@ class ArrayBasic(AbstractFunction):
     @property
     def shape_allocated(self):
         return self.symbolic_shape
+
+    @property
+    def is_const(self):
+        return self._is_const
 
 
 class Array(ArrayBasic):
@@ -103,12 +115,12 @@ class Array(ArrayBasic):
 
     is_Array = True
 
-    __rkwargs__ = (AbstractFunction.__rkwargs__ +
-                   ('dimensions', 'liveness', 'space', 'scope', 'initvalue'))
+    __rkwargs__ = (ArrayBasic.__rkwargs__ +
+                   ('dimensions', 'scope', 'initvalue'))
 
     def __new__(cls, *args, **kwargs):
         kwargs.update({'options': {'evaluate': False}})
-        space = kwargs.get('space', 'local')
+        space = kwargs.setdefault('space', 'local')
 
         if cls is Array and space == 'mapped':
             return AbstractFunction.__new__(ArrayMapped, *args, **kwargs)
@@ -116,13 +128,7 @@ class Array(ArrayBasic):
             return AbstractFunction.__new__(cls, *args, **kwargs)
 
     def __init_finalize__(self, *args, **kwargs):
-        super(Array, self).__init_finalize__(*args, **kwargs)
-
-        self._liveness = kwargs.get('liveness', 'lazy')
-        assert self._liveness in ['eager', 'lazy']
-
-        self._space = kwargs.get('space', 'local')
-        assert self._space in ['local', 'mapped', 'host']
+        super().__init_finalize__(*args, **kwargs)
 
         self._scope = kwargs.get('scope', 'heap')
         assert self._scope in ['heap', 'stack', 'static', 'constant', 'shared']
@@ -130,50 +136,23 @@ class Array(ArrayBasic):
         self._initvalue = kwargs.get('initvalue')
         assert self._initvalue is None or self._scope != 'heap'
 
-    def __padding_setup__(self, **kwargs):
-        padding = kwargs.get('padding')
-        if padding is None:
-            padding = [(0, 0) for _ in range(self.ndim)]
-            if kwargs.get('autopadding', configuration['autopadding']):
-                # Heuristic 1; Arrays are typically introduced for temporaries
-                # introduced during compilation, and are almost always used together
-                # with loop blocking.  Since the typical block size is a multiple of
-                # the SIMD vector length, `vl`, padding is made such that the
-                # NODOMAIN size is a multiple of `vl` too
-
-                # Heuristic 2: the right-NODOMAIN size is not only a multiple of
-                # `vl`, but also guaranteed to be *at least* greater or equal than
-                # `vl`, so that the compiler can tweak loop trip counts to maximize
-                # the effectiveness of SIMD vectorization
-
-                # Let UB be a function that rounds up a value `x` to the nearest
-                # multiple of the SIMD vector length
-                vl = configuration['platform'].simd_items_per_reg(self.dtype)
-                ub = lambda x: int(ceil(x / vl)) * vl
-
-                fvd_halo_size = sum(self.halo[-1])
-                fvd_pad_size = (ub(fvd_halo_size) - fvd_halo_size) + vl
-
-                padding[-1] = (0, fvd_pad_size)
-            return tuple(padding)
-        elif isinstance(padding, int):
-            return tuple((0, padding) for _ in range(self.ndim))
-        elif isinstance(padding, tuple) and len(padding) == self.ndim:
-            return tuple((0, i) if isinstance(i, int) else i for i in padding)
-        else:
-            raise TypeError("`padding` must be int or %d-tuple of ints" % self.ndim)
-
     @classmethod
     def __dtype_setup__(cls, **kwargs):
         return kwargs.get('dtype', np.float32)
 
-    @property
-    def liveness(self):
-        return self._liveness
-
-    @property
-    def space(self):
-        return self._space
+    def __padding_setup__(self, **kwargs):
+        padding = kwargs.get('padding')
+        if padding is None:
+            padding = ((0, 0),)*self.ndim
+        elif isinstance(padding, DimensionTuple):
+            padding = tuple(padding[d] for d in self.dimensions)
+        elif is_integer(padding):
+            padding = tuple((0, padding) for _ in range(self.ndim))
+        elif isinstance(padding, tuple) and len(padding) == self.ndim:
+            padding = tuple((0, i) if is_integer(i) else i for i in padding)
+        else:
+            raise TypeError("`padding` must be int or %d-tuple of ints" % self.ndim)
+        return DimensionTuple(*padding, getters=self.dimensions)
 
     @property
     def scope(self):
@@ -182,26 +161,6 @@ class Array(ArrayBasic):
     @property
     def _C_ctype(self):
         return POINTER(dtype_to_ctype(self.dtype))
-
-    @property
-    def _mem_internal_eager(self):
-        return self._liveness == 'eager'
-
-    @property
-    def _mem_internal_lazy(self):
-        return self._liveness == 'lazy'
-
-    @property
-    def _mem_local(self):
-        return self._space == 'local'
-
-    @property
-    def _mem_mapped(self):
-        return self._space == 'mapped'
-
-    @property
-    def _mem_host(self):
-        return self._space == 'host'
 
     @property
     def _mem_stack(self):
@@ -235,13 +194,15 @@ class ArrayMapped(Array):
 
     _C_structname = 'array'
     _C_field_data = 'data'
-    _C_field_nbytes = 'nbytes'
     _C_field_dmap = 'dmap'
+    _C_field_nbytes = 'nbytes'
+    _C_field_size = 'size'
 
     _C_ctype = POINTER(type(_C_structname, (Structure,),
                             {'_fields_': [(_C_field_data, c_restrict_void_p),
                                           (_C_field_nbytes, c_ulong),
-                                          (_C_field_dmap, c_void_p)]}))
+                                          (_C_field_dmap, c_void_p),
+                                          (_C_field_size, c_uint64)]}))
 
 
 class ArrayObject(ArrayBasic):
@@ -347,7 +308,7 @@ class PointerArray(ArrayBasic):
         return AbstractFunction.__new__(cls, *args, **kwargs)
 
     def __init_finalize__(self, *args, **kwargs):
-        super(PointerArray, self).__init_finalize__(*args, **kwargs)
+        super().__init_finalize__(*args, **kwargs)
 
         self._array = kwargs['array']
         assert self._array.is_Array
@@ -405,6 +366,8 @@ class Bundle(ArrayBasic):
             raise ValueError("Components must be of same type")
         if not issubclass(klss.pop(), AbstractFunction):
             raise ValueError("Component type must be subclass of AbstractFunction")
+        if len({i.__padding_dtype__ for i in components}) != 1:
+            raise ValueError("Components must have the same padding dtype")
 
         return args, kwargs
 
@@ -454,6 +417,10 @@ class Bundle(ArrayBasic):
     def is_Input(self):
         return all(i.is_Input for i in self.components)
 
+    @property
+    def is_autopaddable(self):
+        return all(i.is_autopaddable for i in self.components)
+
     # Other properties and methods
 
     @property
@@ -472,14 +439,14 @@ class Bundle(ArrayBasic):
     def initvalue(self):
         return None
 
-    # CodeSymbol overrides defaulting to self.c0's behaviour
+    # Overrides defaulting to self.c0's behaviour
 
     for i in ['_mem_internal_eager', '_mem_internal_lazy', '_mem_local',
               '_mem_mapped', '_mem_host', '_mem_stack', '_mem_constant',
-              '_mem_shared', '_size_domain', '_size_halo', '_size_owned',
-              '_size_padding', '_size_nopad', '_size_nodomain', '_offset_domain',
-              '_offset_halo', '_offset_owned', '_dist_dimensions', '_C_get_field',
-              'grid', 'symbolic_shape']:
+              '_mem_shared', '__padding_dtype__', '_size_domain', '_size_halo',
+              '_size_owned', '_size_padding', '_size_nopad', '_size_nodomain',
+              '_offset_domain', '_offset_halo', '_offset_owned', '_dist_dimensions',
+              '_C_get_field', 'grid', 'symbolic_shape']:
         locals()[i] = property(lambda self, v=i: getattr(self.c0, v))
 
     @property
@@ -508,6 +475,7 @@ class Bundle(ArrayBasic):
     _C_field_data = ArrayMapped._C_field_data
     _C_field_nbytes = ArrayMapped._C_field_nbytes
     _C_field_dmap = ArrayMapped._C_field_dmap
+    _C_field_size = ArrayMapped._C_field_size
 
     @property
     def _C_ctype(self):
@@ -540,7 +508,7 @@ class ComponentAccess(Expr, Reconstructable):
     def __new__(cls, arg, index=0, **kwargs):
         if not arg.is_Indexed:
             raise ValueError("Expected Indexed, got `%s` instead" % type(arg))
-        if not isinstance(index, int) or index > 3:
+        if not is_integer(index) or index > 3:
             raise ValueError("Expected 0 <= index < 4")
 
         obj = Expr.__new__(cls, arg)

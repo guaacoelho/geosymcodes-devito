@@ -3,23 +3,28 @@ from argparse import Action, ArgumentError, ArgumentParser
 
 from devito import error, configuration, warning
 from devito.tools import Pickable
+from devito.types.sparse import _default_radius
 
 from .source import *
 
 __all__ = ['AcquisitionGeometry', 'setup_geometry', 'seismic_args']
 
 
-def setup_geometry(model, tn, f0=0.010):
+def setup_geometry(model, tn, f0=0.010, interpolation='linear', **kwargs):
     # Source and receiver geometries
     src_coordinates = np.empty((1, model.dim))
-    src_coordinates[0, :] = np.array(model.domain_size) * .5
     if model.dim > 1:
+        src_coordinates[0, :] = np.array(model.domain_size) * .5
         src_coordinates[0, -1] = model.origin[-1] + model.spacing[-1]
+    else:
+        src_coordinates[0, 0] = 2 * model.spacing[0]
 
     rec_coordinates = setup_rec_coords(model)
 
+    r = kwargs.get('r', _default_radius[interpolation])
     geometry = AcquisitionGeometry(model, rec_coordinates, src_coordinates,
-                                   t0=0.0, tn=tn, src_type='Ricker', f0=f0)
+                                   t0=0.0, tn=tn, src_type='Ricker', f0=f0,
+                                   interpolation=interpolation, r=r)
 
     return geometry
 
@@ -58,7 +63,7 @@ class AcquisitionGeometry(Pickable):
     """
 
     __rargs__ = ('grid', 'rec_positions', 'src_positions', 't0', 'tn')
-    __rkwargs__ = ('f0', 'src_type')
+    __rkwargs__ = ('f0', 'src_type', 'interpolation', 'r')
 
     def __init__(self, model, rec_positions, src_positions, t0, tn, **kwargs):
         """
@@ -85,6 +90,12 @@ class AcquisitionGeometry(Pickable):
         self._dt = model.critical_dt
         self._t0 = t0
         self._tn = tn
+        self._interpolation = kwargs.get('interpolation', 'linear')
+        self._r = kwargs.get('r', _default_radius[self.interpolation])
+
+        # Initialize to empty, created at new src/rec
+        self._src_coordinates = None
+        self._rec_coordinates = None
 
     def resample(self, dt):
         self._dt = dt
@@ -141,23 +152,35 @@ class AcquisitionGeometry(Pickable):
         return self.grid.dtype
 
     @property
+    def r(self):
+        return self._r
+
+    @property
+    def interpolation(self):
+        return self._interpolation
+
+    @property
     def rec(self):
         return self.new_rec()
 
-    def new_rec(self, name='rec'):
-        return Receiver(name=name, grid=self.grid,
-                        time_range=self.time_axis, npoint=self.nrec,
-                        coordinates=self.rec_positions)
+    def new_rec(self, name='rec', coordinates=None):
+        coords = coordinates or self.rec_positions
+        rec = Receiver(name=name, grid=self.grid,
+                       time_range=self.time_axis, npoint=self.nrec,
+                       interpolation=self.interpolation, r=self._r,
+                       coordinates=coords)
+
+        return rec
 
     @property
     def adj_src(self):
         if self.src_type is None:
-            warning("No source type defined, returning uninitiallized (zero) shot record")
             return self.new_rec()
+        coords = self.rec_positions
         adj_src = sources[self.src_type](name='rec', grid=self.grid, f0=self.f0,
                                          time_range=self.time_axis, npoint=self.nrec,
-                                         coordinates=self.rec_positions,
-                                         t0=self._t0w, a=self._a)
+                                         interpolation=self.interpolation, r=self._r,
+                                         coordinates=coords, t0=self._t0w, a=self._a)
         # Revert time axis to have a proper shot record and not compute on zeros
         for i in range(self.nrec):
             adj_src.data[:, i] = adj_src.wavelet[::-1]
@@ -167,17 +190,22 @@ class AcquisitionGeometry(Pickable):
     def src(self):
         return self.new_src()
 
-    def new_src(self, name='src', src_type='self'):
+    def new_src(self, name='src', src_type='self', coordinates=None):
+        coords = coordinates or self.src_positions
         if self.src_type is None or src_type is None:
             warning("No source type defined, returning uninitiallized (zero) source")
-            return PointSource(name=name, grid=self.grid,
-                               time_range=self.time_axis, npoint=self.nsrc,
-                               coordinates=self.src_positions)
+            src = PointSource(name=name, grid=self.grid,
+                              time_range=self.time_axis, npoint=self.nsrc,
+                              coordinates=coords,
+                              interpolation=self.interpolation, r=self._r)
         else:
-            return sources[self.src_type](name=name, grid=self.grid, f0=self.f0,
-                                          time_range=self.time_axis, npoint=self.nsrc,
-                                          coordinates=self.src_positions,
-                                          t0=self._t0w, a=self._a)
+            src = sources[self.src_type](name=name, grid=self.grid, f0=self.f0,
+                                         time_range=self.time_axis, npoint=self.nsrc,
+                                         coordinates=coords,
+                                         t0=self._t0w, a=self._a,
+                                         interpolation=self.interpolation, r=self._r)
+
+        return src
 
 
 sources = {'Wavelet': WaveletSource, 'Ricker': RickerSource, 'Gabor': GaborSource}
@@ -234,4 +262,6 @@ def seismic_args(description):
                         type=float, help="Simulation time in millisecond")
     parser.add_argument("-dtype", action=_dtype_store, dest="dtype", default=np.float32,
                         choices=['float32', 'float64'])
+    parser.add_argument("-interp", dest="interp", default="linear",
+                        choices=['linear', 'sinc'])
     return parser

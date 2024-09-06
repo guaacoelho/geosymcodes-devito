@@ -1,18 +1,24 @@
 from abc import ABC, abstractmethod
-from functools import wraps
+from functools import wraps, cached_property
 
 import sympy
-from cached_property import cached_property
+import numpy as np
+
+try:
+    from scipy.special import i0
+except ImportError:
+    from numpy import i0
 
 from devito.finite_differences.differentiable import Mul
 from devito.finite_differences.elementary import floor
+from devito.logger import warning
 from devito.symbolics import retrieve_function_carriers, retrieve_functions, INT
-from devito.tools import as_tuple, flatten
+from devito.tools import as_tuple, flatten, filter_ordered
 from devito.types import (ConditionalDimension, Eq, Inc, Evaluable, Symbol,
-                          CustomDimension)
+                          CustomDimension, SubFunction)
 from devito.types.utils import DimensionTuple
 
-__all__ = ['LinearInterpolator', 'PrecomputedInterpolator']
+__all__ = ['LinearInterpolator', 'PrecomputedInterpolator', 'SincInterpolator']
 
 
 def check_radius(func):
@@ -22,7 +28,7 @@ def check_radius(func):
         funcs = set().union(*[retrieve_functions(a) for a in args])
         so = min({f.space_order for f in funcs if not f.is_SparseFunction} or {r})
         if so < r:
-            raise ValueError("Space order %d smaller than interpolation r %d" % (so, r))
+            raise ValueError("Space order %d too small for interpolation r %d" % (so, r))
         return func(interp, *args, **kwargs)
     return wrapper
 
@@ -125,6 +131,8 @@ class GenericInterpolator(ABC):
     Abstract base class defining the interface for an interpolator.
     """
 
+    _name = "generic"
+
     @abstractmethod
     def inject(self, *args, **kwargs):
         pass
@@ -132,6 +140,13 @@ class GenericInterpolator(ABC):
     @abstractmethod
     def interpolate(self, *args, **kwargs):
         pass
+
+    @property
+    def name(self):
+        return self._name
+
+    def _arg_defaults(self, **args):
+        return {}
 
 
 class WeightedInterpolator(GenericInterpolator):
@@ -141,6 +156,8 @@ class WeightedInterpolator(GenericInterpolator):
     in space, meaning the coefficients are defined for each Dimension separately
     and multiplied at a given point: `w[x, y] = wx[x] * wy[y]`
     """
+
+    _name = 'weighted'
 
     def __init__(self, sfunction):
         self.sfunction = sfunction
@@ -163,7 +180,7 @@ class WeightedInterpolator(GenericInterpolator):
 
     @cached_property
     def _rdim(self):
-        parent = self.sfunction.dimensions[-1]
+        parent = self.sfunction._sparse_dim
         dims = [CustomDimension("r%s%s" % (self.sfunction.name, d.name),
                                 -self.r+1, self.r, 2*self.r, parent)
                 for d in self._gdims]
@@ -184,15 +201,18 @@ class WeightedInterpolator(GenericInterpolator):
 
     def _augment_implicit_dims(self, implicit_dims, extras=None):
         if extras is not None:
-            extra = set([i for v in extras for i in v.dimensions]) - set(self._gdims)
+            extra = filter_ordered([i for v in extras for i in v.dimensions
+                                    if i not in self._gdims and
+                                    i not in self.sfunction.dimensions])
             extra = tuple(extra)
         else:
             extra = tuple()
 
         if self.sfunction._sparse_position == -1:
-            return self.sfunction.dimensions + as_tuple(implicit_dims) + extra
+            idims = self.sfunction.dimensions + as_tuple(implicit_dims) + extra
         else:
-            return as_tuple(implicit_dims) + self.sfunction.dimensions + extra
+            idims = extra + as_tuple(implicit_dims) + self.sfunction.dimensions
+        return tuple(idims)
 
     def _coeff_temps(self, implicit_dims):
         return []
@@ -201,7 +221,7 @@ class WeightedInterpolator(GenericInterpolator):
         return [Eq(v, INT(floor(k)), implicit_dims=implicit_dims)
                 for k, v in self.sfunction._position_map.items()]
 
-    def _interp_idx(self, variables, implicit_dims=None):
+    def _interp_idx(self, variables, implicit_dims=None, pos_only=()):
         """
         Generate interpolation indices for the DiscreteFunctions in ``variables``.
         """
@@ -215,10 +235,16 @@ class WeightedInterpolator(GenericInterpolator):
         temps.extend(self._coeff_temps(implicit_dims))
 
         # Substitution mapper for variables
-        mapper = self._rdim._getters
+        mapper = self._rdim.getters
         idx_subs = {v: v.subs({k: c + p
                     for ((k, c), p) in zip(mapper.items(), pos)})
                     for v in variables}
+
+        # Position only replacement, not radius dependent.
+        # E.g src.inject(vp(x)*src) needs to use vp[posx] at all points
+        # not vp[posx + rx]
+        idx_subs.update({v: v.subs({k: p for (k, p) in zip(mapper, pos)})
+                         for v in pos_only})
 
         return idx_subs, temps
 
@@ -283,7 +309,7 @@ class WeightedInterpolator(GenericInterpolator):
         variables = list(retrieve_function_carriers(_expr))
 
         # Implicit dimensions
-        implicit_dims = self._augment_implicit_dims(implicit_dims)
+        implicit_dims = self._augment_implicit_dims(implicit_dims, variables)
 
         # List of indirection indices for all adjacent grid points
         idx_subs, temps = self._interp_idx(variables, implicit_dims=implicit_dims)
@@ -292,7 +318,7 @@ class WeightedInterpolator(GenericInterpolator):
         rhs = Symbol(name='sum', dtype=self.sfunction.dtype)
         summands = [Eq(rhs, 0., implicit_dims=implicit_dims)]
         # Substitute coordinate base symbols into the interpolation coefficients
-        summands.extend([Inc(rhs, (_expr * self._weights).xreplace(idx_subs),
+        summands.extend([Inc(rhs, (self._weights * _expr).xreplace(idx_subs),
                              implicit_dims=implicit_dims)])
 
         # Write/Incr `self`
@@ -344,14 +370,13 @@ class WeightedInterpolator(GenericInterpolator):
         # summing temp that wouldn't allow collapsing
         implicit_dims = implicit_dims + tuple(r.parent for r in self._rdim)
 
-        variables = variables + list(fields)
-
         # List of indirection indices for all adjacent grid points
-        idx_subs, temps = self._interp_idx(variables, implicit_dims=implicit_dims)
+        idx_subs, temps = self._interp_idx(fields, implicit_dims=implicit_dims,
+                                           pos_only=variables)
 
         # Substitute coordinate base symbols into the interpolation coefficients
         eqns = [Inc(_field.xreplace(idx_subs),
-                    (_expr * self._weights).xreplace(idx_subs),
+                    (self._weights * _expr).xreplace(idx_subs),
                     implicit_dims=implicit_dims)
                 for (_field, _expr) in zip(fields, _exprs)]
 
@@ -367,6 +392,9 @@ class LinearInterpolator(WeightedInterpolator):
     ----------
     sfunction: The SparseFunction that this Interpolator operates on.
     """
+
+    _name = 'linear'
+
     @property
     def _weights(self):
         c = [(1 - p) * (1 - r) + p * r
@@ -400,12 +428,15 @@ class PrecomputedInterpolator(WeightedInterpolator):
     sfunction: The SparseFunction that this Interpolator operates on.
     """
 
+    _name = 'precomp'
+
     def _positions(self, implicit_dims):
-        if self.sfunction.gridpoints is None:
+        if self.sfunction.gridpoints_data is None:
             return super()._positions(implicit_dims)
-        # No position temp as we have directly the gridpoints
-        return [Eq(p, k, implicit_dims=implicit_dims)
-                for (k, p) in self.sfunction._position_map.items()]
+        else:
+            # No position temp as we have directly the gridpoints
+            return[Eq(p, k, implicit_dims=implicit_dims)
+                   for (k, p) in self.sfunction._position_map.items()]
 
     @property
     def interpolation_coeffs(self):
@@ -418,3 +449,69 @@ class PrecomputedInterpolator(WeightedInterpolator):
                    for (ri, rd) in enumerate(self._rdim)]
         return Mul(*[self.interpolation_coeffs.subs(mapper)
                      for mapper in mappers])
+
+
+class SincInterpolator(PrecomputedInterpolator):
+    """
+    Hicks windowed sinc interpolation scheme.
+
+    Arbitrary source and receiver positioning in finite‐difference schemes
+    using Kaiser windowed sinc functions
+
+    https://library.seg.org/doi/10.1190/1.1451454
+
+    """
+
+    _name = 'sinc'
+
+    # Table 1
+    _b_table = {2: 2.94, 3: 4.53,
+                4: 4.14, 5: 5.26, 6: 6.40,
+                7: 7.51, 8: 8.56, 9: 9.56, 10: 10.64}
+
+    def __init__(self, sfunction):
+        if i0 is np.i0:
+            warning("""
+Using `numpy.i0`. We (and numpy) recommend to install scipy to improve the performance
+of the SincInterpolator that uses i0 (Bessel function).
+""")
+        super().__init__(sfunction)
+
+    @cached_property
+    def interpolation_coeffs(self):
+        coeffs = {}
+        shape = (self.sfunction.npoint, 2 * self.r)
+        for r in self._rdim:
+            dimensions = (self.sfunction._sparse_dim, r.parent)
+            sf = SubFunction(name="wsinc%s" % r.name, dtype=self.sfunction.dtype,
+                             shape=shape, dimensions=dimensions,
+                             space_order=0, alias=self.sfunction.alias,
+                             parent=None)
+            coeffs[r] = sf
+        return coeffs
+
+    @property
+    def _weights(self):
+        return Mul(*[w._subs(rd, rd-rd.parent.symbolic_min)
+                     for (rd, w) in self.interpolation_coeffs.items()])
+
+    def _arg_defaults(self, coords=None, sfunc=None):
+        args = {}
+        b = self._b_table[self.r]
+        b0 = i0(b)
+        if coords is None or sfunc is None:
+            raise ValueError("No coordinates or sparse function provided")
+        # Coords to indices
+        coords = coords / np.array(sfunc.grid.spacing)
+        coords = coords - np.floor(coords)
+
+        # Precompute sinc
+        for j, r in enumerate(self._rdim):
+            data = np.zeros((coords.shape[0], 2*self.r), dtype=sfunc.dtype)
+            for ri in range(2*self.r):
+                rpos = ri - self.r + 1 - coords[:, j]
+                num = i0(b*np.sqrt(1 - (rpos/self.r)**2))
+                data[:, ri] = num / b0 * np.sinc(rpos)
+            args[self.interpolation_coeffs[r].name] = data
+
+        return args
