@@ -2,7 +2,6 @@ import pytest
 import numpy as np
 import scipy.sparse
 
-from conftest import skipif
 from devito import (Grid, Function, TimeFunction, SparseTimeFunction, Operator, Eq,
                     Inc, MatrixSparseTimeFunction, sin, switchconfig)
 from devito.ir import Call, Callable, DummyExpr, Expression, FindNodes, SymbolRegistry
@@ -31,7 +30,6 @@ def test_basic():
     assert np.all(u.data == u1.data)
 
 
-@skipif(['nompi'])
 @pytest.mark.parallel(mode=[(1, 'basic'), (1, 'diag2'), (1, 'full')])
 def test_mpi(mode):
     grid = Grid(shape=(4, 4))

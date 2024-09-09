@@ -69,7 +69,6 @@ def test_bench(mode, problem, op):
         assert True
 
 
-@skipif(['nompi'])
 @pytest.mark.parallel(mode=2)
 @switchconfig(profiling='advanced')
 def test_run_mpi(mode):
