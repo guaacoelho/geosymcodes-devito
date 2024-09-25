@@ -407,8 +407,9 @@ def remove_ds_path(fpath):
     try:
         if os.path.exists(fpath):
             shutil.rmtree(fpath)
+            return True
         else:
-            return
+            return False
     except Exception as e:
         print(f"Error while removing '{fpath}': {e}")
         raise
