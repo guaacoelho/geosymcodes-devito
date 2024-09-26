@@ -11,6 +11,8 @@ from functools import cached_property
 from devito.builtins import assign
 from devito.data import (DOMAIN, OWNED, HALO, NOPAD, FULL, LEFT, CENTER, RIGHT,
                          Data, default_allocator)
+from devito.data.allocators import DataReference
+from devito.deprecations import deprecations
 from devito.exceptions import InvalidArgument
 from devito.logger import debug, warning
 from devito.mpi import MPI
@@ -18,13 +20,13 @@ from devito.parameters import configuration
 from devito.symbolics import FieldFromPointer, normalize_args
 from devito.finite_differences import Differentiable, generate_fd_shortcuts
 from devito.finite_differences.tools import fd_weights_registry
-from devito.tools import (ReducerMap, as_tuple, c_restrict_void_p, flatten, is_integer,
-                          memoized_meth, dtype_to_ctype, humanbytes)
+from devito.tools import (ReducerMap, as_tuple, c_restrict_void_p, flatten,
+                          is_integer, memoized_meth, dtype_to_ctype, humanbytes)
 from devito.types.dimension import Dimension
 from devito.types.args import ArgProvider
 from devito.types.caching import CacheManager
 from devito.types.basic import AbstractFunction, Size
-from devito.types.utils import Buffer, DimensionTuple, NODE, CELL
+from devito.types.utils import Buffer, DimensionTuple, NODE, CELL, host_layer
 
 __all__ = ['Function', 'TimeFunction', 'SubFunction', 'TempFunction']
 
@@ -72,10 +74,7 @@ class DiscreteFunction(AbstractFunction, ArgProvider, Differentiable):
         super().__init_finalize__(*args, **kwargs)
 
         # Symbolic (finite difference) coefficients
-        self._coefficients = kwargs.get('coefficients', self._default_fd)
-        if self._coefficients not in fd_weights_registry:
-            raise ValueError("coefficients must be one of %s"
-                             " not %s" % (str(fd_weights_registry), self._coefficients))
+        self._coefficients = self.__coefficients_setup__(**kwargs)
 
         # Data-related properties
         self._data = None
@@ -84,6 +83,7 @@ class DiscreteFunction(AbstractFunction, ArgProvider, Differentiable):
 
         # Data initialization
         initializer = kwargs.get('initializer')
+
         if self.alias:
             self._initializer = None
         elif function is not None:
@@ -91,6 +91,10 @@ class DiscreteFunction(AbstractFunction, ArgProvider, Differentiable):
             # `f(x+1)`), so we just copy the reference to the original data
             self._initializer = None
             self._data = function._data
+        elif isinstance(self._allocator, DataReference):
+            # Don't want to reinitialise array if DataReference used as allocator;
+            # create a no-op intialiser to avoid overwriting the original array.
+            self._initializer = lambda x: None
         elif initializer is None or callable(initializer) or self.alias:
             # Initialization postponed until the first access to .data
             self._initializer = initializer
@@ -162,6 +166,19 @@ class DiscreteFunction(AbstractFunction, ArgProvider, Differentiable):
             return grid.dtype
         else:
             return np.float32
+
+    def __coefficients_setup__(self, **kwargs):
+        """
+        Setup finite-differences coefficients mode
+        """
+        coeffs = kwargs.get('coefficients', self._default_fd)
+        if coeffs not in fd_weights_registry:
+            if coeffs == 'symbolic':
+                deprecations.symbolic_warn
+            else:
+                raise ValueError("coefficients must be one of %s"
+                                 " not %s" % (str(fd_weights_registry), coeffs))
+        return coeffs
 
     def __staggered_setup__(self, **kwargs):
         """
@@ -751,8 +768,10 @@ class DiscreteFunction(AbstractFunction, ArgProvider, Differentiable):
 
     def _halo_exchange(self):
         """Perform the halo exchange with the neighboring processes."""
-        if not MPI.Is_initialized() or MPI.COMM_WORLD.size == 1 or \
-                not configuration['mpi']:
+        if not MPI.Is_initialized() or \
+                MPI.COMM_WORLD.size == 1 or \
+                not configuration['mpi'] or \
+                self.grid is None:
             # Nothing to do
             return
         if MPI.COMM_WORLD.size > 1 and self._distributor is None:
@@ -865,11 +884,13 @@ class DiscreteFunction(AbstractFunction, ArgProvider, Differentiable):
 
         if args.options['index-mode'] == 'int32' and \
            args.options['linearize'] and \
+           self.is_regular and \
            data.size - 1 >= np.iinfo(np.int32).max:
-            raise InvalidArgument("`%s`, with its %d elements, may be too big for "
-                                  "int32 pointer arithmetic, which might cause an "
-                                  "overflow. Use the 'index-mode=int64' option"
-                                  % (self, data.size))
+            raise InvalidArgument("`%s`, with its %d elements, is too big for "
+                                  "int32 pointer arithmetic. Consider using the "
+                                  "'index-mode=int64' option, the save=Buffer(..) "
+                                  "API (TimeFunction only), or domain "
+                                  "decomposition via MPI" % (self.name, data.size))
 
     def _arg_finalize(self, args, alias=None):
         key = alias or self
@@ -1441,6 +1462,13 @@ class TimeFunction(Function):
         _t = self.dimensions[self._time_position]
 
         return self._subs(_t, _t - i * _t.spacing)
+
+    @property
+    def layer(self):
+        """
+        The memory hierarchy layer in which the TimeFunction is stored.
+        """
+        return host_layer
 
     @property
     def _time_size(self):

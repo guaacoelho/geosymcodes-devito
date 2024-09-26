@@ -13,7 +13,7 @@ __all__ = ['AccessMode', 'Stencil', 'IMask', 'detect_accesses', 'detect_io',
            'extrema', 'erange']
 
 
-class AccessMode(object):
+class AccessMode:
 
     """
     A descriptor for access modes (read, write, ...).
@@ -186,7 +186,11 @@ def detect_accesses(exprs):
     other_dims = set()
     for e in as_tuple(exprs):
         other_dims.update(i for i in e.free_symbols if isinstance(i, Dimension))
-        other_dims.update(e.implicit_dims)
+        try:
+            other_dims.update(e.implicit_dims or {})
+        except AttributeError:
+            # Not a types.Eq
+            pass
     other_dims = filter_sorted(other_dims)
     mapper[None] = Stencil([(i, 0) for i in other_dims])
 

@@ -1,16 +1,18 @@
 import os
 
 from collections.abc import Iterable
+from functools import cached_property
 
 from devito.core.autotuning import autotune
 from devito.exceptions import InvalidArgument, InvalidOperator
+from devito.ir import FindSymbols
 from devito.logger import warning
 from devito.mpi.routines import mpi_registry
 from devito.parameters import configuration
 from devito.operator import Operator
 from devito.tools import (as_tuple, is_integer, timed_pass,
                           UnboundTuple, UnboundedMultiTuple)
-from devito.types import NThreads, TimeFunction, VectorTimeFunction, TensorTimeFunction
+from devito.types import NThreads, TimeFunction, VectorTimeFunction, TensorTimeFunction, PThreadArray
 
 
 __all__ = ['CoreOperator', 'CustomOperator',
@@ -26,6 +28,16 @@ class BasicOperator(Operator):
     """
     Minimum computational cost of an operation to be eliminated as a
     common sub=expression.
+    """
+
+    CSE_ALGO = 'basic'
+    """
+    The algorithm to use for common sub-expression elimination.
+    """
+
+    FACT_SCHEDULE = 'basic'
+    """
+    The schedule to use for the computation of factorizations.
     """
 
     BLOCK_LEVELS = 1
@@ -116,10 +128,10 @@ class BasicOperator(Operator):
     stencil-like data accesses.
     """
 
-    INDEX_MODE = "int64"
+    INDEX_MODE = "int32"
     """
-    The type of the expression used to compute array indices. Either `int64`
-    (default) or `int32`.
+    The type of the expression used to compute array indices. Either `int32`
+    (default) or `int64`.
     """
 
     ERRCTL = None
@@ -160,6 +172,9 @@ class BasicOperator(Operator):
         if oo['mpi'] and oo['mpi'] not in cls.MPI_MODES:
             raise InvalidOperator("Unsupported MPI mode `%s`" % oo['mpi'])
 
+        if oo['cse-algo'] not in ('basic', 'smartsort', 'advanced'):
+            raise InvalidArgument("Illegal `cse-algo` value")
+
         if oo['deriv-schedule'] not in ('basic', 'smart'):
             raise InvalidArgument("Illegal `deriv-schedule` value")
         if oo['deriv-unroll'] not in (False, 'inner', 'full'):
@@ -193,7 +208,7 @@ class BasicOperator(Operator):
 
         return args
 
-    @property
+    @cached_property
     def nthreads(self):
         nthreads = [i for i in self.input if isinstance(i, NThreads)]
         if len(nthreads) == 0:
@@ -201,6 +216,12 @@ class BasicOperator(Operator):
         else:
             assert len(nthreads) == 1
             return nthreads.pop()
+
+    @cached_property
+    def npthreads(self):
+        symbols = FindSymbols().visit(self.body)
+        ptas = [i for i in symbols if isinstance(i, PThreadArray)]
+        return sum(i.size for i in ptas)
 
 
 class CoreOperator(BasicOperator):
@@ -348,7 +369,7 @@ class CustomOperator(BasicOperator):
 # Wrappers for optimization options
 
 
-class OptOption(object):
+class OptOption:
     pass
 
 
@@ -425,7 +446,10 @@ class ParTile(UnboundedMultiTuple, OptOption):
         obj.reduce = as_tuple(reduce)
 
         return obj
-
+    
+    @property
+    def is_multi(self):
+        return len(self) > 1
 
 class CompressionConfig(OptOption):    
     """

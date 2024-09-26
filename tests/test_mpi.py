@@ -4,23 +4,24 @@ from functools import cached_property
 
 from conftest import _R, assert_blocking, assert_structure
 from devito import (Grid, Constant, Function, TimeFunction, SparseFunction,
-                    SparseTimeFunction, Dimension, ConditionalDimension, SubDimension,
-                    SubDomain, Eq, Ne, Inc, NODE, Operator, norm, inner, configuration,
-                    switchconfig, generic_derivative, PrecomputedSparseFunction,
-                    DefaultDimension)
+                    SparseTimeFunction, Dimension, ConditionalDimension, div,
+                    SubDimension, SubDomain, Eq, Ne, Inc, NODE, Operator, norm,
+                    inner, configuration, switchconfig, generic_derivative,
+                    PrecomputedSparseFunction, DefaultDimension, Buffer)
 from devito.arch.compiler import OneapiCompiler
 from devito.data import LEFT, RIGHT
 from devito.ir.iet import (Call, Conditional, Iteration, FindNodes, FindSymbols,
                            retrieve_iteration_tree)
 from devito.mpi import MPI
-from devito.mpi.routines import HaloUpdateCall, HaloUpdateList, MPICall, ComputeCall
+from devito.mpi.routines import (HaloUpdateCall, HaloUpdateList, MPICall,
+                                 ComputeCall)
 from devito.mpi.distributed import CustomTopology
 from devito.tools import Bunch
 
 from examples.seismic.acoustic import acoustic_setup
 
 
-class TestDistributor(object):
+class TestDistributor:
 
     @pytest.mark.parallel(mode=[2, 4])
     def test_partitioning(self, mode):
@@ -227,8 +228,18 @@ class TestDistributor(object):
         custom_topology = CustomTopology(topology, dummy_comm)
         assert custom_topology == dist_topology
 
+    @pytest.mark.parallel(mode=[(4, 'diag2')])
+    @switchconfig(topology='y')
+    def test_custom_topology_fallback(self, mode):
+        grid = Grid(shape=(16,))
+        f = Function(name='f', grid=grid)
 
-class TestFunction(object):
+        # The input topology was `y` but Grid only has one axis, so we decompose
+        # along that instead
+        assert f.shape == (4,)
+
+
+class TestFunction:
 
     @pytest.mark.parallel(mode=2)
     def test_halo_exchange_bilateral(self, mode):
@@ -435,7 +446,7 @@ class TestFunction(object):
             MPI.Finalize()
 
 
-class TestSparseFunction(object):
+class TestSparseFunction:
 
     @pytest.mark.parallel(mode=4)
     @pytest.mark.parametrize('shape, coords, points', [
@@ -703,7 +714,7 @@ class TestSparseFunction(object):
         assert np.all(s.data == 1)
 
 
-class TestOperatorSimple(object):
+class TestOperatorSimple:
 
     @pytest.mark.parallel(mode=[2, 4, 8])
     def test_trivial_eq_1d(self, mode):
@@ -895,7 +906,7 @@ class TestOperatorSimple(object):
         assert np.all(f2.data == 1.)
 
 
-class TestCodeGeneration(object):
+class TestCodeGeneration:
 
     @pytest.mark.parallel(mode=1)
     def test_avoid_haloupdate_as_nostencil_basic(self, mode):
@@ -945,6 +956,27 @@ class TestCodeGeneration(object):
         op = Operator([Eq(f.forward, f[t, x-1] + f[t, x+1] + 1.),
                        Inc(f[t+1, i], 1.),  # no halo update as it's an Inc
                        Eq(g, f[t, j] + 1)])  # access `f` at `t`, not `t+1`!
+
+        calls = FindNodes(Call).visit(op)
+        assert len(calls) == 1
+
+    @pytest.mark.parallel(mode=1)
+    def test_avoid_redundant_haloupdate_cond(self, mode):
+        grid = Grid(shape=(12,))
+        x = grid.dimensions[0]
+        t = grid.stepping_dim
+
+        i = Dimension(name='i')
+        j = Dimension(name='j')
+
+        f = TimeFunction(name='f', grid=grid)
+        g = Function(name='g', grid=grid)
+        t_sub = ConditionalDimension(name='t_sub', parent=t, factor=2)
+
+        op = Operator([Eq(f.forward, f[t, x-1] + f[t, x+1] + 1.),
+                       Inc(f[t+1, i], 1.),  # no halo update as it's an Inc
+                       # access `f` at `t`, not `t+1` through factor subdim!
+                       Eq(g, f[t, j] + 1, implicit_dim=t_sub)])
 
         calls = FindNodes(Call).visit(op)
         assert len(calls) == 1
@@ -1459,7 +1491,7 @@ class TestCodeGeneration(object):
             # W/ OpenMP, we prod until all comms have completed
             assert call.then_body[0].body[0].is_While
             # W/ OpenMP, we expect dynamic thread scheduling
-            assert 'dynamic,1' in tree.root.pragmas[0].value
+            assert 'dynamic,1' in tree.root.pragmas[0].ccode.value
         else:
             # W/o OpenMP, it's a different story
             assert call._single_thread
@@ -1483,7 +1515,7 @@ class TestCodeGeneration(object):
             # W/ OpenMP, we prod until all comms have completed
             assert call.then_body[0].body[0].is_While
             # W/ OpenMP, we expect dynamic thread scheduling
-            assert 'dynamic,1' in tree.root.pragmas[0].value
+            assert 'dynamic,1' in tree.root.pragmas[0].ccode.value
         else:
             # W/o OpenMP, it's a different story
             assert call._single_thread
@@ -1607,8 +1639,30 @@ class TestCodeGeneration(object):
         calls = FindNodes(Call).visit(op)
         assert len(calls) == 2   # One for `v` and one for `usave`
 
+    @pytest.mark.parallel(mode=1)
+    def test_haloupdate_buffer1(self, mode):
+        grid = Grid(shape=(4, 4))
+        x, y = grid.dimensions
 
-class TestOperatorAdvanced(object):
+        u = TimeFunction(name='u', grid=grid, time_order=1, save=Buffer(1))
+        v = TimeFunction(name='v', grid=grid, time_order=1, save=Buffer(1))
+
+        eqns = [Eq(u.forward, div(v) + 1.),
+                Eq(v.forward, div(u.forward) + 1.)]
+
+        op = Operator(eqns)
+
+        calls = FindNodes(Call).visit(op)
+        # There should be two separate calls
+        # halo(v), eq_u, halo_u, eq(v)
+        assert len(calls) == 2
+
+        # Also ensure the compiler is doing its job removing unnecessary
+        # ModuloDimensions
+        assert len([i for i in FindSymbols('dimensions').visit(op) if i.is_Modulo]) == 0
+
+
+class TestOperatorAdvanced:
 
     @pytest.mark.parallel(mode=4)
     def test_injection_wodup(self, mode):
@@ -2338,9 +2392,9 @@ class TestOperatorAdvanced(object):
         op(time_M=2)
 
         # Expected norms computed "manually" from sequential runs
-        assert np.isclose(norm(ux), 6042.554, rtol=1.e-4)
-        assert np.isclose(norm(uxx), 64632.75, rtol=1.e-4)
-        assert np.isclose(norm(uxy), 59737.77, rtol=1.e-4)
+        assert np.isclose(norm(ux), 7003.098, rtol=1.e-4)
+        assert np.isclose(norm(uxx), 78902.21, rtol=1.e-4)
+        assert np.isclose(norm(uxy), 71852.62, rtol=1.e-4)
 
     @pytest.mark.parallel(mode=2)
     def test_op_new_dist(self, mode):
@@ -2586,7 +2640,7 @@ def gen_serial_norms(shape, so):
         np.save("norms%s.npy" % len(shape), (Eu, Erec, Ev, Esrca, day), allow_pickle=True)
 
 
-class TestIsotropicAcoustic(object):
+class TestIsotropicAcoustic:
 
     """
     Test the isotropic acoustic wave equation with MPI.
@@ -2637,14 +2691,17 @@ class TestIsotropicAcoustic(object):
         solver = acoustic_setup(shape=shape, spacing=[15. for _ in shape],
                                 tn=tn, space_order=so, nrec=nrec,
                                 preset='layers-isotropic', dtype=np.float64)
+
         # Run forward operator
-        rec, u, _ = solver.forward()
+        src = solver.geometry.src
+        rec, u, _ = solver.forward(src=src)
 
         assert np.isclose(norm(u) / Eu, 1.0)
         assert np.isclose(norm(rec) / Erec, 1.0)
 
         # Run adjoint operator
-        srca, v, _ = solver.adjoint(rec=rec)
+        srca = src.func(name='srca')
+        srca, v, _ = solver.adjoint(srca=srca, rec=rec)
 
         assert np.isclose(norm(v) / Ev, 1.0)
         assert np.isclose(norm(srca) / Esrca, 1.0)

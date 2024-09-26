@@ -1,4 +1,4 @@
-from ctypes import POINTER, Structure, c_void_p, c_ulong
+from ctypes import POINTER, Structure, c_void_p, c_ulong, c_uint64
 from functools import cached_property
 
 import numpy as np
@@ -6,16 +6,26 @@ from sympy import Expr
 
 from devito.tools import (Reconstructable, as_tuple, c_restrict_void_p,
                           dtype_to_ctype, dtypes_vector_mapper, is_integer)
-from devito.types.basic import AbstractFunction
+from devito.types.basic import AbstractFunction, LocalType
 from devito.types.utils import CtypesFactory, DimensionTuple
 
 __all__ = ['Array', 'ArrayMapped', 'ArrayObject', 'PointerArray', 'Bundle',
            'ComponentAccess', 'Bag']
 
 
-class ArrayBasic(AbstractFunction):
+class ArrayBasic(AbstractFunction, LocalType):
 
     is_ArrayBasic = True
+
+    __rkwargs__ = AbstractFunction.__rkwargs__ + ('is_const', 'liveness')
+
+    def __init_finalize__(self, *args, **kwargs):
+        super().__init_finalize__(*args, **kwargs)
+
+        self._liveness = kwargs.get('liveness', 'lazy')
+        assert self._liveness in ['eager', 'lazy']
+
+        self._is_const = kwargs.get('is_const', False)
 
     @classmethod
     def __indices_setup__(cls, *args, **kwargs):
@@ -45,6 +55,10 @@ class ArrayBasic(AbstractFunction):
     @property
     def shape_allocated(self):
         return self.symbolic_shape
+
+    @property
+    def is_const(self):
+        return self._is_const
 
 
 class Array(ArrayBasic):
@@ -101,8 +115,8 @@ class Array(ArrayBasic):
 
     is_Array = True
 
-    __rkwargs__ = (AbstractFunction.__rkwargs__ +
-                   ('dimensions', 'liveness', 'scope', 'initvalue'))
+    __rkwargs__ = (ArrayBasic.__rkwargs__ +
+                   ('dimensions', 'scope', 'initvalue'))
 
     def __new__(cls, *args, **kwargs):
         kwargs.update({'options': {'evaluate': False}})
@@ -115,9 +129,6 @@ class Array(ArrayBasic):
 
     def __init_finalize__(self, *args, **kwargs):
         super().__init_finalize__(*args, **kwargs)
-
-        self._liveness = kwargs.get('liveness', 'lazy')
-        assert self._liveness in ['eager', 'lazy']
 
         self._scope = kwargs.get('scope', 'heap')
         assert self._scope in ['heap', 'stack', 'static', 'constant', 'shared']
@@ -144,24 +155,12 @@ class Array(ArrayBasic):
         return DimensionTuple(*padding, getters=self.dimensions)
 
     @property
-    def liveness(self):
-        return self._liveness
-
-    @property
     def scope(self):
         return self._scope
 
     @property
     def _C_ctype(self):
         return POINTER(dtype_to_ctype(self.dtype))
-
-    @property
-    def _mem_internal_eager(self):
-        return self._liveness == 'eager'
-
-    @property
-    def _mem_internal_lazy(self):
-        return self._liveness == 'lazy'
 
     @property
     def _mem_stack(self):
@@ -195,13 +194,15 @@ class ArrayMapped(Array):
 
     _C_structname = 'array'
     _C_field_data = 'data'
-    _C_field_nbytes = 'nbytes'
     _C_field_dmap = 'dmap'
+    _C_field_nbytes = 'nbytes'
+    _C_field_size = 'size'
 
     _C_ctype = POINTER(type(_C_structname, (Structure,),
                             {'_fields_': [(_C_field_data, c_restrict_void_p),
                                           (_C_field_nbytes, c_ulong),
-                                          (_C_field_dmap, c_void_p)]}))
+                                          (_C_field_dmap, c_void_p),
+                                          (_C_field_size, c_uint64)]}))
 
 
 class ArrayObject(ArrayBasic):
@@ -365,6 +366,8 @@ class Bundle(ArrayBasic):
             raise ValueError("Components must be of same type")
         if not issubclass(klss.pop(), AbstractFunction):
             raise ValueError("Component type must be subclass of AbstractFunction")
+        if len({i.__padding_dtype__ for i in components}) != 1:
+            raise ValueError("Components must have the same padding dtype")
 
         return args, kwargs
 
@@ -436,14 +439,14 @@ class Bundle(ArrayBasic):
     def initvalue(self):
         return None
 
-    # CodeSymbol overrides defaulting to self.c0's behaviour
+    # Overrides defaulting to self.c0's behaviour
 
     for i in ['_mem_internal_eager', '_mem_internal_lazy', '_mem_local',
               '_mem_mapped', '_mem_host', '_mem_stack', '_mem_constant',
-              '_mem_shared', '_size_domain', '_size_halo', '_size_owned',
-              '_size_padding', '_size_nopad', '_size_nodomain', '_offset_domain',
-              '_offset_halo', '_offset_owned', '_dist_dimensions', '_C_get_field',
-              'grid', 'symbolic_shape']:
+              '_mem_shared', '__padding_dtype__', '_size_domain', '_size_halo',
+              '_size_owned', '_size_padding', '_size_nopad', '_size_nodomain',
+              '_offset_domain', '_offset_halo', '_offset_owned', '_dist_dimensions',
+              '_C_get_field', 'grid', 'symbolic_shape']:
         locals()[i] = property(lambda self, v=i: getattr(self.c0, v))
 
     @property
@@ -472,6 +475,7 @@ class Bundle(ArrayBasic):
     _C_field_data = ArrayMapped._C_field_data
     _C_field_nbytes = ArrayMapped._C_field_nbytes
     _C_field_dmap = ArrayMapped._C_field_dmap
+    _C_field_size = ArrayMapped._C_field_size
 
     @property
     def _C_ctype(self):

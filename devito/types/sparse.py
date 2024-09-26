@@ -80,7 +80,10 @@ class AbstractSparseFunction(DiscreteFunction):
         else:
             sparse_dim = Dimension(name='p_%s' % kwargs["name"])
 
-        dimensions = as_tuple(kwargs.get('dimensions', sparse_dim))
+        dimensions = as_tuple(kwargs.get('dimensions'))
+        if not dimensions:
+            dimensions = (sparse_dim,)
+
         if args:
             return tuple(dimensions), tuple(args)
         else:
@@ -325,16 +328,6 @@ class AbstractSparseFunction(DiscreteFunction):
                                                   self.grid.origin_symbols)])
 
     @cached_property
-    def _dist_reorder_mask(self):
-        """
-        An ordering mask that puts ``self._sparse_position`` at the front.
-        """
-        ret = (self._sparse_position,)
-        ret += tuple(i for i, d in enumerate(self.dimensions)
-                     if d is not self._sparse_dim)
-        return ret
-
-    @cached_property
     def dist_origin(self):
         return self._dist_origin
 
@@ -390,6 +383,16 @@ class AbstractSparseFunction(DiscreteFunction):
             out = indexify(expr).subs({f._sparse_dim: cd for f in functions})
 
         return out, temps
+
+    @cached_property
+    def _dist_reorder_mask(self):
+        """
+        An ordering mask that puts ``self._sparse_position`` at the front.
+        """
+        ret = (self._sparse_position,)
+        ret += tuple(i for i, d in enumerate(self.dimensions)
+                     if d is not self._sparse_dim)
+        return ret
 
     def _dist_scatter_mask(self, dmap=None):
         """
@@ -713,8 +716,9 @@ class AbstractSparseTimeFunction(AbstractSparseFunction):
     @classmethod
     def __indices_setup__(cls, *args, **kwargs):
         dimensions = as_tuple(kwargs.get('dimensions'))
+        time_dim = kwargs.get('time_dim', kwargs['grid'].time_dim)
         if not dimensions:
-            dimensions = (kwargs['grid'].time_dim,
+            dimensions = (time_dim,
                           *super().__indices_setup__(*args, **kwargs)[0])
 
         if args:
@@ -1015,6 +1019,14 @@ class SparseTimeFunction(AbstractSparseTimeFunction, SparseFunction):
             expr = expr.subs({self.time_dim: p_t})
 
         return super().inject(field, expr, implicit_dims=implicit_dims)
+
+    @property
+    def forward(self):
+        """Symbol for the time-forward state of the TimeFunction."""
+        i = int(self.time_order / 2) if self.time_order >= 2 else 1
+        _t = self.dimensions[self._time_position]
+
+        return self._subs(_t, _t + i * _t.spacing)
 
 
 class PrecomputedSparseFunction(AbstractSparseFunction):

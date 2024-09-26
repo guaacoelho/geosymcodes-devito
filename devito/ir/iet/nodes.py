@@ -13,7 +13,7 @@ from devito.data import FULL
 from devito.ir.equations import DummyEq, OpInc, OpMin, OpMax
 from devito.ir.support import (INBOUND, SEQUENTIAL, PARALLEL, PARALLEL_IF_ATOMIC,
                                PARALLEL_IF_PVT, VECTORIZED, AFFINE, Property,
-                               Forward, detect_io)
+                               Forward, WithLock, PrefetchUpdate, detect_io)
 from devito.symbolics import ListInitializer, CallFromPointer, ccode
 from devito.tools import (Signer, as_tuple, filter_ordered, filter_sorted, flatten,
                           ctypes_to_cstr)
@@ -155,7 +155,7 @@ class Node(Signer):
         return (str(self.ccode),)
 
 
-class ExprStmt(object):
+class ExprStmt:
 
     """
     A mixin for Nodes that represent C expression statements, which are expressions
@@ -1218,24 +1218,28 @@ class UsingNamespace(Node):
 class Pragma(Node):
 
     """
-    One or more pragmas floating in the IET constructed through a callback.
+    One or more pragmas floating in the IET.
     """
 
-    def __init__(self, callback, arguments=None):
+    def __init__(self, pragma, arguments=None):
         super().__init__()
 
-        self.callback = callback
+        if not isinstance(pragma, str):
+            raise TypeError("Pragma name must be a string, not %s" % type(pragma))
+
+        self.pragma = pragma
         self.arguments = as_tuple(arguments)
 
     def __repr__(self):
-        return '<Pragmas>'
+        return '<Pragma>'
 
     @cached_property
-    def pragmas(self):
-        return as_tuple(self.callback(*self.arguments))
+    def _generate(self):
+        # Subclasses may override this property to customize the pragma generation
+        return self.pragma % self.arguments
 
 
-class Transfer(object):
+class Transfer:
 
     """
     An interface for Nodes that represent host-device data transfers.
@@ -1378,6 +1382,21 @@ class SyncSpot(List):
 
     def __repr__(self):
         return "<SyncSpot (%s)>" % ",".join(str(i) for i in self.sync_ops)
+
+    @property
+    def is_async_op(self):
+        """
+        True if the SyncSpot contains an asynchronous operation, False otherwise.
+        If False, the SyncSpot may for example represent a wait on a lock.
+        """
+        return any(isinstance(s, (WithLock, PrefetchUpdate))
+                   for s in self.sync_ops)
+
+    @property
+    def functions(self):
+        ret = [(s.lock, s.function, s.target) for s in self.sync_ops]
+        ret = tuple(filter_ordered(f for f in flatten(ret) if f is not None))
+        return ret
 
 
 class CBlankLine(List):

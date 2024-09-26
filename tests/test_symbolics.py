@@ -17,6 +17,7 @@ from devito.symbolics import (retrieve_functions, retrieve_indexed, evalrel,  # 
 from devito.tools import as_tuple
 from devito.types import (Array, Bundle, FIndexed, LocalObject, Object,
                           Symbol as dSymbol)
+from devito.types.basic import AbstractSymbol
 
 
 def test_float_indices():
@@ -68,6 +69,46 @@ def test_floatification_issue_1627(dtype, expected):
     exprs = FindNodes(Expression).visit(op)
     assert len(exprs) == 2
     assert str(exprs[0]) == expected
+
+
+def test_sympy_assumptions():
+    """
+    Ensure that AbstractSymbol assumptions are set correctly and
+    preserved during rebuild.
+    """
+    s0 = AbstractSymbol('s')
+    s1 = AbstractSymbol('s', nonnegative=True, integer=False, real=True)
+
+    assert s0.is_negative is None
+    assert s0.is_positive is None
+    assert s0.is_integer is None
+    assert s0.is_real is True
+    assert s1.is_negative is False
+    assert s1.is_positive is True
+    assert s1.is_integer is False
+    assert s1.is_real is True
+
+    s0r = s0._rebuild()
+    s1r = s1._rebuild()
+
+    assert s0.assumptions0 == s0r.assumptions0
+    assert s0 == s0r
+
+    assert s1.assumptions0 == s1r.assumptions0
+    assert s1 == s1r
+
+
+def test_modified_sympy_assumptions():
+    """
+    Check that sympy assumptions can be changed during a rebuild.
+    """
+    s0 = AbstractSymbol('s')
+    s1 = AbstractSymbol('s', nonnegative=True, integer=False, real=True)
+
+    s2 = s0._rebuild(nonnegative=True, integer=False, real=True)
+
+    assert s2.assumptions0 == s1.assumptions0
+    assert s2 == s1
 
 
 def test_constant():
@@ -365,14 +406,28 @@ def test_cast():
 
 def test_findexed():
     grid = Grid(shape=(3, 3, 3))
+    x, y, z = grid.dimensions
+
     f = Function(name='f', grid=grid)
 
-    fi = FIndexed.from_indexed(f.indexify(), "foo", strides=(1, 2))
-    new_fi = fi.func(strides=(3, 4))
+    strides_map = {x: 1, y: 2, z: 3}
+    fi = FIndexed(f.base, x+1, y, z-2, strides_map=strides_map)
+    assert ccode(fi) == 'f(x + 1, y, z - 2)'
+
+    # Binding
+    _, fi1 = fi.bind('fL')
+    assert fi1.base is f.base
+    assert ccode(fi1) == 'fL(x + 1, y, z - 2)'
+
+    # Reconstruction
+    strides_map = {x: 3, y: 2, z: 1}
+    new_fi = fi.func(strides_map=strides_map, accessor=fi1.accessor)
 
     assert new_fi.name == fi.name == 'f'
+    assert new_fi.accessor == fi1.accessor
+    assert new_fi.accessor.name == 'fL'
     assert new_fi.indices == fi.indices
-    assert new_fi.strides == (3, 4)
+    assert new_fi.strides_map == strides_map
 
 
 def test_symbolic_printing():
@@ -389,9 +444,9 @@ def test_symbolic_printing():
 
     grid = Grid((10,))
     f = Function(name="f", grid=grid)
-    fi = FIndexed.from_indexed(f.indexify(), "foo", strides=(1, 2))
+    fi = FIndexed(f.base, grid.dimensions[0])
     df = DefFunction('aaa', arguments=[fi])
-    assert ccode(df) == 'aaa(foo(x))'
+    assert ccode(df) == 'aaa(f(x))'
 
 
 def test_is_on_grid():
@@ -507,7 +562,7 @@ def test_minmax():
     assert np.all(f.data == 4)
 
 
-class TestRelationsWithAssumptions(object):
+class TestRelationsWithAssumptions:
 
     def test_multibounds_op(self):
         """

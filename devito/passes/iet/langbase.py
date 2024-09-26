@@ -32,7 +32,7 @@ class LangMeta(type):
         return self.mapper[k]
 
 
-class LangBB(object, metaclass=LangMeta):
+class LangBB(metaclass=LangMeta):
 
     """
     Abstract base class for Language Building Blocks.
@@ -380,7 +380,7 @@ class ShmTransformer(LangTransformer):
         return root, list(collapsable)
 
 
-class DeviceAwareMixin(object):
+class DeviceAwareMixin:
 
     @property
     def deviceid(self):
@@ -432,7 +432,6 @@ class DeviceAwareMixin(object):
                         break
                     except AttributeError:
                         pass
-                assert objcomm is not None
 
             devicetype = as_list(self.lang[self.platform])
             deviceid = self.deviceid

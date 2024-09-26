@@ -6,19 +6,20 @@ import numpy as np
 from devito.ir.equations import ClusterizedEq
 from devito.ir.support import (PARALLEL, PARALLEL_IF_PVT, BaseGuardBoundNext,
                                Forward, Interval, IntervalGroup, IterationSpace,
-                               DataSpace, Guards, Properties, Scope, WithLock,
-                               PrefetchUpdate, detect_accesses, detect_io,
+                               DataSpace, Guards, Properties, Scope, WaitLock,
+                               WithLock, PrefetchUpdate, detect_accesses, detect_io,
                                normalize_properties, normalize_syncs, minimum,
                                maximum, null_ispace)
 from devito.mpi.halo_scheme import HaloScheme, HaloTouch
+from devito.mpi.reduction_scheme import DistReduce
 from devito.symbolics import estimate_cost
-from devito.tools import as_tuple, flatten, frozendict, infer_dtype
+from devito.tools import as_tuple, flatten, infer_dtype
 from devito.types import WeakFence, CriticalRegion
 
 __all__ = ["Cluster", "ClusterGroup"]
 
 
-class Cluster(object):
+class Cluster:
 
     """
     A Cluster is an ordered sequence of expressions in an IterationSpace.
@@ -48,9 +49,8 @@ class Cluster(object):
         self._exprs = tuple(ClusterizedEq(e, ispace=ispace) for e in as_tuple(exprs))
         self._ispace = ispace
         self._guards = Guards(guards or {})
-        self._syncs = frozendict(syncs or {})
+        self._syncs = normalize_syncs(syncs or {})
 
-        # Normalize properties
         properties = Properties(properties or {})
         self._properties = tailor_properties(properties, ispace)
 
@@ -167,6 +167,19 @@ class Cluster(object):
         return {i for i in self.free_symbols if i.is_Dimension} | idims
 
     @cached_property
+    def dist_dimensions(self):
+        """
+        The Cluster's distributed Dimensions.
+        """
+        ret = set()
+        for f in self.functions:
+            try:
+                ret.update(f._dist_dimensions)
+            except AttributeError:
+                pass
+        return frozenset(ret)
+
+    @cached_property
     def scope(self):
         return Scope(self.exprs)
 
@@ -175,13 +188,12 @@ class Cluster(object):
         return self.scope.functions
 
     @cached_property
-    def has_increments(self):
-        return any(e.is_Increment for e in self.exprs)
-
-    @cached_property
     def grid(self):
-        grids = set(f.grid for f in self.functions if f.is_DiscreteFunction) - {None}
-        if len(grids) == 1:
+        grids = set(f.grid for f in self.functions if f.is_AbstractFunction)
+        grids.discard(None)
+        if len(grids) == 0:
+            return None
+        elif len(grids) == 1:
             return grids.pop()
         else:
             raise ValueError("Cluster has no unique Grid")
@@ -210,7 +222,7 @@ class Cluster(object):
             dims = {d for d in self.properties if d._defines & target}
             if any(pset & self.properties[d] for d in dims):
                 return True
-        except ValueError:
+        except (AttributeError, ValueError):
             pass
 
         # Fallback to legacy is_dense checks
@@ -232,11 +244,15 @@ class Cluster(object):
         """
         True if encoding a non-mathematical operation, False otherwise.
         """
-        return self.is_halo_touch or self.is_fence
+        return self.is_halo_touch or self.is_dist_reduce or self.is_fence
 
     @property
     def is_halo_touch(self):
         return self.exprs and all(isinstance(e.rhs, HaloTouch) for e in self.exprs)
+
+    @property
+    def is_dist_reduce(self):
+        return self.exprs and all(isinstance(e.rhs, DistReduce) for e in self.exprs)
 
     @property
     def is_fence(self):
@@ -256,6 +272,15 @@ class Cluster(object):
         True if an asynchronous Cluster, False otherwise.
         """
         return any(isinstance(s, (WithLock, PrefetchUpdate))
+                   for s in flatten(self.syncs.values()))
+
+    @property
+    def is_wait(self):
+        """
+        True if a Cluster waiting on a lock (that is a special synchronization
+        operation), False otherwise.
+        """
+        return any(isinstance(s, WaitLock)
                    for s in flatten(self.syncs.values()))
 
     @cached_property
@@ -320,9 +345,9 @@ class Cluster(object):
                 if len(ret) != 1:
                     continue
                 if ret.pop().direction is Forward:
-                    intervals = intervals.translate(d, v1=-1)
+                    intervals = intervals.translate(d._defines, v1=-1)
                 else:
-                    intervals = intervals.translate(d, 1)
+                    intervals = intervals.translate(d._defines, 1)
             for d in self.properties:
                 if self.properties.is_inbound(d):
                     intervals = intervals.zero(d._defines)

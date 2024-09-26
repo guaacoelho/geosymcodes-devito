@@ -11,6 +11,7 @@ from devito import (Constant, Eq, Function, TimeFunction, SparseFunction, Grid,
                     PrecomputedSparseTimeFunction)
 from devito.ir import Backward, Forward, GuardFactor, GuardBound, GuardBoundNext
 from devito.data import LEFT, OWNED
+from devito.finite_differences.tools import direct, transpose, left, right, centered
 from devito.mpi.halo_scheme import Halo
 from devito.mpi.routines import (MPIStatusObject, MPIMsgEnriched, MPIRequestObject,
                                  MPIRegion)
@@ -18,7 +19,7 @@ from devito.types import (Array, CustomDimension, Symbol as dSymbol, Scalar,
                           PointerArray, Lock, PThreadArray, SharedData, Timer,
                           DeviceID, NPThreads, ThreadID, TempFunction, Indirection,
                           FIndexed)
-from devito.types.basic import BoundSymbol
+from devito.types.basic import BoundSymbol, AbstractSymbol
 from devito.tools import EnrichedTuple
 from devito.symbolics import (IntDiv, ListInitializer, FieldFromPointer,
                               CallFromPointer, DefFunction)
@@ -27,7 +28,23 @@ from examples.seismic import (demo_model, AcquisitionGeometry,
 
 
 @pytest.mark.parametrize('pickle', [pickle0, pickle1])
-class TestBasic(object):
+class TestBasic:
+
+    def test_abstractsymbol(self, pickle):
+        s0 = AbstractSymbol('s')
+        s1 = AbstractSymbol('s', nonnegative=True, integer=False)
+
+        pkl_s0 = pickle.dumps(s0)
+        pkl_s1 = pickle.dumps(s1)
+
+        new_s0 = pickle.loads(pkl_s0)
+        new_s1 = pickle.loads(pkl_s1)
+
+        assert s0.assumptions0 == new_s0.assumptions0
+        assert s1.assumptions0 == new_s1.assumptions0
+
+        assert s0 == new_s0
+        assert s1 == new_s1
 
     def test_constant(self, pickle):
         c = Constant(name='c')
@@ -58,7 +75,16 @@ class TestBasic(object):
         new_t = pickle.loads(pkl_t)
 
         assert new_t == tup  # This only tests the actual tuple
-        assert new_t._getters == tup._getters
+        assert new_t.getters == tup.getters
+        assert new_t.left == tup.left
+        assert new_t.right == tup.right
+
+    def test_enrichedtuple_rebuild(self, pickle):
+        tup = EnrichedTuple(11, 31, getters=('a', 'b'), left=[3, 4], right=[5, 6])
+        new_t = tup._rebuild()
+
+        assert new_t == tup
+        assert new_t.getters == tup.getters
         assert new_t.left == tup.left
         assert new_t.right == tup.right
 
@@ -334,16 +360,20 @@ class TestBasic(object):
 
     def test_findexed(self, pickle):
         grid = Grid(shape=(3, 3, 3))
+        x, y, z = grid.dimensions
+
         f = Function(name='f', grid=grid)
 
-        fi = FIndexed.from_indexed(f.indexify(), "foo", strides=(1, 2))
+        strides_map = {x: 1, y: 2, z: 3}
+        fi = FIndexed(f.base, x+1, y, z-2, strides_map=strides_map, accessor='fL')
 
         pkl_fi = pickle.dumps(fi)
         new_fi = pickle.loads(pkl_fi)
 
         assert new_fi.name == fi.name
-        assert new_fi.pname == fi.pname
-        assert new_fi.strides == fi.strides
+        assert new_fi.accessor == 'fL'
+        assert new_fi.indices == (x+1, y, z-2)
+        assert new_fi.strides_map == fi.strides_map
 
     def test_symbolics(self, pickle):
         a = Symbol('a')
@@ -475,9 +505,59 @@ class TestBasic(object):
         assert np.all(new_rec.data == 1)
         assert np.all(new_rec.coordinates.data == [[0.], [1.], [2.]])
 
+    @pytest.mark.parametrize('transpose', [direct, transpose])
+    @pytest.mark.parametrize('side', [left, right, centered])
+    @pytest.mark.parametrize('deriv_order', [1, 2])
+    @pytest.mark.parametrize('fd_order', [2, 4])
+    @pytest.mark.parametrize('x0', ["{}", "{x: x + x.spacing/2}"])
+    @pytest.mark.parametrize('method', ['FD', 'RSFD'])
+    @pytest.mark.parametrize('weights', [None, [1., 2., 3.]])
+    def test_derivative(self, pickle, transpose, side, deriv_order,
+                        fd_order, x0, method, weights):
+        grid = Grid(shape=(3,))
+        x = grid.dimensions[0]
+        x0 = eval(x0)
+        f = Function(name='f', grid=grid, space_order=2)
+        dfdx = f.diff(x, order=deriv_order, fd_order=fd_order, side=side,
+                      x0=x0, method=method, weights=weights)
+
+        pkl_dfdx = pickle.dumps(dfdx)
+        new_dfdx = pickle.loads(pkl_dfdx)
+
+        assert new_dfdx.dims == dfdx.dims
+        assert new_dfdx.side == dfdx.side
+        assert new_dfdx.fd_order == dfdx.fd_order
+        assert new_dfdx.deriv_order == dfdx.deriv_order
+        assert new_dfdx.x0 == dfdx.x0
+        assert new_dfdx.method == dfdx.method
+        assert new_dfdx.weights == dfdx.weights
+
+
+class TestAdvanced:
+
+    def test_foreign(self):
+        MySparseFunction = type('MySparseFunction', (SparseFunction,), {'attr': 42})
+
+        grid = Grid(shape=(3,))
+
+        msf = MySparseFunction(name='msf', grid=grid, npoint=3, space_order=2,
+                               coordinates=[(0.,), (1.,), (2.,)])
+
+        # Plain `pickle` doesn't support pickling of dynamic classes
+        with pytest.raises(Exception):
+            pickle0.dumps(msf)
+
+        # But `cloudpickle` does
+        pkl_msf = pickle1.dumps(msf)
+        new_msf = pickle1.loads(pkl_msf)
+
+        assert new_msf.attr == 42
+        assert new_msf.name == 'msf'
+        assert new_msf.npoint == 3
+
 
 @pytest.mark.parametrize('pickle', [pickle0, pickle1])
-class TestOperator(object):
+class TestOperator:
 
     def test_geometry(self, pickle):
 
@@ -828,7 +908,8 @@ class TestOperator(object):
         assert np.isclose(np.linalg.norm(ricker.data), np.linalg.norm(new_ricker.data))
         # FIXME: fails randomly when using data.flatten() AND numpy is using MKL
 
-    def test_usave_sampled(self, pickle):
+    @pytest.mark.parametrize('subs', [False, True])
+    def test_usave_sampled(self, pickle, subs):
         grid = Grid(shape=(10, 10, 10))
         u = TimeFunction(name="u", grid=grid, time_order=2, space_order=8)
 
@@ -848,7 +929,9 @@ class TestOperator(object):
 
         eqn = [stencil] + src_term
         eqn += [Eq(u0_save, u)]
-        op_fwd = Operator(eqn)
+
+        subs = grid.spacing_map if subs else {}
+        op_fwd = Operator(eqn, subs=subs)
 
         tmp_pickle_op_fn = "tmp_operator.pickle"
         pickle.dump(op_fwd, open(tmp_pickle_op_fn, "wb"))

@@ -30,7 +30,7 @@ def t(grid):
     return grid.stepping_dim
 
 
-class TestFD(object):
+class TestFD:
     """
     Class for finite difference testing.
     Tests the accuracy w.r.t polynomials.
@@ -713,8 +713,26 @@ class TestFD(object):
         assert dxy0.x0 == {y: y+y.spacing/2}
         assert dxy02.x0 == {x: x+x.spacing/2}
 
+    def test_deriv_stagg_plain(self):
+        grid = Grid((11, 11))
+        x, y = grid.dimensions
+        f1 = Function(name="f1", grid=grid, space_order=2, staggered=NODE)
+        f2 = Function(name="f2", grid=grid, space_order=2, staggered=NODE)
 
-class TestTwoStageEvaluation(object):
+        eq0 = Eq(f1, f2.laplace).evaluate
+        assert eq0.rhs == f2.laplace.evaluate
+        assert eq0.rhs != 0
+
+    def test_issue_2442(self):
+        grid = Grid((11, 11))
+        f = Function(name="f", grid=grid, space_order=2)
+
+        dfdxdy = f.dxdy(side=centered).evaluate
+        dfdxdy_split = f.dxc.dyc
+        assert dfdxdy.evaluate == dfdxdy_split.evaluate
+
+
+class TestTwoStageEvaluation:
 
     def test_exceptions(self):
         grid = Grid((10,))

@@ -1,10 +1,43 @@
 import versioneer
 
 import os
+import pkg_resources
 from setuptools import setup, find_packages
+
+
+def min_max(pkgs, pkg_name):
+    pkg = [p for p in pkgs if pkg_name in p][0]
+    minsign = '>=' if '>=' in pkg else '>'
+    maxsign = '<=' if '<=' in pkg else '<'
+    vmin = pkg.split(minsign)[1].split(',')[0]
+    vmax = pkg.split(maxsign)[-1]
+    return vmin, vmax
+
+
+def numpy_compat(required):
+    new_reqs = [r for r in required if "numpy" not in r and "sympy" not in r]
+    sympy_lb, sympy_ub = min_max(required, "sympy")
+    numpy_lb, numpy_ub = min_max(required, "numpy")
+
+    # Due to api changes in numpy 2.0, it requires sympy 1.12.1 at the minimum
+    # Check if sympy is installed and enforce numpy version accordingly.
+    # If sympy isn't installed, enforce sympy>=1.12.1 and numpy>=2.0
+    try:
+        sympy_version = pkg_resources.get_distribution("sympy").version
+        min_ver2 = pkg_resources.parse_version("1.12.1")
+        if pkg_resources.parse_version(sympy_version) < min_ver2:
+            new_reqs.extend([f"numpy>{numpy_lb},<2.0", f"sympy=={sympy_version}"])
+        else:
+            new_reqs.extend([f"numpy>=2.0,<{numpy_ub}", f"sympy=={sympy_version}"])
+    except pkg_resources.DistributionNotFound:
+        new_reqs.extend([f"sympy>=1.12.1,<{sympy_ub}", f"numpy>=2.0,<{numpy_ub}"])
+
+    return new_reqs
+
 
 with open('requirements.txt') as f:
     required = f.read().splitlines()
+    required = numpy_compat(required)
 
 with open('requirements-optional.txt') as f:
     optionals = f.read().splitlines()
@@ -70,7 +103,7 @@ setup(name='devito',
       },
       url='http://www.devitoproject.org',
       platforms=["Linux", "Mac OS-X", "Unix"],
-      python_requires=">=3.8",
+      python_requires=">=3.9",
       classifiers=[
           'Development Status :: 5 - Production/Stable',
           'Intended Audience :: Developers',
@@ -82,7 +115,6 @@ setup(name='devito',
           'Operating System :: Unix',
           'Programming Language :: Python',
           'Programming Language :: Python :: 3',
-          'Programming Language :: Python :: 3.8',
           'Programming Language :: Python :: 3.9',
           'Programming Language :: Python :: 3.10',
           'Programming Language :: Python :: 3.11',

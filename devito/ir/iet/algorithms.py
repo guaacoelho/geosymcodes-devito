@@ -40,22 +40,26 @@ def iet_build(stree, **kwargs):
             body = Conditional(i.guard, queues.pop(i))
 
         elif i.is_Iteration:
-            iteration_nodes = queues.pop(i)
-            if isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'write':
-                if dswap.compression:
-                    iteration_nodes.append(Section("compress_temp"))
-                else:
-                    iteration_nodes.append(Section("write_temp"))
-                time_iterators = i.sub_iterators
-            elif isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'read':
-                if dswap.compression:
-                    iteration_nodes.insert(0, Section("decompress_temp"))
-                else:
-                    iteration_nodes.insert(0, Section("read_temp"))
-                time_iterators = i.sub_iterators
+            if i.dim.is_Virtual:
+                body = List(body=queues.pop(i))
+            else:
+                iteration_nodes = queues.pop(i) 
+                if isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'write':
+                    if dswap.compression:
+                        iteration_nodes.append(Section("compress_temp"))
+                    else:
+                        iteration_nodes.append(Section("write_temp"))
+                    time_iterators = i.sub_iterators
+                elif isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'read':
+                    if dswap.compression:
+                        iteration_nodes.insert(0, Section("decompress_temp"))
+                    else:
+                        iteration_nodes.insert(0, Section("read_temp"))
+                    time_iterators = i.sub_iterators
 
-            body = Iteration(iteration_nodes, i.dim, i.limits, direction=i.direction,
-                             properties=i.properties, uindices=i.sub_iterators)
+                body = Iteration(iteration_nodes, i.dim, i.limits,
+                                direction=i.direction, properties=i.properties,
+                                uindices=i.sub_iterators)
 
         elif i.is_Section:
             body = Section('section%d' % nsections, body=queues.pop(i))

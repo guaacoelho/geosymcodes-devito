@@ -91,7 +91,7 @@ class Data(np.ndarray):
 
     def __reduce__(self):
         warning("Pickling of `Data` objects is not supported. Casting to `numpy.ndarray`")
-        return np.array(self).__reduce__()
+        return self.view(np.ndarray).__reduce__()
 
     def __array_finalize__(self, obj):
         # `self` is the newly created object
@@ -116,7 +116,6 @@ class Data(np.ndarray):
             self._allocator = ALLOC_ALIGNED
         elif obj._index_stash is not None:
             # From `__getitem__`
-            self._is_distributed = obj._is_distributed
             self._distributor = obj._distributor
             glb_idx = obj._normalize_index(obj._index_stash)
             self._modulo = tuple(m for i, m in zip(glb_idx, obj._modulo)
@@ -131,10 +130,12 @@ class Data(np.ndarray):
                     decomposition.append(dec.reshape(i))
             self._decomposition = tuple(decomposition)
             self._allocator = obj._allocator
+            decomp = any(i is not None for i in self._decomposition)
+            self._is_distributed = decomp and obj._is_distributed
         else:
-            self._is_distributed = obj._is_distributed
             self._distributor = obj._distributor
             self._allocator = obj._allocator
+            self._is_distributed = obj._is_distributed
             if self.ndim == obj.ndim:
                 # E.g., from a ufunc, such as `np.add`
                 self._modulo = obj._modulo
@@ -186,8 +187,8 @@ class Data(np.ndarray):
                     if isinstance(i, slice) and i.step is not None and i.step < 0:
                         comm_type = index_by_index
                         break
-                    else:
-                        comm_type = serial
+                else:
+                    comm_type = serial
             else:
                 comm_type = serial
             kwargs['comm_type'] = comm_type

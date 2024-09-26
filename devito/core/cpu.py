@@ -2,6 +2,8 @@ from functools import partial
 
 from devito.core.operator import CoreOperator, CustomOperator, ParTile
 from devito.exceptions import InvalidOperator
+from devito.operator.operator import rcompile
+from devito.passes import stream_dimensions
 from devito.passes.equations import collect_derivatives
 from devito.passes.clusters import (Lift, blocking, buffering, cire, cse,
                                     factorize, fission, fuse, optimize_pows,
@@ -16,7 +18,7 @@ __all__ = ['Cpu64NoopCOperator', 'Cpu64NoopOmpOperator', 'Cpu64AdvCOperator',
            'Cpu64CustomOperator']
 
 
-class Cpu64OperatorMixin(object):
+class Cpu64OperatorMixin:
 
     @classmethod
     def _normalize_kwargs(cls, **kwargs):
@@ -36,8 +38,10 @@ class Cpu64OperatorMixin(object):
         # Fusion
         o['fuse-tasks'] = oo.pop('fuse-tasks', False)
 
-        # CSE
+        # Flops minimization
         o['cse-min-cost'] = oo.pop('cse-min-cost', cls.CSE_MIN_COST)
+        o['cse-algo'] = oo.pop('cse-algo', cls.CSE_ALGO)
+        o['fact-schedule'] = oo.pop('fact-schedule', cls.FACT_SCHEDULE)
 
         # Blocking
         o['blockinner'] = oo.pop('blockinner', False)
@@ -93,6 +97,22 @@ class Cpu64OperatorMixin(object):
         kwargs['options'].update(o)
 
         return kwargs
+
+    @classmethod
+    def _rcompile_wrapper(cls, **kwargs0):
+        options0 = kwargs0.pop('options')
+
+        def wrapper(expressions, options=None, **kwargs1):
+            options = {**options0, **(options or {})}
+            kwargs = {**kwargs0, **kwargs1}
+
+            # User-provided openmp flag has precedence over defaults
+            if not options['openmp']:
+                kwargs['language'] = 'C'
+
+            return rcompile(expressions, kwargs, options)
+
+        return wrapper
 
 
 # Mode level
@@ -151,14 +171,14 @@ class Cpu64AdvOperator(Cpu64OperatorMixin, CoreOperator):
 
         # Reduce flops
         clusters = cire(clusters, 'sops', sregistry, options, platform)
-        clusters = factorize(clusters)
+        clusters = factorize(clusters, **kwargs)
         clusters = optimize_pows(clusters)
 
         # The previous passes may have created fusion opportunities
         clusters = fuse(clusters)
 
         # Reduce flops
-        clusters = cse(clusters, sregistry, options)
+        clusters = cse(clusters, **kwargs)
 
         # Blocking to improve data locality
         if options['blocklazy']:
@@ -245,9 +265,9 @@ class Cpu64CustomOperator(Cpu64OperatorMixin, CustomOperator):
 
         # Callback used by `buffering`; it mimics `is_on_device`, which is used
         # on device backends
-        def callback(f):
+        def callback(f, *args):
             if f.is_TimeFunction and f.save is not None:
-                return f.time_dim
+                return stream_dimensions(f)
             else:
                 return None
 

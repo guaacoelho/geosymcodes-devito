@@ -146,6 +146,7 @@ env_vars_mapper = {
     'DEVITO_DEVELOP': 'develop-mode',
     'DEVITO_OPT': 'opt',
     'DEVITO_MPI': 'mpi',
+    'DEVITO_TOPOLOGY': 'topology',
     'DEVITO_LANGUAGE': 'language',
     'DEVITO_AUTOTUNING': 'autotuning',
     'DEVITO_LOGGING': 'log-level',
@@ -222,7 +223,7 @@ def init_configuration(configuration=configuration, env_vars_mapper=env_vars_map
     configuration.initialize()
 
 
-class switchconfig(object):
+class switchconfig:
 
     """
     Decorator or context manager to temporarily change `configuration` parameters.

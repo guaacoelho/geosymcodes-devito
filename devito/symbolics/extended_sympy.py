@@ -114,7 +114,7 @@ class IntDiv(sympy.Expr):
         return super().__mul__(other)
 
 
-class BasicWrapperMixin(object):
+class BasicWrapperMixin:
 
     """
     Abstract mixin class for objects wrapping types.Basic objects.
@@ -763,7 +763,7 @@ class Rvalue(sympy.Expr, Pickable):
 
 # *** Casting
 
-class CastStar(object):
+class CastStar:
 
     base = None
 

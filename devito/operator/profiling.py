@@ -11,12 +11,11 @@ import cgen as c
 import numpy as np
 from sympy import S
 
-from devito.ir.iet import (BusyWait, ExpressionBundle, List, TimedList, Section,
+from devito.ir.iet import (ExpressionBundle, List, TimedList, Section,
                            Iteration, FindNodes, Transformer)
 from devito.ir.support import IntervalGroup
 from devito.logger import warning, error
 from devito.mpi import MPI
-from devito.mpi.routines import MPICall, MPIList, RemainderCall, ComputeCall
 from devito.parameters import configuration
 from devito.symbolics import subs_op_args
 from devito.tools import DefaultOrderedDict, flatten
@@ -34,13 +33,15 @@ class SectionData(BaseSectionData):
     def __new__(cls, ops, sops, points, traffic, itermaps, time_only_profiling=False):
         return super(SectionData, cls).__new__(cls, ops, sops, points, traffic, itermaps, time_only_profiling)
 
-class Profiler(object):
+class Profiler:
 
     _default_includes = []
     _default_libs = []
     _ext_calls = []
 
     _supports_async_sections = False
+
+    _verbosity = 0
 
     def __init__(self, name):
         self.name = name
@@ -180,10 +181,6 @@ class Profiler(object):
     def all_sections(self):
         return list(self._sections) + flatten(self._subsections.values())
 
-    @property
-    def trackable_subsections(self):
-        return ()
-
     def summary(self, args, dtype, reduce_over=None):
         """
         Return a PerformanceSummary of the profiled sections.
@@ -218,17 +215,11 @@ class Profiler(object):
 
 
 class ProfilerVerbose1(Profiler):
-
-    @property
-    def trackable_subsections(self):
-        return (MPIList, RemainderCall, BusyWait)
+    _verbosity = 1
 
 
 class ProfilerVerbose2(Profiler):
-
-    @property
-    def trackable_subsections(self):
-        return (MPICall, BusyWait)
+    _verbosity = 2
 
 
 class AdvancedProfiler(Profiler):
@@ -356,17 +347,11 @@ class AdvancedProfilerVerbose(AdvancedProfiler):
 
 
 class AdvancedProfilerVerbose1(AdvancedProfilerVerbose):
-
-    @property
-    def trackable_subsections(self):
-        return (MPIList, RemainderCall, BusyWait)
+    _verbosity = 1
 
 
 class AdvancedProfilerVerbose2(AdvancedProfilerVerbose):
-
-    @property
-    def trackable_subsections(self):
-        return (MPICall, BusyWait, ComputeCall)
+    _verbosity = 2
 
 
 class AdvisorProfiler(AdvancedProfiler):
@@ -436,14 +421,10 @@ class PerformanceSummary(OrderedDict):
         # Do not show unexecuted Sections (i.e., loop trip count was 0)
         if traffic == 0 and not time_only_profiling:
             return
-        # Do not show dynamic Sections (i.e., loop trip counts varies dynamically)
-        if (traffic is not None and np.isnan(traffic)) and not time_only_profiling:
-            assert np.isnan(points)
-            return
 
         k = PerfKey(name, rank)
 
-        if not ops or time_only_profiling:
+        if not ops or any(not np.isfinite(i) for i in [ops, points, traffic]) or time_only_profiling:
             self[k] = PerfEntry(time, 0.0, 0.0, 0.0, 0, [])
         else:
             gflops = float(ops)/10**9

@@ -4,7 +4,8 @@ from devito.tools import EnrichedTuple, Tag
 # Additional Function-related APIs
 
 __all__ = ['Buffer', 'DimensionTuple', 'NODE', 'CELL', 'IgnoreDimSort',
-           'HierarchyLayer', 'HostLayer']
+           'HierarchyLayer', 'HostLayer', 'DeviceLayer', 'DiskLayer',
+           'host_layer', 'device_layer', 'disk_layer']
 
 
 class Buffer(Tag):
@@ -24,9 +25,9 @@ CELL = Stagger('cell')
 class DimensionTuple(EnrichedTuple):
 
     def __getitem_hook__(self, dim):
-        for d in self._getters:
+        for d in self.getters:
             if d._defines & dim._defines:
-                return self._getters[d]
+                return self.getters[d]
         raise KeyError
 
 
@@ -36,7 +37,7 @@ class IgnoreDimSort(tuple):
     pass
 
 
-class CtypesFactory(object):
+class CtypesFactory:
 
     cache = {}
 
@@ -50,7 +51,7 @@ class CtypesFactory(object):
             return cls.cache.setdefault(key, dtype)
 
 
-class HierarchyLayer(object):
+class HierarchyLayer:
 
     """
     Represent a generic layer of the node storage hierarchy (e.g., disk, host).
@@ -72,3 +73,16 @@ class HierarchyLayer(object):
 
 class HostLayer(HierarchyLayer):
     pass
+
+
+class DeviceLayer(HierarchyLayer):
+    pass
+
+
+class DiskLayer(HierarchyLayer):
+    pass
+
+
+host_layer = HostLayer('host')
+device_layer = DeviceLayer('device')
+disk_layer = DiskLayer('disk')

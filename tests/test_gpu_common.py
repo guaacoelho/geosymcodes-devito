@@ -8,20 +8,21 @@ from conftest import assert_structure
 from devito import (Constant, Eq, Inc, Grid, Function, ConditionalDimension,
                     Dimension, MatrixSparseTimeFunction, SparseTimeFunction,
                     SubDimension, SubDomain, SubDomainSet, TimeFunction,
-                    Operator, configuration, switchconfig, TensorTimeFunction)
+                    Operator, configuration, switchconfig, TensorTimeFunction,
+                    Buffer)
 from devito.arch import get_gpu_info
 from devito.exceptions import InvalidArgument
 from devito.ir import (Conditional, Expression, Section, FindNodes, FindSymbols,
                        retrieve_iteration_tree)
 from devito.passes.iet.languages.openmp import OmpIteration
-from devito.types import DeviceID, DeviceRM, Lock, NPThreads, PThreadArray
+from devito.types import DeviceID, DeviceRM, Lock, NPThreads, PThreadArray, Symbol
 
 from conftest import skipif
 
 pytestmark = skipif(['nodevice'], whole_module=True)
 
 
-class TestGPUInfo(object):
+class TestGPUInfo:
 
     def test_get_gpu_info(self):
         info = get_gpu_info()
@@ -47,7 +48,7 @@ class TestGPUInfo(object):
             assert np.all(u.data[1] == 11)
 
 
-class TestCodeGeneration(object):
+class TestCodeGeneration:
 
     def test_maxpar_option(self):
         """
@@ -67,7 +68,7 @@ class TestCodeGeneration(object):
         assert trees[0][1] is not trees[1][1]
 
 
-class TestPassesOptional(object):
+class TestPassesOptional:
 
     def test_linearize(self):
         grid = Grid(shape=(4, 4))
@@ -86,7 +87,7 @@ class TestPassesOptional(object):
         assert np.all(u.data[1] == 11)
 
 
-class TestPassesEdgeCases(object):
+class TestPassesEdgeCases:
 
     def test_fission(self):
         nt = 20
@@ -147,6 +148,24 @@ class TestPassesEdgeCases(object):
         op()
         assert np.all(w.data == 10)
 
+    def test_reduction_many_dims(self):
+        grid = Grid(shape=(25, 25, 25))
+
+        u = TimeFunction(name='u', grid=grid, time_order=1, save=Buffer(1))
+        s = Symbol(name='s', dtype=np.float32)
+
+        eqns = [Eq(s, 0),
+                Inc(s, 2*u + 1)]
+
+        op0 = Operator(eqns)
+        op1 = Operator(eqns, opt=('advanced', {'mapify-reduce': True}))
+
+        tree, = retrieve_iteration_tree(op0)
+        assert 'collapse(3) reduction(+:s)' in str(tree[1].pragmas[0])
+
+        tree, = retrieve_iteration_tree(op1)
+        assert 'collapse(3) reduction(+:s)' in str(tree[1].pragmas[0])
+
 
 class Bundle(SubDomain):
     """
@@ -160,7 +179,7 @@ class Bundle(SubDomain):
         return {x: ('middle', 0, 0), y: ('middle', 0, 0), z: ('middle', 0, 0)}
 
 
-class TestStreaming(object):
+class TestStreaming:
 
     @pytest.mark.parametrize('opt', [
         ('tasking', 'orchestrate'),
@@ -187,7 +206,6 @@ class TestStreaming(object):
         sections = FindNodes(Section).visit(op)
         assert len(sections) == 3
         assert str(sections[0].body[0].body[0].body[0].body[0]) == 'while(lock0[0] == 0);'
-        body = sections[2].body[0].body[0]
         body = op._func_table['release_lock0'].root.body
         assert str(body.body[0].condition) == 'Ne(lock0[0], 2)'
         assert str(body.body[1]) == 'lock0[0] = 0;'
@@ -224,13 +242,13 @@ class TestStreaming(object):
         assert len(op._func_table) == 5
         exprs = FindNodes(Expression).visit(op._func_table['copy_to_host0'].root)
         b = 17 if configuration['language'] == 'openacc' else 16  # No `qid` w/ OMP
-        assert str(exprs[b]) == 'const int deviceid = sdata->deviceid;'
-        assert str(exprs[b+1]) == 'volatile int time = sdata->time;'
+        assert str(exprs[b]) == 'const int deviceid = sdata0->deviceid;'
+        assert str(exprs[b+1]) == 'volatile int time = sdata0->time;'
         assert str(exprs[b+2]) == 'lock0[0] = 1;'
         assert exprs[b+3].write is u
         assert exprs[b+4].write is v
         assert str(exprs[b+5]) == 'lock0[0] = 2;'
-        assert str(exprs[b+6]) == 'sdata->flag = 1;'
+        assert str(exprs[b+6]) == 'sdata0->flag = 1;'
 
         op.apply(time_M=nt-2)
 
@@ -257,8 +275,9 @@ class TestStreaming(object):
         op = Operator(eqns, opt=('tasking', 'fuse', 'orchestrate', {'linearize': False}))
 
         # Check generated code
-        assert len(retrieve_iteration_tree(op)) == 3
-        assert len([i for i in FindSymbols().visit(op) if isinstance(i, Lock)]) == 4
+        trees = retrieve_iteration_tree(op)
+        assert len(trees) == 3
+        assert len([i for i in FindSymbols().visit(op) if isinstance(i, Lock)]) == 5
         sections = FindNodes(Section).visit(op)
         assert len(sections) == 4
         assert (str(sections[1].body[0].body[0].body[0].body[0]) ==
@@ -366,7 +385,7 @@ class TestStreaming(object):
         op1 = Operator(eqns, opt=('tasking', 'orchestrate', {'linearize': False}))
 
         # Check generated code
-        assert len(retrieve_iteration_tree(op1)) == 3
+        assert len(retrieve_iteration_tree(op1)) == 2
         assert len([i for i in FindSymbols().visit(op1) if isinstance(i, Lock)]) == 1
         sections = FindNodes(Section).visit(op1)
         assert len(sections) == 2
@@ -404,7 +423,7 @@ class TestStreaming(object):
         op = Operator(eqns, opt=('tasking', 'orchestrate'))
 
         # Check generated code -- the wait-lock is expected in section1
-        assert len(retrieve_iteration_tree(op)) == 4
+        assert len(retrieve_iteration_tree(op)) == 3
         assert len([i for i in FindSymbols().visit(op) if isinstance(i, Lock)]) == 1
         sections = FindNodes(Section).visit(op)
         assert len(sections) == 3
@@ -443,7 +462,7 @@ class TestStreaming(object):
         assert np.all(u.data[1] == 36)
 
     @pytest.mark.parametrize('opt,ntmps', [
-        (('buffering', 'streaming', 'orchestrate'), 11),
+        (('buffering', 'streaming', 'orchestrate'), 13),
         (('buffering', 'streaming', 'fuse', 'orchestrate', {'fuse-tasks': True}), 7),
     ])
     def test_streaming_two_buffers(self, opt, ntmps):
@@ -763,12 +782,12 @@ class TestStreaming(object):
 
         # Check generated code -- thanks to buffering only expect 1 lock!
         assert len(retrieve_iteration_tree(op0)) == 2
-        assert len(retrieve_iteration_tree(op1)) == 6
-        assert len(retrieve_iteration_tree(op2)) == 4
+        assert len(retrieve_iteration_tree(op1)) == 4
+        assert len(retrieve_iteration_tree(op2)) == 3
         symbols = FindSymbols().visit(op1)
-        assert len([i for i in symbols if isinstance(i, Lock)]) == 4
+        assert len([i for i in symbols if isinstance(i, Lock)]) == 5
         threads = [i for i in symbols if isinstance(i, PThreadArray)]
-        assert len(threads) == 3
+        assert len(threads) == 2
         assert threads[0].size.size == async_degree
         assert threads[1].size.size == async_degree
         symbols = FindSymbols().visit(op2)
@@ -823,9 +842,9 @@ class TestStreaming(object):
         assert len(retrieve_iteration_tree(op0)) == 1
         assert len(retrieve_iteration_tree(op1)) == 3
         symbols = FindSymbols().visit(op1)
-        assert len([i for i in symbols if isinstance(i, Lock)]) == 4
+        assert len([i for i in symbols if isinstance(i, Lock)]) == 3
         threads = [i for i in symbols if isinstance(i, PThreadArray)]
-        assert len(threads) == 3
+        assert len(threads) == 2
         assert all(i.size == 1 for i in threads)
 
         op0.apply(time_M=nt-1)
@@ -858,7 +877,7 @@ class TestStreaming(object):
         op1 = Operator(eqns, opt=opt)
 
         # Check generated code
-        assert len(retrieve_iteration_tree(op1)) == 5
+        assert len(retrieve_iteration_tree(op1)) == 3
         assert len([i for i in FindSymbols().visit(op1) if isinstance(i, Lock)]) == 2
 
         op0.apply(time_M=nt-2)
@@ -886,7 +905,7 @@ class TestStreaming(object):
 
         # Check generated code
         for op in [op1, op2]:
-            assert len(retrieve_iteration_tree(op)) == 4
+            assert len(retrieve_iteration_tree(op)) == 3
             assert len([i for i in FindSymbols().visit(op) if isinstance(i, Lock)]) == 1
             sections = FindNodes(Section).visit(op)
             assert len(sections) == 4
@@ -1357,7 +1376,7 @@ class TestStreaming(object):
         assert len(retrieve_iteration_tree(nodes[1])) == 2
 
 
-class TestAPI(object):
+class TestAPI:
 
     def get_param(self, op, param):
         for i in op.parameters:
@@ -1445,7 +1464,7 @@ class TestAPI(object):
         assert set(op._options['gpu-fit']) - vals == set()
 
 
-class TestMisc(object):
+class TestMisc:
 
     def test_pickling(self):
         grid = Grid(shape=(10, 10))
@@ -1464,7 +1483,7 @@ class TestMisc(object):
         assert str(op) == str(new_op)
 
 
-class TestEdgeCases(object):
+class TestEdgeCases:
 
     def test_empty_arrays(self):
         """

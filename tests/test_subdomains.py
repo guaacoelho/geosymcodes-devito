@@ -11,7 +11,7 @@ from devito.ir import FindNodes, Expression, Iteration
 from devito.tools import timed_region
 
 
-class TestSubdomains(object):
+class TestSubdomains:
     """
     Class for testing SubDomains
     """
@@ -204,7 +204,7 @@ class TestSubdomains(object):
         assert np.all(check[grid.distributor.glb_slices[x]] == f.data)
 
 
-class TestMultiSubDomain(object):
+class TestMultiSubDomain:
 
     @pytest.mark.parametrize('opt', opts_tiling)
     def test_iterate_NDomains(self, opt):
@@ -305,7 +305,37 @@ class TestMultiSubDomain(object):
         # unique -- see issue #1474
         exprs = FindNodes(Expression).visit(op)
         reads = set().union(*[e.reads for e in exprs])
-        assert len(reads) == 7  # f, g, h, xi_n_m, xi_n_M, yi_n_m, yi_n_M
+        assert len(reads) == 4  # f, g, h, mydomains
+
+    def test_multi_eq_split(self):
+        """
+        Test cases where two loops over the same SubDomainSet will be
+        separated by another loop.
+        """
+        # Note: a bug was found where this would cause SubDomainSet
+        # bounds expressions not to be generated in the second loop over
+        # the SubDomainSet
+        class MSD(SubDomainSet):
+            name = 'msd'
+
+        msd = MSD(N=1, bounds=(1, 1, 1, 1))
+
+        grid = Grid(shape=(11, 11), subdomains=(msd,))
+
+        f = Function(name='f', grid=grid)
+        g = Function(name='g', grid=grid)
+
+        eq0 = Eq(f, 1, subdomain=msd)
+        eq1 = Eq(f, g)  # Dependency needed to fix equation order
+        eq2 = Eq(g, 1, subdomain=msd)
+
+        op = Operator([eq0, eq1, eq2])
+
+        # Ensure the loop structure is correct
+        # Note the two 'n0' correspond to the thickness definitions
+        assert_structure(op,
+                         ['n0', 'n0xy', 'xy', 'n0', 'n0xy'],
+                         'n0xyxyn0xy')
 
     def test_multi_sets(self):
         """
@@ -642,6 +672,15 @@ class TestMultiSubDomain(object):
         assert_structure(op, ['t,n0', 't,n0,xi20_blk0,yi20_blk0,x,y,z'],
                          't,n0,xi20_blk0,yi20_blk0,x,y,z')
 
+        xi, _, _ = dummy.dimensions
+        # Check that the correct number of thickness expressions are generated
+        sdsexprs = [i.expr for i in FindNodes(Expression).visit(op)
+                    if i.expr.rhs.is_Indexed
+                    and i.expr.rhs.function is xi.functions]
+        # The thickness expressions Eq(x_ltkn0, dummy[n0][0]), ...
+        # should be scheduled once per dimension
+        assert len(sdsexprs) == 6
+
     def test_sequential_implicit(self):
         """
         Make sure the implicit dimensions of the MultiSubDomain define a sequential
@@ -672,30 +711,7 @@ class TestMultiSubDomain(object):
         assert z.is_Parallel
 
 
-class TestMultiSubDimension:
-
-    def test_rebuild(self):
-        class Dummy(SubDomainSet):
-            name = 'dummy'
-
-        dummy = Dummy(N=0, bounds=[(), (), (), ()])
-        grid = Grid(shape=(10, 10), subdomains=(dummy,))
-        sdims = grid.subdomains['dummy'].dimensions
-
-        # Check normal rebuilding
-        tkns = [d.thickness for d in sdims]
-        rebuilt = [d._rebuild() for d in sdims]
-        assert list(sdims) != rebuilt
-        # Should build new thickness symbols with same names and values
-        assert all([d.thickness is not t for d, t in zip(rebuilt, tkns)])
-        assert all([d.thickness == t for d, t in zip(rebuilt, tkns)])
-
-        # Switch the thickness symbols between MultiSubDimensions with the rebuild
-        remixed = [d._rebuild(thickness=t) for d, t in zip(sdims, tkns[::-1])]
-        assert [d.thickness for d in remixed] == tkns[::-1]
-
-
-class TestSubDomain_w_condition(object):
+class TestSubDomain_w_condition:
 
     def test_condition_w_subdomain_v0(self):
 

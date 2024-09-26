@@ -11,6 +11,7 @@ from devito import (Grid, Function, TimeFunction, SparseFunction, SparseTimeFunc
                     TensorFunction, TensorTimeFunction, VectorTimeFunction)
 from devito.types import (DeviceID, NThreadsBase, NPThreads, Object, LocalObject,
                           Scalar, Symbol, ThreadID)
+from devito.types.basic import AbstractSymbol
 
 
 @pytest.fixture
@@ -38,11 +39,21 @@ def operate_on_empty_cache():
     _SymbolCache.update(old_cache)
 
 
-class TestHashing(object):
+class TestHashing:
 
     """
     Test hashing of symbolic objects.
     """
+
+    def test_abstractsymbol(self):
+        """Test that different Symbols have different hash values."""
+        s0 = AbstractSymbol('s')
+        s1 = AbstractSymbol('s')
+        assert s0 is not s1
+        assert hash(s0) == hash(s1)
+
+        s2 = AbstractSymbol('s', nonnegative=True)
+        assert hash(s0) != hash(s2)
 
     def test_constant(self):
         """Test that different Constants have different hash value."""
@@ -223,7 +234,7 @@ class TestHashing(object):
         assert hash(foo3) != hash(foo1)
 
 
-class TestCaching(object):
+class TestCaching:
 
     """
     Test the symbol cache infrastructure.
@@ -753,7 +764,7 @@ class TestCaching(object):
         assert np.all(np.allclose(s.data, 6.) for s in u0)
 
 
-class TestMemoryLeaks(object):
+class TestMemoryLeaks:
 
     """
     Tests ensuring there are no memory leaks.

@@ -49,7 +49,7 @@ class Tag(abc.ABC):
     __repr__ = __str__
 
 
-class Signer(object):
+class Signer:
 
     """
     A base class for types that can emit a unique, deterministic
@@ -90,7 +90,7 @@ class Signer(object):
         return Signer._sign(self._signature_items())
 
 
-class Reconstructable(object):
+class Reconstructable:
 
     __rargs__ = ()
     """
@@ -112,7 +112,7 @@ class Reconstructable(object):
         --------
         Given
 
-            class Foo(object):
+            class Foo:
                 __rargs__ = ('a', 'b')
                 __rkwargs__ = ('c',)
                 def __init__(self, a, b, c=4):
@@ -143,7 +143,15 @@ class Reconstructable(object):
 
         kwargs.update({i: getattr(self, i) for i in self.__rkwargs__ if i not in kwargs})
 
-        # Should we use a constum reconstructor?
+        # If this object has SymPy assumptions associated with it, which were not
+        # in the kwargs, then include them
+        try:
+            assumptions = self._assumptions_orig
+            kwargs.update({k: v for k, v in assumptions.items() if k not in kwargs})
+        except AttributeError:
+            pass
+
+        # Should we use a custom reconstructor?
         try:
             cls = self._rcls
         except AttributeError:
@@ -263,7 +271,7 @@ class Singleton(type):
         return cls._instances[cls]
 
 
-class Stamp(object):
+class Stamp:
 
     """
     Uniquely identify objects.

@@ -99,7 +99,7 @@ def cire(clusters, mode, sregistry, options, platform):
     return clusters
 
 
-class CireTransformer(object):
+class CireTransformer:
 
     """
     Abstract base class for transformers implementing a CIRE variant.
@@ -853,12 +853,13 @@ def lower_schedule(schedule, meta, sregistry, ftemps):
             # for zi = z_m + zi_ltkn; zi <= z_M - zi_rtkn; ...
             #   r[zi] = ...
             #
-            # Instead of `r[zi - z_m - zi_ltkn]` we have just `r[zi]`, so we'll need
-            # as much room as in `zi`'s parent to avoid going OOB
-            # Aside from ugly generated code, the reason we do not rather shift the
-            # indices is that it prevents future passes to transform the loop bounds
-            # (e.g., MPI's comp/comm overlap does that)
-            dimensions = [d.parent if d.is_Sub else d for d in writeto.itdims]
+            # Instead of `r[zi - z_m - zi_ltkn]` we have just `r[zi]`, so we'll
+            # need as much room as in `zi`'s parent to avoid going OOB Aside
+            # from ugly generated code, the reason we do not rather shift the
+            # indices is that it prevents future passes to transform the loop
+            # bounds (e.g., MPI's comp/comm overlap does that)
+            dimensions = [d.parent if d.is_AbstractSub else d
+                          for d in writeto.itdims]
 
             # The halo must be set according to the size of `writeto`
             halo = [(abs(i.lower), abs(i.upper)) for i in writeto]
@@ -1192,7 +1193,7 @@ AliasKey = namedtuple('AliasKey', 'ispace intervals dtype guards properties')
 Variant = namedtuple('Variant', 'schedule exprs')
 
 
-class Alias(object):
+class Alias:
 
     def __init__(self, pivot, aliaseds, intervals, distances, score):
         self.pivot = pivot
@@ -1233,7 +1234,7 @@ class Alias(object):
         return all(len([e for e in i if e != 0]) <= 1 for i in self.distances)
 
 
-class AliasList(object):
+class AliasList:
 
     def __init__(self, aliases=None):
         if aliases is None:

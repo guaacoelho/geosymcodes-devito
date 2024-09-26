@@ -8,7 +8,7 @@ from operator import mul
 from sympy import Integer
 
 from devito.data import OWNED, HALO, NOPAD, LEFT, CENTER, RIGHT
-from devito.ir.equations import DummyEq
+from devito.ir.equations import DummyEq, OpInc, OpMin, OpMax
 from devito.ir.iet import (Call, Callable, Conditional, ElementalFunction,
                            Expression, ExpressionBundle, AugmentedExpression,
                            Iteration, List, Prodder, Return, make_efunc, FindNodes,
@@ -21,16 +21,17 @@ from devito.tools import (as_mapper, dtype_to_mpitype, dtype_len, dtype_to_ctype
 from devito.types import (Array, Bag, Dimension, Eq, Symbol, LocalObject,
                           CompositeObject, CustomDimension)
 
-__all__ = ['HaloExchangeBuilder', 'mpi_registry']
+__all__ = ['HaloExchangeBuilder', 'ReductionBuilder', 'mpi_registry']
 
 
-class HaloExchangeBuilder(object):
+class HaloExchangeBuilder:
 
     """
-    Build IET-based routines to implement MPI halo exchange.
+    Build IET routines to generate MPI halo exchanges.
     """
 
-    def __new__(cls, mpimode, generators=None, rcompile=None, sregistry=None, **kwargs):
+    def __new__(cls, mpimode, generators=None, rcompile=None, sregistry=None,
+                **kwargs):
         obj = object.__new__(mpi_registry[mpimode])
 
         obj.rcompile = rcompile
@@ -370,7 +371,7 @@ class BasicHaloExchangeBuilder(HaloExchangeBuilder):
                 eqns.append(Eq(*swap(buf[[i] + bdims], f[[i] + findices])))
 
         # Compile `eqns` into an IET via recursive compilation
-        irs, _ = self.rcompile(eqns)
+        irs, _ = self.rcompile(eqns, options={'mpi': False})
 
         parameters = [buf] + bshape + list(f.handles) + ofs
 
@@ -1001,7 +1002,6 @@ class FullHaloExchangeBuilder(Overlap2HaloExchangeBuilder):
 
 
 mpi_registry = {
-    True: BasicHaloExchangeBuilder,
     'basic': BasicHaloExchangeBuilder,
     'diag': DiagHaloExchangeBuilder,
     'diag2': Diag2HaloExchangeBuilder,
@@ -1199,7 +1199,7 @@ class MPIMsg(CompositeObject):
                 try:
                     shape.append(getattr(f._size_owned[dim], side.name))
                 except AttributeError:
-                    assert side is CENTER
+                    assert side == CENTER
                     shape.append(self._as_number(f._size_domain[dim], args))
             entry.sizes = (c_int*len(shape))(*shape)
 
@@ -1263,7 +1263,7 @@ class MPIMsgEnriched(MPIMsg):
                     v = getattr(f._offset_owned[dim], side.name)
                     ofsg.append(self._as_number(v, args))
                 except AttributeError:
-                    assert side is CENTER
+                    assert side == CENTER
                     ofsg.append(f._offset_owned[dim].left)
             entry.ofsg = (c_int*len(ofsg))(*ofsg)
 
@@ -1275,7 +1275,7 @@ class MPIMsgEnriched(MPIMsg):
                     v = getattr(f._offset_halo[dim], side.flip().name)
                     ofss.append(self._as_number(v, args))
                 except AttributeError:
-                    assert side is CENTER
+                    assert side == CENTER
                     # Note `_offset_owned`, and not `_offset_halo`, is *not* a bug
                     # here. If it's the CENTER we need, we can't just use
                     # `_offset_halo[d].left` as otherwise we would pick the corner
@@ -1351,3 +1351,38 @@ class MPIRegion(CompositeObject):
                     except AttributeError:
                         setattr(entry, a.name, mapper[a][0])
         return values
+
+
+class AllreduceCall(Call):
+
+    def __init__(self, arguments, **kwargs):
+        super().__init__('MPI_Allreduce', arguments)
+
+
+class ReductionBuilder(object):
+
+    """
+    Build IET routines performing MPI reductions.
+    """
+
+    mapper = {
+        OpInc: 'MPI_SUM',
+        OpMax: 'MPI_MAX',
+        OpMin: 'MPI_MIN',
+    }
+
+    def make(self, dr):
+        """
+        Construct Callables and Calls implementing distributed-memory reductions.
+        """
+        f = dr.var
+        comm = dr.grid.distributor._obj_comm
+
+        inplace = Macro('MPI_IN_PLACE')
+        mpitype = Macro(dtype_to_mpitype(f.dtype))
+        op = self.mapper[dr.op]
+
+        arguments = [inplace, Byref(f), Integer(1), mpitype, op, comm]
+        allreduce = AllreduceCall(arguments)
+
+        return allreduce

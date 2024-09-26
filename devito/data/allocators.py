@@ -18,36 +18,18 @@ __all__ = ['ALLOC_ALIGNED', 'ALLOC_NUMA_LOCAL', 'ALLOC_NUMA_ANY',
            'default_allocator']
 
 
-class MemoryAllocator(object):
+class AbstractMemoryAllocator:
 
-    """Abstract class defining the interface to memory allocators."""
+    """
+    The MemoryAllocator interface.
+    """
 
     __metaclass__ = abc.ABCMeta
-
-    _attempted_init = False
-    lib = None
 
     guaranteed_alignment = 64
     """Guaranteed data alignment."""
 
-    @classmethod
-    def available(cls):
-        if cls._attempted_init is False:
-            cls.initialize()
-            cls._attempted_init = True
-        return cls.lib is not None
-
-    @classmethod
-    def initialize(cls):
-        """
-        Initialize the MemoryAllocator.
-
-        Notes
-        -----
-        This method must be implemented by all subclasses of MemoryAllocator.
-        """
-        return
-
+    @abc.abstractmethod
     def alloc(self, shape, dtype, padding=0):
         """
         Allocate memory.
@@ -64,11 +46,52 @@ class MemoryAllocator(object):
 
         Returns
         -------
-        pointer, memfree_args
-            The first element of the tuple is the reference that can be used to
-            access the data as a ctypes object. The second element is an opaque
+        ndarray, memfree_args
+            The first element of the tuple is a numpy array that uses the
+            allocated memory underneath. The second element is an opaque
             object that is needed only for the "memfree" call.
         """
+        return
+
+    @abc.abstractmethod
+    def free(self, *args):
+        """
+        Free memory previously allocated with `self.alloc`.
+
+        Arguments are provided exactly as returned in the second element of the
+        tuple returned by `alloc`.
+        """
+        return
+
+
+class MemoryAllocator(AbstractMemoryAllocator):
+
+    """
+    A memory allocator implementing the alloc method by resorting to a C-level
+    memory allocation function, to be specified by subclasses.
+
+    This is still an abstract class, and subclasses are expected to implement the
+    `_alloc_C_libcall` and `free` methods.
+    """
+
+    _attempted_init = False
+    lib = None
+
+    @classmethod
+    def available(cls):
+        if cls._attempted_init is False:
+            cls.initialize()
+            cls._attempted_init = True
+        return cls.lib is not None
+
+    @classmethod
+    def initialize(cls):
+        """
+        Initialize the MemoryAllocator.
+        """
+        return
+
+    def alloc(self, shape, dtype, padding=0):
         datasize = int(reduce(mul, shape))
         ctype = dtype_to_ctype(dtype)
 
@@ -110,20 +133,6 @@ class MemoryAllocator(object):
         Perform the actual memory allocation by calling a C function.  Should
         return a 2-tuple (c_pointer, memfree_args), where the free args are
         what is handed back to free() later to deallocate.
-
-        Notes
-        -----
-        This method must be implemented by all subclasses of MemoryAllocator.
-        """
-        return
-
-    @abc.abstractmethod
-    def free(self, *args):
-        """
-        Free memory previously allocated with ``self.alloc``.
-
-        Arguments are provided exactly as returned in the second element of the
-        tuple returned by _alloc_C_libcall
 
         Notes
         -----
@@ -328,10 +337,10 @@ class NumaAllocator(MemoryAllocator):
         return self._node == 'local'
 
 
-class ExternalAllocator(MemoryAllocator):
+class DataReference(MemoryAllocator):
 
     """
-    An ExternalAllocator is used to assign pre-existing user data to Functions.
+    A DataReference is used to assign pre-existing user data to Functions.
     Thus, Devito does not allocate any memory.
 
     Parameters
@@ -341,23 +350,23 @@ class ExternalAllocator(MemoryAllocator):
 
     Notes
     -------
-    * Use ExternalAllocator and pass a reference to the external memory when
+    * Use DataReference and pass a reference to the external memory when
       creating a Function. This Function will now use this memory as its f.data.
 
-    * If the data present in this external memory is valuable, provide a noop
-      initialiser, or else Devito will reset it to 0.
+    * This can be used to pass one Function's data to another to avoid copying
+      during Function rebuilds (this should only be used internally).
 
     Example
     --------
     >>> from devito import Grid, Function
-    >>> from devito.data.allocators import ExternalAllocator
+    >>> from devito.data.allocators import DataReference
     >>> import numpy as np
     >>> shape = (2, 2)
     >>> numpy_array = np.ones(shape, dtype=np.float32)
     >>> g = Grid(shape)
     >>> space_order = 0
     >>> f = Function(name='f', grid=g, space_order=space_order,
-    ...      allocator=ExternalAllocator(numpy_array), initializer=lambda x: None)
+    ...      allocator=DataReference(numpy_array))
     >>> f.data[0, 1] = 2
     >>> numpy_array
     array([[1., 2.],
@@ -378,6 +387,9 @@ class ExternalAllocator(MemoryAllocator):
         return (self.numpy_array, None)
 
 
+# For backward compatibility
+ExternalAllocator = DataReference
+
 ALLOC_GUARD = GuardAllocator(1048576)
 ALLOC_ALIGNED = PosixAllocator()
 ALLOC_KNL_DRAM = NumaAllocator(0)
@@ -385,7 +397,9 @@ ALLOC_KNL_MCDRAM = NumaAllocator(1)
 ALLOC_NUMA_ANY = NumaAllocator('any')
 ALLOC_NUMA_LOCAL = NumaAllocator('local')
 
-custom_allocators = {}
+custom_allocators = {
+    'fallback': ALLOC_ALIGNED,
+}
 """User-defined allocators."""
 
 
@@ -397,7 +411,7 @@ def register_allocator(name, allocator):
         raise TypeError("name must be a str, not `%s`" % type(name))
     if name in custom_allocators:
         raise ValueError("A MemoryAllocator for `%s` already exists" % name)
-    if not isinstance(allocator, MemoryAllocator):
+    if not isinstance(allocator, AbstractMemoryAllocator):
         raise TypeError("Expected a MemoryAllocator, not `%s`" % type(allocator))
 
     custom_allocators[name] = allocator
@@ -440,4 +454,4 @@ def default_allocator(name=None):
           infer_knl_mode() == 'flat'):
         return ALLOC_KNL_MCDRAM
     else:
-        return custom_allocators.get('default', ALLOC_ALIGNED)
+        return custom_allocators.get('default', custom_allocators['fallback'])

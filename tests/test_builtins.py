@@ -11,7 +11,7 @@ from devito.tools import as_tuple
 from devito.types import SubDomain, SparseTimeFunction
 
 
-class TestAssign(object):
+class TestAssign:
 
     """
     Class for testing the assign builtin.
@@ -122,7 +122,7 @@ class TestAssign(object):
         assert np.all(f.data_with_halo == 4)
 
 
-class TestGaussianSmooth(object):
+class TestGaussianSmooth:
 
     """
     Class for testing the Gaussian smooth builtin.
@@ -196,7 +196,7 @@ class TestGaussianSmooth(object):
         assert np.all(sp_smoothed[slices] - np.array(dv_smoothed.data[:]) == 0)
 
 
-class TestInitializeFunction(object):
+class TestInitializeFunction:
 
     """
     Class for testing the initialize function builtin.
@@ -340,7 +340,7 @@ class TestInitializeFunction(object):
             assert np.all(a[::-1, :] - np.array(i.data[8:12, 4:8]) == 0)
 
 
-class TestBuiltinsResult(object):
+class TestBuiltinsResult:
 
     """
     Test the builtins
@@ -448,7 +448,7 @@ class TestBuiltinsResult(object):
 
     def test_min_max_sparse(self):
         """
-        Test that mmin/mmax work on SparseFunction
+        Test that mmin/mmax work on SparseFunction.
         """
         grid = Grid((101, 101), extent=(1000., 1000.))
 
@@ -463,6 +463,18 @@ class TestBuiltinsResult(object):
         term1 = np.max(rec0.data)
         term2 = mmax(rec0)
         assert np.isclose(term1/term2 - 1, 0.0, rtol=0.0, atol=1e-5)
+
+    @pytest.mark.parallel(mode=4)
+    def test_min_max_mpi(self, mode):
+        grid = Grid(shape=(100, 100))
+
+        f = Function(name='f', grid=grid)
+
+        # Populate data with increasing values starting at 1
+        f.data[:] = np.arange(1, 10001).reshape((100, 100))
+
+        assert mmin(f) == 1
+        assert mmax(f) == 10000
 
     def test_issue_1860(self):
         grid = Grid(shape=(401, 301, 181))

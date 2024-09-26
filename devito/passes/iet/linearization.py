@@ -1,9 +1,6 @@
-from collections import defaultdict
-
 from functools import singledispatch
 
 import numpy as np
-from sympy import Add
 
 from devito.data import FULL
 from devito.ir import (BlankLine, Call, DummyExpr, Dereference, List, PointerCast,
@@ -11,9 +8,8 @@ from devito.ir import (BlankLine, Call, DummyExpr, Dereference, List, PointerCas
                        IMask)
 from devito.passes.iet.engine import iet_pass
 from devito.passes.iet.parpragma import PragmaIteration
-from devito.symbolics import DefFunction, MacroArgument, ccode
-from devito.tools import Bunch, filter_ordered, flatten, prod
-from devito.types import Array, Bundle, Symbol, FIndexed, Indexed, Wildcard
+from devito.tools import filter_ordered, flatten, prod
+from devito.types import Array, Bundle, Symbol, FIndexed, Wildcard
 from devito.types.dense import DiscreteFunction
 
 __all__ = ['linearize']
@@ -21,9 +17,8 @@ __all__ = ['linearize']
 
 def linearize(graph, **kwargs):
     """
-    Turn n-dimensional Indexeds into 1-dimensional Indexed with suitable index
-    access function, such as `a[i, j] -> a[i*n + j]`. The row-major format
-    of the underlying Function objects is honored.
+    Turn Indexeds into FIndexeds so that the generated code uses linearized
+    access functions, e.g. `a[i*n + j]` instead of `a[i, j]`.
     """
     sregistry = kwargs.get('sregistry')
     options = kwargs.get('options', {})
@@ -52,9 +47,6 @@ def linearize(graph, **kwargs):
 
     linearization(graph, key=key, tracker=tracker, **kwargs)
 
-    # Sanity check
-    assert not tracker.undef
-
 
 @iet_pass
 def linearization(iet, key=None, tracker=None, **kwargs):
@@ -66,10 +58,7 @@ def linearization(iet, key=None, tracker=None, **kwargs):
     iet = linearize_transfers(iet, **kwargs)
     iet = linearize_clauses(iet, **kwargs)
 
-    # Postprocess headers
-    headers = sorted((ccode(i), ccode(e)) for i, e in tracker.headers.values())
-
-    return iet, {'headers': headers}
+    return iet, {}
 
 
 def key1(f, d):
@@ -82,8 +71,8 @@ def key1(f, d):
     """
     if f.is_regular:
         # For paddable objects the following holds:
-        # `same dim + same halo => same (auto-)padding`
-        return (d, f._size_halo[d], f.is_autopaddable)
+        # `same dim + same halo + same padding_dtype => same (auto-)padding`
+        return (d, f._size_halo[d], f.__padding_dtype__)
     else:
         return False
 
@@ -124,7 +113,7 @@ class Dist(Symbol):
     pass
 
 
-class Tracker(object):
+class Tracker:
 
     def __init__(self, mode, dtype, sregistry):
         self.mode = mode
@@ -135,17 +124,26 @@ class Tracker(object):
         self.strides = {}
         self.strides_dynamic = {}  # Strides varying regularly across iterations
         self.dists = {}
-        self.undef = defaultdict(set)
-        self.headers = {}
+
+    def _select_indexing_dtype(self, f):
+        # Some objects may contain an extremely large number of elements, so we
+        # conservatively use int64 to avoid potential overflows regardless of
+        # what the user requested via `index-mode`
+        if f.is_SparseTimeFunction:
+            return np.int64
+        else:
+            return self.dtype
 
     def add(self, f):
+        dtype = self._select_indexing_dtype(f)
+
         # Update unique sizes table
         for d in f.dimensions[1:]:
             k = key1(f, d)
             if not k or k in self.sizes:
                 continue
             name = self.sregistry.make_name(prefix='%s_fsz' % d.name)
-            self.sizes[k] = Size(name=name, dtype=self.dtype, is_const=True)
+            self.sizes[k] = Size(name=name, dtype=dtype, is_const=True)
 
         # Update unique strides table
         for n, d in enumerate(f.dimensions[1:], 1):
@@ -156,7 +154,7 @@ class Tracker(object):
             if k in self.strides:
                 continue
             name = self.sregistry.make_name(prefix='%s_stride' % d.name)
-            self.strides[k] = Stride(name=name, dtype=self.dtype, is_const=True)
+            self.strides[k] = Stride(name=name, dtype=dtype, is_const=True)
 
     def update(self, functions):
         for f in functions:
@@ -166,19 +164,6 @@ class Tracker(object):
         assert not f.is_regular
         assert len(strides) == f.ndim - 1
         self.strides_dynamic[f] = tuple(strides)
-
-    def add_header(self, b, define, expr):
-        # NOTE: the input must be an IndexedBase and not a Function because
-        # we might require either the `.base` or the `.dmap`, or perhaps both
-        v = Bunch(define=define, expr=expr)
-        self.headers[b] = v
-        return v
-
-    def needs_header(self, b):
-        return b.function.ndim > 1 and b not in self.headers
-
-    def get_header(self, b):
-        return self.headers.get(b)
 
     def get_size(self, f, d):
         return self.sizes[key1(f, d)]
@@ -239,10 +224,16 @@ def linearize_accesses(iet, key0, tracker=None):
     # 2) What `iet` *offers*
     # E.g. `{x_fsz0 -> u_vec->size[1]}`
     defines = FindSymbols('defines-aliases').visit(iet)
-    offers = filter_ordered(f for f in defines if key0(f))
+    offers = filter_ordered(i for i in defines if key0(i.function))
     instances = {}
-    for f in offers:
-        for d in f.dimensions[1:]:
+    for i in offers:
+        f = i.function
+        try:
+            dimensions = i.dimensions
+        except AttributeError:
+            continue
+
+        for d in dimensions[1:]:
             try:
                 fsz = tracker.get_size(f, d)
             except KeyError:
@@ -258,8 +249,8 @@ def linearize_accesses(iet, key0, tracker=None):
     symbols = flatten(i.free_symbols for i in subs.values())
     candidates = {i for i in symbols if isinstance(i, (Stride, Dist))}
     for n in FindNodes(Call).visit(iet):
-        # Also consider the strides needed by the callee
-        candidates.update(tracker.undef.pop(n.name, []))
+        # Also consider the strides needed by the callees
+        candidates.update(i for i in n.arguments if isinstance(i, Stride))
 
     # 4) What `strides` can indeed be constructed?
     mapper = {}
@@ -267,8 +258,6 @@ def linearize_accesses(iet, key0, tracker=None):
         if stride in candidates:
             if set(sizes).issubset(instances):
                 mapper[stride] = sizes
-            else:
-                tracker.undef[iet.name].add(stride)
 
     # 5) Construct what needs to *and* can be constructed
     stmts, stmts1 = [], []
@@ -318,37 +307,6 @@ def _(f, d):
 
 
 @singledispatch
-def _generate_header_basic(f, tracker):
-    return
-
-
-@_generate_header_basic.register(DiscreteFunction)
-@_generate_header_basic.register(Array)
-@_generate_header_basic.register(Bundle)
-def _(f, i, tracker):
-    b = i.base
-
-    if not tracker.needs_header(b):
-        return tracker.get_header(b)
-
-    # Generate e.g. `usave[(time)*xi_slc0 + (xi)*yi_slc0 + (yi)]`
-
-    strides = tracker.map_strides(f)
-
-    macroargnames = [d.name for d in f.dimensions]
-    macroargs = [MacroArgument(i) for i in macroargnames]
-
-    items = [m*strides[d] for m, d in zip(macroargs, f.dimensions[1:])]
-    items.append(MacroArgument(f.dimensions[-1].name))
-
-    pname = tracker.sregistry.make_name(prefix='%sL' % f.name)
-    define = DefFunction(pname, macroargnames)
-    expr = Indexed(b, Add(*items, evaluate=False))
-
-    return tracker.add_header(b, define, expr)
-
-
-@singledispatch
 def _generate_linearization_basic(f, i, tracker):
     assert False
 
@@ -357,14 +315,13 @@ def _generate_linearization_basic(f, i, tracker):
 @_generate_linearization_basic.register(Array)
 @_generate_linearization_basic.register(Bundle)
 def _(f, i, tracker):
-    header = _generate_header_basic(f, i, tracker)
-
     n = len(i.indices)
+    strides_map = tracker.map_strides(f)
 
-    if header and n == i.function.ndim:
-        pname = header.define.name.value
-        strides = tuple(tracker.map_strides(f).values())[-n:]
-        return FIndexed.from_indexed(i, pname, strides=strides)
+    if n == 1:
+        return i
+    elif n == f.ndim and f.is_regular:
+        return FIndexed(i.base, *i.indices, strides_map=strides_map)
     else:
         # Honour custom indexing
         return i.base[sum(i.indices)]

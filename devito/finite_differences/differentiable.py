@@ -6,9 +6,13 @@ import numpy as np
 import sympy
 from sympy.core.add import _addsort
 from sympy.core.mul import _keep_coeff, _mulsort
-from sympy.core.core import ordering_of_classes
 from sympy.core.decorators import call_highest_priority
 from sympy.core.evalf import evalf_table
+try:
+    from sympy.core.core import ordering_of_classes
+except ImportError:
+    # Moved in 1.13
+    from sympy.core.basic import ordering_of_classes
 
 from devito.finite_differences.tools import make_shift_x0, coeff_priority
 from devito.logger import warning
@@ -16,6 +20,7 @@ from devito.tools import (as_tuple, filter_ordered, flatten, frozendict,
                           infer_dtype, is_integer, split)
 from devito.types import (Array, DimensionTuple, Evaluable, Indexed,
                           StencilDimension)
+from devito.types.basic import AbstractFunction
 
 __all__ = ['Differentiable', 'DiffDerivative', 'IndexDerivative', 'EvalDerivative',
            'Weights']
@@ -123,7 +128,7 @@ class Differentiable(sympy.Expr, Evaluable):
     @cached_property
     def function(self):
         if len(self._functions) == 1:
-            return self._functions.pop()
+            return set(self._functions).pop()
         else:
             return None
 
@@ -506,6 +511,7 @@ class Add(DifferentiableOp, sympy.Add):
         # set of basic simplifications
 
         # (a+b)+c -> a+b+c (flattening)
+        # TODO: use symbolics.flatten_args; not using it to avoid a circular import
         nested, others = split(args, lambda e: isinstance(e, Add))
         args = flatten(e.args for e in nested) + list(others)
 
@@ -528,6 +534,7 @@ class Mul(DifferentiableOp, sympy.Mul):
         # to avoid generating functional, but ugly, code
 
         # (a*b)*c -> a*b*c (flattening)
+        # TODO: use symbolics.flatten_args; not using it to avoid a circular import
         nested, others = split(args, lambda e: isinstance(e, Mul))
         args = flatten(e.args for e in nested) + list(others)
 
@@ -582,7 +589,7 @@ class Mul(DifferentiableOp, sympy.Mul):
 
         func_args = highest_priority(self)
         new_args = []
-        ref_inds = func_args.indices_ref._getters
+        ref_inds = func_args.indices_ref.getters
 
         for f in self.args:
             if f not in self._args_diff:
@@ -590,7 +597,7 @@ class Mul(DifferentiableOp, sympy.Mul):
             elif f is func_args or isinstance(f, DifferentiableFunction):
                 new_args.append(f)
             else:
-                ind_f = f.indices_ref._getters
+                ind_f = f.indices_ref.getters
                 mapper = {ind_f.get(d, d): ref_inds.get(d, d)
                           for d in self.dimensions
                           if ind_f.get(d, d) is not ref_inds.get(d, d)}
@@ -893,7 +900,7 @@ class EvalDerivative(DifferentiableOp, sympy.Add):
         return self.func(*args, **kwargs)
 
 
-class diffify(object):
+class diffify:
 
     """
     Helper class based on single dispatch to reconstruct all nodes in a sympy
@@ -1001,3 +1008,34 @@ def diff2sympy(expr):
 evalf_table[Add] = evalf_table[sympy.Add]
 evalf_table[Mul] = evalf_table[sympy.Mul]
 evalf_table[Pow] = evalf_table[sympy.Pow]
+
+
+# Interpolation for finite differences
+@singledispatch
+def interp_for_fd(expr, x0, **kwargs):
+    return expr
+
+
+@interp_for_fd.register(sympy.Derivative)
+def _(expr, x0, **kwargs):
+    return expr.func(expr=interp_for_fd(expr.expr, x0, **kwargs))
+
+
+@interp_for_fd.register(sympy.Expr)
+def _(expr, x0, **kwargs):
+    if expr.args:
+        return expr.func(*[interp_for_fd(i, x0, **kwargs) for i in expr.args])
+    else:
+        return expr
+
+
+@interp_for_fd.register(AbstractFunction)
+def _(expr, x0, **kwargs):
+    from devito.finite_differences.derivative import Derivative
+    x0_expr = {d: v for d, v in x0.items() if v is not expr.indices_ref[d]}
+    if x0_expr:
+        dims = tuple((d, 0) for d in x0_expr)
+        fd_o = tuple([2]*len(dims))
+        return Derivative(expr, *dims, fd_order=fd_o, x0=x0_expr)._evaluate(**kwargs)
+    else:
+        return expr
