@@ -275,8 +275,9 @@ class AdvancedProfiler(Profiler):
         traffics = comm.allgather(traffic)
         sops = [sops]*comm.size
         itershapess = comm.allgather(itershapes)
-
-        return list(zip(times, opss, pointss, traffics, sops, itershapess, time_only_profiling))
+        topfs = comm.allgather(time_only_profiling)
+        
+        return list(zip(times, opss, pointss, traffics, sops, itershapess, topfs))
 
     # Override basic summary so that arguments other than runtime are computed.
     def summary(self, args, dtype, reduce_over=None):
