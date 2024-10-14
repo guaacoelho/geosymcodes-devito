@@ -142,7 +142,8 @@ class Reconstructable:
                 args[self.__rargs__.index(k)] = kwargs.pop(k)
 
         kwargs.update({i: getattr(self, i) for i in self.__rkwargs__ if i not in kwargs})
-
+        if hasattr(self, 'is_parameter'):
+            kwargs.update({'parameter': getattr(self, 'is_parameter')})
         # If this object has SymPy assumptions associated with it, which were not
         # in the kwargs, then include them
         try:
