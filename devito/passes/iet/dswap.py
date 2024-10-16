@@ -8,7 +8,11 @@ from sympy import Mod, Not, sympify
 from pdb import set_trace
 from ctypes import c_int32, POINTER, c_int, c_void_p
 from functools import reduce 
-from mpi4py import MPI
+try:
+    from mpi4py import MPI
+except ImportError:
+    print("mpi4py is not available. You must install it")
+    MPI=None
 
 from devito.tools import timed_pass
 from devito.passes.iet.engine import iet_pass
