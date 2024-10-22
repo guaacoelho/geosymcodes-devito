@@ -10,8 +10,6 @@ from devito.data.allocators import DataReference
 from devito.tools import as_tuple
 from devito.types import Scalar
 
-from conftest import skipif
-
 
 class TestDataBasic:
 

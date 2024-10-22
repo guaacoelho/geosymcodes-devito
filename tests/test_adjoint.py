@@ -81,14 +81,10 @@ class TestAdjoint:
         ('layers-viscoacoustic', (20, 25), 'maxwell', 4, 2, viscoacoustic_setup),
         ('layers-viscoacoustic', (20, 25), 'maxwell', 2, 2, viscoacoustic_setup),
         # 3D Deng Mcmechan Viscoacoustic tests with varying space and equation orders
-        ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 4, 1, \
-            viscoacoustic_setup),
-        ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 2, 1, \
-            viscoacoustic_setup),
-        ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 4, 2, \
-            viscoacoustic_setup),
-        ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 2, 2, \
-            viscoacoustic_setup),
+        ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 4, 1, viscoacoustic_setup),
+        ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 2, 1, viscoacoustic_setup),
+        ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 4, 2, viscoacoustic_setup),
+        ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 2, 2, viscoacoustic_setup),
         # 2D elastic tests with varying space orders
         ('layers-elastic', (20, 25), None, 2, 1, iso_elastic_setup),
         ('layers-elastic', (20, 25), None, 4, 1, iso_elastic_setup),
