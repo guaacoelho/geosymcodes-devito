@@ -9,7 +9,7 @@ from devito.ir.stree.tree import (ScheduleTree, NodeIteration, NodeConditional,
 from devito.ir.support import (SEQUENTIAL, Any, Interval, IterationInterval,
                                IterationSpace, normalize_properties, normalize_syncs)
 from devito.mpi.halo_scheme import HaloScheme
-from devito.tools import Bunch, DefaultOrderedDict
+from devito.tools import Bunch, DefaultOrderedDict, as_mapper
 
 __all__ = ['stree_build']
 
@@ -32,6 +32,10 @@ def stree_build(clusters, profiler=None, **kwargs):
         if reuse_whole_subtree(c, prev):
             tip = mapper[base].bottom
             maybe_reusable = prev.itintervals
+        elif reuse_partial_subtree(c, prev):
+            tip = mapper[base].middle
+            tip = augment_partial_subtree(c, tip, mapper, base)
+            maybe_reusable = []
         else:
             # Add any guards/Syncs outside of the outermost Iteration
             tip = augment_whole_subtree(c, stree, mapper, base)
@@ -76,8 +80,9 @@ def stree_build(clusters, profiler=None, **kwargs):
         # Add in Node{Iteration,Conditional,Sync}
         for it in c.itintervals[index:]:
             d = it.dim
-            tip = NodeIteration(c.ispace.project([d]), tip, c.properties.get(d, ()))
-            mapper[it].top = tip
+            ispace = c.ispace.project([d])
+            properties = c.properties.get(d, ())
+            mapper[it].top = tip = NodeIteration(ispace, tip, properties)
             tip = augment_whole_subtree(c, tip, mapper, it)
 
         # Attach NodeHalo if necessary
@@ -85,6 +90,10 @@ def stree_build(clusters, profiler=None, **kwargs):
             if needs_nodehalo(it.dim, c.halo_scheme):
                 v.bottom.parent = NodeHalo(c.halo_scheme, v.bottom.parent)
                 break
+        else:
+            if c.halo_scheme:
+                assert not c.exprs  # See preprocess() -- we rarely end up here!
+                tip = NodeHalo(c.halo_scheme, v.bottom)
 
         # Add in NodeExprs
         exprs = []
@@ -105,22 +114,29 @@ def stree_build(clusters, profiler=None, **kwargs):
            any(i.is_Section for i in reversed(tip.ancestors)):
             continue
 
-        candidate = None
-        for i in reversed(tip.ancestors + (tip,)):
+        candidates = tuple(reversed(tip.ancestors[1:] + (tip,)))
+
+        if not any(i.is_Iteration and i.dim.is_Time for i in candidates) and \
+           not candidates[-1] is stree:
+            attach_section(candidates[-1])
+            continue
+
+        found = None
+        for i in candidates:
             if i.is_Halo:
-                candidate = i
+                found = i
             elif i.is_Sync:
                 attach_section(i)
                 section = None
                 break
             elif i.is_Iteration:
                 if (i.dim.is_Time and SEQUENTIAL in i.properties):
-                    section = attach_section(candidate, section)
+                    section = attach_section(found, section)
                     break
                 else:
-                    candidate = i
+                    found = i
         else:
-            attach_section(candidate, section)
+            attach_section(found, section)
 
     return stree
 
@@ -132,12 +148,11 @@ base = IterationInterval(Interval(None), [], Any)
 
 def preprocess(clusters, options=None, **kwargs):
     """
-    Lower the so-called "wild" Clusters, that is objects not representing a set
-    of mathematical operations. This boils down to:
+    Lower the so-called "wild" Clusters, that is objects not representing
+    mathematical operations. This boils down to:
 
-        * Moving the HaloTouch's from `clusters` into a mapper `M: {HT -> C}`.
-          `c = M(ht)` is the first Cluster of the sequence requiring the halo
-          exchange `ht` to have terminated before the execution can proceed.
+        * Bind HaloTouch to Clusters. A Cluster carrying a HaloTouch cannot execute
+          before the HaloExchange has completed.
         * Lower the CriticalRegions:
             * If they encode an asynchronous operation (e.g., a WaitLock), attach
               it to a Nop Cluster for future lowering;
@@ -150,11 +165,18 @@ def preprocess(clusters, options=None, **kwargs):
     for c in clusters:
         if c.is_halo_touch:
             hs = HaloScheme.union(e.rhs.halo_scheme for e in c.exprs)
-            queue.append(c.rebuild(halo_scheme=hs))
-        elif c.is_critical_region and c.syncs:
-            processed.append(c.rebuild(exprs=None, guards=c.guards, syncs=c.syncs))
+            queue.append(c.rebuild(exprs=[], halo_scheme=hs))
+
+        elif c.is_dist_reduce:
+            processed.append(c)
+
+        elif c.is_critical_region:
+            if c.is_wait:
+                processed.append(c.rebuild(exprs=[]))
+
         elif c.is_wild:
             continue
+
         else:
             dims = set(c.ispace.promote(lambda d: d.is_Block).itdims)
 
@@ -178,11 +200,26 @@ def preprocess(clusters, options=None, **kwargs):
 
             syncs = normalize_syncs(*[c1.syncs for c1 in found])
             if syncs:
-                ispace = c.ispace.project(syncs)
+                ispace = c.ispace.prefix(lambda d: d._defines.intersection(syncs))
                 processed.append(c.rebuild(exprs=[], ispace=ispace, syncs=syncs))
 
-            halo_scheme = HaloScheme.union([c1.halo_scheme for c1 in found])
-            processed.append(c.rebuild(halo_scheme=halo_scheme))
+            if all(c1.ispace.is_subset(c.ispace) for c1 in found):
+                # 99% of the cases we end up here
+                hs = HaloScheme.union([c1.halo_scheme for c1 in found])
+                processed.append(c.rebuild(halo_scheme=hs))
+            elif options['mpi']:
+                # We end up here with e.g. `t,x,y,z,f` where `f` is a sequential
+                # dimension requiring a loc-index in the HaloScheme. The compiler
+                # will generate the non-perfect loop nest `t,f ; t,x,y,z,f`, with
+                # the first nest triggering all necessary halo exchanges along `f`
+                mapper = as_mapper(found, lambda c1: c1.ispace)
+                for k, v in mapper.items():
+                    hs = HaloScheme.union([c1.halo_scheme for c1 in v])
+                    processed.append(c.rebuild(exprs=[], ispace=k, halo_scheme=hs))
+                processed.append(c)
+            else:
+                # Avoid ugly empty loops
+                processed.append(c)
 
     # Sanity check!
     try:
@@ -203,7 +240,7 @@ def reuse_whole_subtree(c0, c1, d=None):
             c0.syncs.get(d) == c1.syncs.get(d))
 
 
-def augment_partial_subtree(cluster, tip, mapper, it=None):
+def augment_partial_subtree(cluster, tip, mapper, it):
     d = it.dim
 
     if d in cluster.syncs:

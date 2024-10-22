@@ -1,6 +1,5 @@
-from math import sin, floor
-
 import numpy as np
+from numpy import sin, floor
 import pytest
 from sympy import Float
 
@@ -8,9 +7,10 @@ from devito import (Grid, Operator, Dimension, SparseFunction, SparseTimeFunctio
                     Function, TimeFunction, DefaultDimension, Eq, switchconfig,
                     PrecomputedSparseFunction, PrecomputedSparseTimeFunction,
                     MatrixSparseTimeFunction)
+from devito.operations.interpolators import LinearInterpolator, SincInterpolator
 from examples.seismic import (demo_model, TimeAxis, RickerSource, Receiver,
                               AcquisitionGeometry)
-from examples.seismic.acoustic import AcousticWaveSolver
+from examples.seismic.acoustic import AcousticWaveSolver, acoustic_setup
 import scipy.sparse
 
 
@@ -92,8 +92,8 @@ def precompute_linear_interpolation(points, grid, origin, r=2):
 
     Allow larger radius with zero weights for testing.
     """
-    gridpoints = [tuple(floor((point[i]-origin[i])/grid.spacing[i])
-                        for i in range(len(point))) for point in points]
+    gridpoints = np.array([tuple(floor((point[i]-origin[i])/grid.spacing[i])
+                           for i in range(len(point))) for point in points])
 
     interpolation_coeffs = np.zeros((len(points), grid.dim, r))
     rs = r // 2 - 1
@@ -113,13 +113,14 @@ def test_precomputed_interpolation(r):
         precomputed values for interpolation coefficients
     """
     shape = (101, 101)
-    points = [(.05, .9), (.01, .8), (0.07, 0.84)]
+    points = np.array([(.05, .9), (.01, .8), (0.07, 0.84)])
     origin = (0, 0)
 
     grid = Grid(shape=shape, origin=origin)
 
     def init(data):
         # This is data with halo so need to shift to match the m.data expectations
+        print(grid.spacing)
         for i in range(data.shape[0]):
             for j in range(data.shape[1]):
                 data[i, j] = sin(grid.spacing[0]*(i-r)) + sin(grid.spacing[1]*(j-r))
@@ -637,7 +638,7 @@ def test_msf_interpolate():
         with a TimeFunction
     """
     shape = (101, 101)
-    points = [(.05, .9), (.01, .8), (0.07, 0.84)]
+    points = np.array([(.05, .9), (.01, .8), (0.07, 0.84)])
     origin = (0, 0)
 
     grid = Grid(shape=shape, origin=origin)
@@ -703,8 +704,8 @@ def test_sparse_first():
     ds = DefaultDimension("ps", default_value=3)
     grid = Grid((11, 11))
     dims = grid.dimensions
-    s = SparseFirst(name="s", grid=grid, npoint=2, dimensions=(dr, ds), shape=(2, 3))
-    s.coordinates.data[:] = [[.5, .5], [.2, .2]]
+    s = SparseFirst(name="s", grid=grid, npoint=2, dimensions=(dr, ds), shape=(2, 3),
+                    coordinates=[[.5, .5], [.2, .2]])
 
     # Check dimensions and shape are correctly initialized
     assert s.indices[s._sparse_position] == dr
@@ -752,14 +753,88 @@ def test_inject_function():
             assert u.data[1, i, j] == 0
 
 
-def test_interpolation_radius():
+@pytest.mark.parametrize('r, interp', [(2, 'linear'), (4, 'sinc')])
+def test_interpolation_radius(r, interp):
     nt = 11
 
     grid = Grid(shape=(5, 5))
     u = TimeFunction(name="u", grid=grid, space_order=0)
-    src = SparseTimeFunction(name="src", grid=grid, nt=nt, npoint=1)
+    src = SparseTimeFunction(name="src", grid=grid, nt=nt, npoint=1,
+                             r=r, interpolation=interp)
     try:
         src.interpolate(u)
         assert False
     except ValueError:
         assert True
+
+
+def test_interp_default():
+    nt = 3
+    grid = Grid(shape=(5, 5))
+
+    src = SparseTimeFunction(name="src", grid=grid, nt=nt, npoint=1)
+    assert isinstance(src.interpolator, LinearInterpolator)
+    assert src.r == 1
+
+    src = SparseTimeFunction(name="src", grid=grid, nt=nt, npoint=1, interpolation='sinc')
+    assert isinstance(src.interpolator, SincInterpolator)
+    assert src.r == 4
+
+    src = SparseTimeFunction(name="src", grid=grid, nt=nt, npoint=1,
+                             interpolation='sinc', r=6)
+    assert isinstance(src.interpolator, SincInterpolator)
+    assert src.r == 6
+
+
+@pytest.mark.parametrize('r, tol', [(2, 0.051), (3, 0.003), (4, 0.008),
+                                    (5, 0.002), (6, 0.0005), (7, 8e-5),
+                                    (8, 6e-5), (9, 5e-5), (10, 4.2e-5)])
+def test_sinc_accuracy(r, tol):
+    so = max(2, r)
+    solver_lin = acoustic_setup(preset='constant-isotropic', shape=(101, 101),
+                                spacing=(10, 10), interpolation='linear', space_order=so)
+    solver_sinc = acoustic_setup(preset='constant-isotropic', shape=(101, 101),
+                                 spacing=(10, 10), interpolation='sinc', r=r,
+                                 space_order=so)
+
+    # On node source
+    s_node = [500, 500]
+    src_n = solver_lin.geometry.src
+    src_n.coordinates.data[:] = s_node
+
+    # Half node src
+    s_mid = [505, 505]
+    src_h = solver_lin.geometry.src
+    src_h.coordinates.data[:] = s_mid
+
+    # On node rec
+    r_node = [750, 750]
+    rec_n = solver_lin.geometry.new_src(name='rec', src_type=None)
+    rec_n.coordinates.data[:] = r_node
+
+    # Half node rec for linear
+    r_mid = [755, 755]
+    rec_hl = solver_lin.geometry.new_src(name='recl', src_type=None)
+    rec_hl.coordinates.data[:] = r_mid
+
+    # Half node rec for sinc
+    r_mid = [755, 755]
+    rec_hs = solver_lin.geometry.new_src(name='recs', src_type=None)
+    rec_hs.coordinates.data[:] = r_mid
+
+    # Reference solution, on node
+    _, un, _ = solver_lin.forward(src=src_n, rec=rec_n)
+    # Linear interp on half node
+    _, ul, _ = solver_lin.forward(src=src_h, rec=rec_hl)
+    # Sinc interp on half node
+    _, us, _ = solver_sinc.forward(src=src_h, rec=rec_hs)
+
+    # Check sinc is more accuracte
+    nref = np.linalg.norm(rec_n.data)
+    err_lin = np.linalg.norm(rec_n.data - rec_hl.data)/nref
+    err_sinc = np.linalg.norm(rec_n.data - rec_hs.data)/nref
+
+    print(f"Error linear: {err_lin}, Error sinc: {err_sinc}")
+    assert np.isclose(err_sinc, 0, rtol=0, atol=tol)
+    assert err_sinc < err_lin
+    assert err_lin > 0.01

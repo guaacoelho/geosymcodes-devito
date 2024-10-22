@@ -17,7 +17,7 @@ from devito.types import Array, StencilDimension, Symbol
 from devito.types.dimension import AffineIndexAccessFunction
 
 
-class TestIndexAccessFunction(object):
+class TestIndexAccessFunction:
 
     def test_basic(self):
         d = Dimension(name='x')
@@ -142,7 +142,7 @@ class TestIndexAccessFunction(object):
         assert expr.sds == (sd,)
 
 
-class TestBufferedDimension(object):
+class TestBufferedDimension:
 
     def test_multi_buffer(self):
         grid = Grid((3, 3))
@@ -210,8 +210,27 @@ class TestBufferedDimension(object):
         assert np.all(f.data[3] == 2)
         assert np.all(f.data[4] == 4)
 
+    def test_degenerate_to_zero(self):
+        """
+        Check that if `save=Buffer(1)` is used, then the TimeFunction doesn't
+        need any ModuloDimension for indexing.
+        """
+        grid = Grid(shape=(10, 10))
 
-class TestSubDimension(object):
+        u = TimeFunction(name='u', grid=grid, save=Buffer(1))
+
+        eq = Eq(u.forward, u + 1)
+
+        op = Operator(eq)
+
+        assert len([i for i in FindSymbols('dimensions').visit(op) if i.is_Modulo]) == 0
+
+        op.apply(time_M=9)
+
+        assert np.all(u.data == 10)
+
+
+class TestSubDimension:
 
     @pytest.mark.parametrize('opt', opts_tiling)
     def test_interior(self, opt):
@@ -403,14 +422,14 @@ class TestSubDimension(object):
     @pytest.mark.parametrize('exprs,expected,', [
         # Carried dependence in both /t/ and /x/
         (['Eq(u[t+1, x, y], u[t+1, x-1, y] + u[t, x, y])'], 'y'),
-        (['Eq(u[t+1, x, y], u[t+1, x-1, y] + u[t, x, y], subdomain=interior)'], 'i0y'),
+        (['Eq(u[t+1, x, y], u[t+1, x-1, y] + u[t, x, y], subdomain=interior)'], 'y'),
         # Carried dependence in both /t/ and /y/
         (['Eq(u[t+1, x, y], u[t+1, x, y-1] + u[t, x, y])'], 'x'),
-        (['Eq(u[t+1, x, y], u[t+1, x, y-1] + u[t, x, y], subdomain=interior)'], 'i0x'),
+        (['Eq(u[t+1, x, y], u[t+1, x, y-1] + u[t, x, y], subdomain=interior)'], 'x'),
         # Carried dependence in /y/, leading to separate /y/ loops, one
         # going forward, the other backward
         (['Eq(u[t+1, x, y], u[t+1, x, y-1] + u[t, x, y], subdomain=interior)',
-          'Eq(u[t+1, x, y], u[t+1, x, y+1] + u[t, x, y], subdomain=interior)'], 'i0x'),
+          'Eq(u[t+1, x, y], u[t+1, x, y+1] + u[t, x, y], subdomain=interior)'], 'x'),
     ])
     def test_iteration_property_parallel(self, exprs, expected):
         """Tests detection of sequental and parallel Iterations when applying
@@ -435,7 +454,7 @@ class TestSubDimension(object):
     @skipif(['device'])
     @pytest.mark.parametrize('exprs,expected,', [
         # All parallel, the innermost Iteration gets vectorized
-        (['Eq(u[time, x, yleft], u[time, x, yleft] + 1.)'], ['yleft']),
+        (['Eq(u[time, x, yleft], u[time, x, yleft] + 1.)'], ['y']),
         # All outers are parallel, carried dependence in `yleft`, so the middle
         # Iteration over `x` gets vectorized
         (['Eq(u[time, x, yleft], u[time, x, yleft+1] + 1.)'], ['x']),
@@ -540,6 +559,34 @@ class TestSubDimension(object):
         assert np.all(u.data[1, 0:thickness, thickness:-thickness] == 1)
         assert np.all(u.data[1, thickness+1:, :] == 0)
 
+    @pytest.mark.parametrize('thickness,flag', [
+        (4, True),
+        (8, False)
+    ])
+    def test_subdim_local_parallel(self, thickness, flag):
+        """
+        A variation of `test_subdimleft_parallel` where the thickness, whose
+        value is statically known, explicitly appears in the equations.
+        """
+        grid = Grid(shape=(30, 30, 30))
+        x, y, z = grid.dimensions
+        t = grid.stepping_dim
+
+        u = TimeFunction(name='u', grid=grid, space_order=4)
+        v = TimeFunction(name='v', grid=grid, space_order=4)
+
+        zl = SubDimension.left(name='zl', parent=z, thickness=thickness)
+
+        eqns = [Eq(u[t, x, y, zl], u[t, x, y, 8 - zl]),
+                Eq(v[t, x, y, zl], v[t, x, y, 8 - zl])]
+
+        op = Operator(eqns)
+
+        if flag:
+            assert_structure(op, ['t,x,y,z'], 't,x,y,z')
+        else:
+            assert_structure(op, ['t,x,y,z', 't,x,y,z'], 't,x,y,z,z')
+
     def test_subdimmiddle_notparallel(self):
         """
         Tests application of an Operator consisting of a subdimension
@@ -637,9 +684,11 @@ class TestSubDimension(object):
 
         # Check generated code -- expected loop blocking over x and y, with the
         # two z loops, zi and zl, within y
+        # Note that the zi and zl iterators are renamed to remove clutter given the loop
+        # structure
         assert_structure(op,
-                         ['t,x0_blk0,y0_blk0,x,y,zi', 't,x0_blk0,y0_blk0,x,y,zl'],
-                         't,x0_blk0,y0_blk0,x,y,zi,zl')
+                         ['t,x0_blk0,y0_blk0,x,y,z', 't,x0_blk0,y0_blk0,x,y,z'],
+                         't,x0_blk0,y0_blk0,x,y,z,z')
 
         op.apply(time_M=0)
         assert np.all(u.data[0] == 0)
@@ -660,9 +709,10 @@ class TestSubDimension(object):
         op = Operator(eqns)
 
         # Check generated code -- expected loop blocking
+        # Note that loop structure means zr is renamed to z to remove clutter
         assert_structure(op,
-                         ['t,x0_blk0,y0_blk0,x,y,z', 't,x0_blk0,y0_blk0,x,y,zr'],
-                         't,x0_blk0,y0_blk0,x,y,z,zr')
+                         ['t,x0_blk0,y0_blk0,x,y,z', 't,x0_blk0,y0_blk0,x,y,z'],
+                         't,x0_blk0,y0_blk0,x,y,z,z')
 
     def test_subdim_fd(self):
         """
@@ -735,7 +785,7 @@ class TestSubDimension(object):
         assert np.all(u.data[:, :, -2:] == 0.)
 
 
-class TestConditionalDimension(object):
+class TestConditionalDimension:
 
     """
     A collection of tests to check the correct functioning of ConditionalDimensions.
@@ -888,6 +938,38 @@ class TestConditionalDimension(object):
         # Verify that u2[x,y]= u[2*x, 2*y]
         assert np.allclose(u.data[:-1, 0::2, 0::2], u2.data[:-1, :, :])
 
+    def test_spacial_filtering(self):
+        grid = Grid(shape=(4, 4))
+        x, y = grid.dimensions
+
+        f = Function(name='f', grid=grid)
+        g = Function(name='g', grid=grid)
+
+        g.data[:] = [[-.7, -.8, 0, .4],
+                     [-.3, -.5, 0, .6],
+                     [.1, .2, -.1, .8],
+                     [.5, .7, 0, .9]]
+
+        condition = And(Ge(g, -0.5), Le(g, 0.5))
+        cd = ConditionalDimension(name='cd1', parent=y, condition=condition)
+
+        eqn = Eq(f, g, implicit_dims=cd)
+
+        # NOTE: bypass heuristics and enforce loop blocking. Now `cd` is defined
+        # along `y` but loop blocking will generate two different BlockDimensions,
+        # `y0_blk0` and `Y`, in place of `y`. So the compiler must be smart
+        # enough to stick `cd` inside `Y`
+        opt = ('advanced', {'blockrelax': 'device-aware'})
+
+        op = Operator(eqn, opt=opt)
+
+        op()
+
+        assert np.all(f.data == np.array([[0, 0, 0, .4],
+                                          [-.3, -.5, 0, 0],
+                                          [.1, .2, -.1, 0],
+                                          [.5, 0, 0, 0]], dtype=f.dtype))
+
     def test_time_subsampling_fd(self):
         nt = 19
         grid = Grid(shape=(11, 11))
@@ -930,6 +1012,35 @@ class TestConditionalDimension(object):
         op = Operator([eq_p])
         op.apply(time_M=1)
         assert np.all(np.flatnonzero(f.data) == [3, 30])
+
+    def test_issue_2273(self):
+        grid = Grid(shape=(11, 11))
+        time = grid.time_dim
+
+        nt = 200
+        bounds = (10, 100)
+        factor = 5
+
+        condition = And(Ge(time, bounds[0]), Le(time, bounds[1]))
+
+        time_under = ConditionalDimension(name='timeu', parent=time,
+                                          factor=factor, condition=condition)
+        buffer_size = (bounds[1] - bounds[0] + factor) // factor + 1
+
+        rec = SparseTimeFunction(name='rec', grid=grid, npoint=1, nt=nt,
+                                 coordinates=[(.5, .5)])
+        rec.data[:] = 1.0
+
+        u = TimeFunction(name='u', grid=grid, space_order=2)
+        usaved = TimeFunction(name='usaved', grid=grid, space_order=2,
+                              time_dim=time_under, save=buffer_size)
+
+        eq = [Eq(u.forward, u)] + rec.inject(field=u.forward, expr=rec) + [Eq(usaved, u)]
+
+        op = Operator(eq)
+        op(time_m=0, time_M=nt-1)
+        expected = np.linspace(bounds[0], bounds[1], num=buffer_size-1)
+        assert np.allclose(usaved.data[:-1, 5, 5], expected)
 
     def test_subsampled_fd(self):
         """
@@ -1144,6 +1255,24 @@ class TestConditionalDimension(object):
         assert np.all(f.data[0, :, 0] == 0.)
         assert np.all(f.data[0, :, -1] == 0.)
 
+    def test_no_index_symbolic(self):
+        grid = Grid(shape=(10, 10, 10))
+        x, y, z = grid.dimensions
+
+        u = TimeFunction(name='u', grid=grid)
+
+        v0 = Constant(name='v0', dtype=np.float32)
+        v1 = Constant(name='v1', dtype=np.float32)
+        condition = And(Ge(x, v0), Le(x, v1))
+        cd = ConditionalDimension(name='cd', parent=x, condition=condition,
+                                  indirect=True)
+
+        eq = Eq(u.forward, u + 1, implicit_dims=cd)
+
+        # Ensure both code generation and jitting work
+        op = Operator(eq)
+        op.cfunction
+
     def test_symbolic_factor(self):
         """
         Test ConditionalDimension with symbolic factor (provided as a Constant).
@@ -1228,6 +1357,38 @@ class TestConditionalDimension(object):
         F = np.zeros(shape[0])
         for i in range(shape[0]):
             F[i] = i if i < stop_value else stop_value
+
+        assert np.all(f.data == F)
+
+    def test_implict_dims_multiple(self):
+        """Test supplying multiple ConditionalDimensions as implicit dimensions"""
+        shape = (50,)
+        start_value = 5
+        stop_value = 20
+
+        time = Dimension(name='time')
+        f = TimeFunction(name='f', shape=shape, dimensions=[time])
+        # The condition to start incrementing
+        cond0 = ConditionalDimension(name='cond0',
+                                     parent=time, condition=time > start_value)
+        # The condition to stop incrementing
+        cond1 = ConditionalDimension(name='cond1',
+                                     parent=time, condition=time < stop_value)
+        # Factor of 2
+        cond2 = ConditionalDimension(name='cond2', parent=time, factor=2)
+
+        eqs = [Eq(f.forward, f), Eq(f.forward, f.forward + 1,
+                                    implicit_dims=[cond0, cond1, cond2])]
+        op = Operator(eqs)
+        op.apply(time_M=shape[0] - 2)
+
+        # Make the same calculation in python to assert the result
+        F = np.zeros(shape[0])
+        val = 0
+        for i in range(shape[0]):
+            F[i] = val
+            if i > start_value and i < stop_value and i % 2 == 0:
+                val += 1
 
         assert np.all(f.data == F)
 
@@ -1414,7 +1575,7 @@ class TestConditionalDimension(object):
 
         eqns = [Eq(f.forward, f + 1),
                 Eq(h, f + 1),
-                Eq(g, f.dx + 1, implicit_dims=[ctime])]
+                Eq(g, f.dx + h + 1, implicit_dims=[ctime])]
 
         op = Operator(eqns)
 
@@ -1444,10 +1605,10 @@ class TestConditionalDimension(object):
 
         eqns = [Eq(f.forward, f + 1),
                 Eq(h, f + 1),
-                Eq(g, f + 1, implicit_dims=[ctime]),
-                Eq(f.forward, f + 1, implicit_dims=[ctime]),
-                Eq(f.forward, f + 1),
-                Eq(g, f + 1)]
+                Eq(g, f + h + 1, implicit_dims=[ctime]),
+                Eq(f.forward, f + h + 1, implicit_dims=[ctime]),
+                Eq(f.forward, f.dx + h + 1),
+                Eq(g, f.dx + h + 1)]
 
         op = Operator(eqns)
 
@@ -1707,7 +1868,7 @@ class TestConditionalDimension(object):
         assert norm(g, order=1) == norm(sum(usaved, dims=time_under), order=1)
 
 
-class TestCustomDimension(object):
+class TestCustomDimension:
 
     def test_shifted_minmax(self):
         grid = Grid(shape=(4, 4))
@@ -1734,7 +1895,7 @@ class TestCustomDimension(object):
         assert np.all(v.data_with_halo[:] == 1)
 
 
-class TestMashup(object):
+class TestMashup:
 
     """
     Check the correct functioning of the compiler in presence of many Dimension types.

@@ -15,7 +15,7 @@ __all__ = ['GuardFactor', 'GuardBound', 'GuardBoundNext', 'BaseGuardBound',
            'BaseGuardBoundNext', 'GuardOverflow', 'Guards']
 
 
-class Guard(object):
+class Guard:
 
     @property
     def _args_rebuild(self):
@@ -103,7 +103,7 @@ GuardBound = GuardBoundLe
 # *** GuardBoundNext
 
 
-class BaseGuardBoundNext(Guard):
+class BaseGuardBoundNext(Guard, Pickable):
 
     """
     A guard to avoid out-of-bounds iteration.
@@ -118,11 +118,13 @@ class BaseGuardBoundNext(Guard):
     given `direction`.
     """
 
+    __rargs__ = ('d', 'direction')
+
     def __new__(cls, d, direction, **kwargs):
         assert isinstance(d, Dimension)
         assert isinstance(direction, IterationDirection)
 
-        if direction is Forward:
+        if direction == Forward:
             p0 = d.root
             p1 = d.root.symbolic_max
 
@@ -243,7 +245,7 @@ class Guards(frozendict):
         try:
             m[d] = And(m[d], guard)
         except KeyError:
-            pass
+            m[d] = guard
 
         return Guards(m)
 
@@ -255,7 +257,7 @@ class Guards(frozendict):
 
         m[d] = guard
 
-        return m
+        return Guards(m)
 
     def popany(self, dims):
         m = dict(self)
@@ -294,11 +296,16 @@ def simplify_and(relation, v):
     for a in candidates:
         if a.lhs is v.lhs:
             covered = True
-            if type(a) in (Gt, Ge) and v.rhs > a.rhs:
-                new_args.append(v)
-            elif type(a) in (Lt, Le) and v.rhs < a.rhs:
-                new_args.append(v)
-            else:
+            try:
+                if type(a) in (Gt, Ge) and v.rhs > a.rhs:
+                    new_args.append(v)
+                elif type(a) in (Lt, Le) and v.rhs < a.rhs:
+                    new_args.append(v)
+                else:
+                    new_args.append(a)
+            except TypeError:
+                # E.g., `v.rhs = const + z_M` and `a.rhs = z_M`, so the inequalities
+                # above are not evaluable to True/False
                 new_args.append(a)
         else:
             new_args.append(a)

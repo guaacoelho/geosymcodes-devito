@@ -1,13 +1,12 @@
 from collections import Counter, OrderedDict, defaultdict, namedtuple
-from functools import singledispatch
+from functools import singledispatch, cached_property
 from itertools import groupby
 
-from cached_property import cached_property
 import numpy as np
 import sympy
 
 from devito.finite_differences import EvalDerivative, IndexDerivative, Weights
-from devito.ir import (SEQUENTIAL, PARALLEL_IF_PVT, ROUNDABLE, SEPARABLE, Forward,
+from devito.ir import (SEQUENTIAL, PARALLEL_IF_PVT, SEPARABLE, Forward,
                        IterationSpace, Interval, Cluster, ExprGeometry, Queue,
                        IntervalGroup, LabeledVector, Vector, normalize_properties,
                        relax_properties, unbounded, minimum, maximum, extrema,
@@ -100,7 +99,7 @@ def cire(clusters, mode, sregistry, options, platform):
     return clusters
 
 
-class CireTransformer(object):
+class CireTransformer:
 
     """
     Abstract base class for transformers implementing a CIRE variant.
@@ -140,7 +139,6 @@ class CireTransformer(object):
         # Schedule -> Schedule (optimization)
         if self.opt_rotate:
             schedule = optimize_schedule_rotations(schedule, self.sregistry)
-        schedule = optimize_schedule_padding(schedule, meta, self.platform)
 
         # Schedule -> [Clusters]_k
         processed, subs = lower_schedule(schedule, meta, self.sregistry,
@@ -781,10 +779,10 @@ def optimize_schedule_rotations(schedule, sregistry):
         iis = candidate.lower
         iib = candidate.upper
 
-        ii = ModuloDimension('%sii' % d, ds, iis, incr=iib)
-        cd = CustomDimension(name='%s%s' % (d, d), symbolic_min=ii, symbolic_max=iib,
-                             symbolic_size=n)
-        dsi = ModuloDimension('%si' % ds, cd, cd + ds - iis, n)
+        ii = ModuloDimension('%sii' % d.root.name, ds, iis, incr=iib)
+        cd = CustomDimension(name='%sc' % d.root.name, symbolic_min=ii,
+                             symbolic_max=iib, symbolic_size=n)
+        dsi = ModuloDimension('%si' % ds.root.name, cd, cd + ds - iis, n)
 
         mapper = OrderedDict()
         for i in g:
@@ -795,7 +793,7 @@ def optimize_schedule_rotations(schedule, sregistry):
                 try:
                     md = mapper[v]
                 except KeyError:
-                    name = sregistry.make_name(prefix='%sr' % d.name)
+                    name = sregistry.make_name(prefix='%sr' % d.root.name)
                     md = mapper.setdefault(v, ModuloDimension(name, ds, v, n))
                 mds.append(md)
             indicess = [indices[:ridx] + [md] + indices[ridx + 1:]
@@ -828,30 +826,6 @@ def optimize_schedule_rotations(schedule, sregistry):
     return schedule.rebuild(*processed, rmapper=rmapper)
 
 
-def optimize_schedule_padding(schedule, meta, platform):
-    """
-    Round up the innermost IterationInterval of the tensor temporaries IterationSpace
-    to a multiple of the SIMD vector length. This is not always possible though (it
-    depends on how much halo is safely accessible in all read Functions).
-    """
-    processed = []
-    for i in schedule:
-        try:
-            it = i.ispace.itintervals[-1]
-            if it.dim is i.writeto[-1].dim and ROUNDABLE in meta.properties[it.dim]:
-                vl = platform.simd_items_per_reg(meta.dtype)
-                ispace = i.ispace.add(Interval(it.dim, 0, it.size % vl))
-            else:
-                ispace = i.ispace
-            processed.append(ScheduledAlias(
-                i.pivot, i.writeto, ispace, i.aliaseds, i.indicess,
-            ))
-        except (TypeError, KeyError, IndexError):
-            processed.append(i)
-
-    return schedule.rebuild(*processed)
-
-
 def lower_schedule(schedule, meta, sregistry, ftemps):
     """
     Turn a Schedule into a sequence of Clusters.
@@ -870,7 +844,7 @@ def lower_schedule(schedule, meta, sregistry, ftemps):
         # This prevents cases such as `floor(a*b)` with `a` and `b` floats
         # that would creat a temporary `int r = b` leading to erronous
         # numerical results
-        dtype = sympy_dtype(pivot, meta.dtype)
+        dtype = sympy_dtype(pivot, base=meta.dtype)
 
         if writeto:
             # The Dimensions defining the shape of Array
@@ -879,12 +853,13 @@ def lower_schedule(schedule, meta, sregistry, ftemps):
             # for zi = z_m + zi_ltkn; zi <= z_M - zi_rtkn; ...
             #   r[zi] = ...
             #
-            # Instead of `r[zi - z_m - zi_ltkn]` we have just `r[zi]`, so we'll need
-            # as much room as in `zi`'s parent to avoid going OOB
-            # Aside from ugly generated code, the reason we do not rather shift the
-            # indices is that it prevents future passes to transform the loop bounds
-            # (e.g., MPI's comp/comm overlap does that)
-            dimensions = [d.parent if d.is_Sub else d for d in writeto.itdims]
+            # Instead of `r[zi - z_m - zi_ltkn]` we have just `r[zi]`, so we'll
+            # need as much room as in `zi`'s parent to avoid going OOB Aside
+            # from ugly generated code, the reason we do not rather shift the
+            # indices is that it prevents future passes to transform the loop
+            # bounds (e.g., MPI's comp/comm overlap does that)
+            dimensions = [d.parent if d.is_AbstractSub else d
+                          for d in writeto.itdims]
 
             # The halo must be set according to the size of `writeto`
             halo = [(abs(i.lower), abs(i.upper)) for i in writeto]
@@ -922,10 +897,14 @@ def lower_schedule(schedule, meta, sregistry, ftemps):
 
         # Drop or weaken parallelism if necessary
         for d, v in meta.properties.items():
-            if any(i.is_Modulo for i in ispace.sub_iterators[d]):
-                properties[d] = normalize_properties(v, {SEQUENTIAL})
-            elif d not in writeto.itdims:
-                properties[d] = normalize_properties(v, {PARALLEL_IF_PVT}) - {ROUNDABLE}
+            try:
+                if any(i.is_Modulo for i in ispace.sub_iterators[d]):
+                    properties[d] = normalize_properties(v, {SEQUENTIAL})
+                elif d not in writeto.itdims:
+                    properties[d] = normalize_properties(v, {PARALLEL_IF_PVT})
+            except KeyError:
+                # Non-dimension key such as (x, y) for diagonal stencil u(x+i hx, y+i hy)
+                pass
 
         # Track star-shaped stencils for potential future optimization
         if len(writeto) > 1 and schedule.is_frame:
@@ -1214,7 +1193,7 @@ AliasKey = namedtuple('AliasKey', 'ispace intervals dtype guards properties')
 Variant = namedtuple('Variant', 'schedule exprs')
 
 
-class Alias(object):
+class Alias:
 
     def __init__(self, pivot, aliaseds, intervals, distances, score):
         self.pivot = pivot
@@ -1255,7 +1234,7 @@ class Alias(object):
         return all(len([e for e in i if e != 0]) <= 1 for i in self.distances)
 
 
-class AliasList(object):
+class AliasList:
 
     def __init__(self, aliases=None):
         if aliases is None:
@@ -1307,7 +1286,7 @@ ScheduledAlias = namedtuple('SchedAlias',
 class Schedule(tuple):
 
     def __new__(cls, *items, dmapper=None, rmapper=None, is_frame=False):
-        obj = super(Schedule, cls).__new__(cls, items)
+        obj = super().__new__(cls, items)
         obj.dmapper = dmapper or {}
         obj.rmapper = rmapper or {}
         obj.is_frame = is_frame

@@ -38,7 +38,7 @@ def symbol(name, dimensions, value=0., shape=(3, 5), mode='function'):
     return s.indexify() if mode == 'indexed' else s
 
 
-class TestOperatorSetup(object):
+class TestOperatorSetup:
 
     def test_platform_compiler_language(self):
         """
@@ -134,7 +134,7 @@ class TestOperatorSetup(object):
         assert op1._compiler is not op2._compiler
 
 
-class TestCodeGen(object):
+class TestCodeGen:
 
     def test_parameters(self):
         """Tests code generation for Operator parameters."""
@@ -349,7 +349,7 @@ class TestCodeGen(object):
         assert np.all(u0.data[2, :] == 8)
 
 
-class TestArithmetic(object):
+class TestArithmetic:
 
     @pytest.mark.parametrize('expr, result', [
         ('Eq(a, a + b + 5.)', 10.),
@@ -641,7 +641,7 @@ class TestArithmetic(object):
         assert str(op1.ccode) == str(op2.ccode)
 
 
-class TestAllocation(object):
+class TestAllocation:
 
     @pytest.mark.parametrize('shape', [(20, 20),
                                        (20, 20, 20),
@@ -696,7 +696,7 @@ class TestAllocation(object):
             assert f.data[index] == 2.
 
 
-class TestApplyArguments(object):
+class TestApplyArguments:
 
     def verify_arguments(self, arguments, expected):
         """
@@ -1207,9 +1207,8 @@ class TestApplyArguments(object):
         except:
             assert False
 
-    @skipif('nompi')
     @pytest.mark.parallel(mode=1)
-    def test_new_distributor(self):
+    def test_new_distributor(self, mode):
         """
         Test that `comm` and `nb` are correctly updated when a different distributor
         from that it was originally built with is required by an operator.
@@ -1271,7 +1270,7 @@ class TestApplyArguments(object):
 
 
 @skipif('device')
-class TestDeclarator(object):
+class TestDeclarator:
 
     def test_conditional_declarations(self):
         x = Dimension(name="x")
@@ -1307,7 +1306,7 @@ class TestDeclarator(object):
         assert 'float' not in str(exprs[1])
 
 
-class TestLoopScheduling(object):
+class TestLoopScheduling:
 
     def test_permutations_without_deps(self):
         """
@@ -1518,7 +1517,7 @@ class TestLoopScheduling(object):
         # Here the difference is that we're using SubDimensions
         (('Eq(tv[t,xi,yi,zi], tu[t,xi-1,yi,zi] + tu[t,xi+1,yi,zi])',
           'Eq(tu[t+1,xi,yi,zi], tu[t,xi,yi,zi] + tv[t,xi-1,yi,zi] + tv[t,xi+1,yi,zi])'),
-         '+++++++', ['ti0xi0yi0z', 'ti0xi0yi0z'], 'ti0xi0yi0zi0xi0yi0z'),
+         '+++++++', ['txyz', 'txyz'], 'txyzxyz'),
         # 16) RAW 3->1; expected=2
         # Time goes backward, but the third equation should get fused with
         # the first one, as the time dependence is loop-carried
@@ -1545,7 +1544,7 @@ class TestLoopScheduling(object):
         (('Eq(tv[t+1,x,y,z], tu[t,x,y,z] + tu[t,x+1,y,z])',
           'Eq(tu[t+1,xi,yi,zi], tv[t+1,xi,yi,zi] + tv[t+1,xi+1,yi,zi])',
           'Eq(tw[t+1,x,y,z], tv[t+1,x,y,z] + tv[t+1,x+1,y,z])'),
-         '++++++++++', ['txyz', 'ti0xi0yi0z', 'txyz'], 'txyzi0xi0yi0zxyz'),
+         '++++++++++', ['txyz', 'txyz', 'txyz'], 'txyzxyzxyz'),
     ])
     def test_consistency_anti_dependences(self, exprs, directions, expected, visit):
         """
@@ -1572,7 +1571,7 @@ class TestLoopScheduling(object):
 
         # Note: `topofuse` is a subset of `advanced` mode. We use it merely to
         # bypass 'blocking', which would complicate the asserts below
-        op = Operator(eqns, opt=('topofuse', {'openmp': False, 'optcomms': False}))
+        op = Operator(eqns, opt=('topofuse', {'openmp': False, 'opt-comms': False}))
 
         trees = retrieve_iteration_tree(op)
         iters = FindNodes(Iteration).visit(op)
@@ -1989,7 +1988,7 @@ class TestLoopScheduling(object):
         assert(np.all(u.data[:] == expected[:]))
 
 
-class TestInternals(object):
+class TestInternals:
 
     def test_indirection(self):
         nt = 10

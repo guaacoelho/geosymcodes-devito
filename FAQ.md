@@ -84,19 +84,18 @@ int Kernel(struct dataobj *restrict f_vec, struct dataobj *restrict g_vec, const
 {
   float (*restrict f) __attribute__ ((aligned (64))) = (float (*)) f_vec->data;
   float (*restrict g) __attribute__ ((aligned (64))) = (float (*)) g_vec->data;
+
   /* Flush denormal numbers to zero in hardware */
   _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
   _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-  struct timeval start_section0, end_section0;
-  gettimeofday(&start_section0, NULL);
-  /* Begin section0 */
+
+  START(section0)
   for (int x = x_m; x <= x_M; x += 1)
   {
     g[x + 8] = (3.57142857e-3F*(f[x + 4] - f[x + 12]) + 3.80952381e-2F*(-f[x + 5] + f[x + 11]) + 2.0e-1F*(f[x + 6] - f[x + 10]) + 8.0e-1F*(-f[x + 7] + f[x + 9]))/h_x;
   }
-  /* End section0 */
-  gettimeofday(&end_section0, NULL);
-  timers->section0 += (double)(end_section0.tv_sec-start_section0.tv_sec)+(double)(end_section0.tv_usec-start_section0.tv_usec)/1000000;
+  STOP(section0,timers)
+
   return 0;
 }
 ```
@@ -597,9 +596,52 @@ By default, Devito compiles the generated code using flags that maximize the run
 
 [top](#Frequently-Asked-Questions)
 
-## Can I control the MPI domain decomposition
+## Can I control the MPI domain decomposition?
 
-Until Devito v3.5 included, domain decomposition occurs along the fastest axis. As of later versions, domain decomposition occurs along the slowest axis, for performance reasons.  And yes, it is possible to control the domain decomposition in user code, but this is not neatly documented. Take a look at `test_custom_topology` in [this file](https://github.com/devitocodes/devito/blob/master/tests/test_mpi.py). In essence, `Grid` accepts the optional argument `topology`, which allows the user to pass a custom topology as an n-tuple, where `n` is the number of distributed dimensions. For example, for a two-dimensional grid, the topology `(4, 1)` will decompose the slowest axis into four partitions, one partition per MPI rank, while the fastest axis will be replicated over all MPI ranks.
+By default, domain decomposition starts along the slowest axis. This means that for an n-dimensional grid, the outermost dimension is decomposed first. For example, in a three-dimensional grid (x, y, z), the x dimension is split into chunks first, followed by the y dimension, and finally the z dimension. Then the process restarts from the outermost dimension again, ensuring an n-dimensional decomposition, until as many partitions as MPI ranks are created.
+
+### Customization
+
+The `Grid` class accepts an optional `topology` argument, allowing users to specify custom domain decompositions as an n-tuple, where `n` is the number of distributed dimensions. For instance, for a two-dimensional grid, the topology `(4, 1)` will decompose the slowest axis into four partitions (one per MPI rank), while the fastest axis will be replicated across all MPI ranks. So, for example, given a `Grid(shape=(16, 16), topology=(4, 1))`, the x dimension would be split into 4 chunks of 4, resulting in partitions of shape `(4, 16)` for each MPI rank.
+
+### Wildcard-based Decomposition
+
+Consider a domain with three distributed dimensions: x, y, and z, and an MPI communicator with `N` processes. Here are some examples of specifying a custom `topology`:
+
+- **With N known (e.g., N=4)**:
+  - `(1, 1, 4)`: Decomposes the z dimension into 4 chunks.
+  - `(2, 1, 2)`: Decomposes the x dimension into 2 chunks and the z dimension into 2 chunks.
+
+- **With N unknown**:
+  - `(1, '*', 1)`: The wildcard `'*'` indicates that the runtime should decompose the y dimension into N chunks.
+  - `('*', '*', 1)`: The runtime decomposes both x and y dimensions into factors of N, prioritizing the outermost dimension.
+
+  Assuming the number of ranks `N` cannot be evenly decomposed into the requested stars, decomposition is as even as possible, prioritizing the outermost dimension:
+
+  - **For N=3**:
+    - `('*', '*', 1)` results in (3, 1, 1).
+    - `('*', 1, '*')` results in (3, 1, 1).
+    - `(1, '*', '*')` results in (1, 3, 1).
+
+  - **For N=6**:
+    - `('*', '*', 1)` results in (3, 2, 1).
+    - `('*', 1, '*')` results in (3, 1, 2).
+    - `(1, '*', '*')` results in (1, 3, 2).
+
+  - **For N=8**:
+    - `('*', '*', '*')` results in (2, 2, 2).
+    - `('*', '*', 1)` results in (4, 2, 1).
+    - `('*', 1, '*')` results in (4, 1, 2).
+    - `(1, '*', '*')` results in (1, 4, 2).
+
+### The `DEVITO_TOPOLOGY` Environment Variable
+
+As of Devito v4.8.11, the domain decomposition topology can also be specified globally using the environment variable `DEVITO_TOPOLOGY`. Accepted values are:
+
+- `x`: Corresponds to the topology `('*', 1, 1)`, decomposing the x dimension.
+- `y`: Corresponds to the topology `(1, '*', 1)`, decomposing the y dimension.
+- `z`: Corresponds to the topology `(1, 1, '*')`, decomposing the z dimension.
+- `xy`: Corresponds to the topology `('*', '*', 1)`, decomposing both x and y dimensions.
 
 
 [top](#Frequently-Asked-Questions)

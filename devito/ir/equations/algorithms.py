@@ -1,13 +1,15 @@
 from collections.abc import Iterable
-
-from sympy import sympify
+from collections import defaultdict
+from functools import singledispatch
 
 from devito.symbolics import retrieve_indexed, uxreplace, retrieve_dimensions
 from devito.tools import Ordering, as_tuple, flatten, filter_sorted, filter_ordered
-from devito.types import Dimension, IgnoreDimSort
+from devito.types import (Dimension, Eq, IgnoreDimSort, SubDimension,
+                          ConditionalDimension)
 from devito.types.basic import AbstractFunction
+from devito.types.grid import MultiSubDimension
 
-__all__ = ['dimension_sort', 'lower_exprs']
+__all__ = ['dimension_sort', 'lower_exprs', 'concretize_subdims']
 
 
 def dimension_sort(expr):
@@ -89,7 +91,7 @@ def dimension_sort(expr):
     return ordering
 
 
-def lower_exprs(expressions, **kwargs):
+def lower_exprs(expressions, subs=None, **kwargs):
     """
     Lowering an expression consists of the following passes:
 
@@ -101,9 +103,10 @@ def lower_exprs(expressions, **kwargs):
     --------
     f(x - 2*h_x, y) -> f[xi + 2, yi + 4]  (assuming halo_size=4)
     """
-    # Normalize subs
-    subs = {k: sympify(v) for k, v in kwargs.get('subs', {}).items()}
+    return _lower_exprs(expressions, subs or {})
 
+
+def _lower_exprs(expressions, subs):
     processed = []
     for expr in as_tuple(expressions):
         try:
@@ -113,7 +116,7 @@ def lower_exprs(expressions, **kwargs):
             dimension_map = {}
 
         # Handle Functions (typical case)
-        mapper = {f: lower_exprs(f.indexify(subs=dimension_map), **kwargs)
+        mapper = {f: _lower_exprs(f.indexify(subs=dimension_map), subs)
                   for f in expr.find(AbstractFunction)}
 
         # Handle Indexeds (from index notation)
@@ -121,7 +124,7 @@ def lower_exprs(expressions, **kwargs):
             f = i.function
 
             # Introduce shifting to align with the computational domain
-            indices = [(lower_exprs(a) + o) for a, o in
+            indices = [_lower_exprs(a, subs) + o for a, o in
                        zip(i.indices, f._size_nodomain.left)]
 
             # Substitute spacing (spacing only used in own dimension)
@@ -147,3 +150,86 @@ def lower_exprs(expressions, **kwargs):
     else:
         assert len(processed) == 1
         return processed.pop()
+
+
+def concretize_subdims(exprs, **kwargs):
+    """
+    Given a list of expressions, return a new list where all user-defined
+    SubDimensions have been replaced by their concrete counterparts.
+
+    A concrete SubDimension binds objects that are guaranteed to be unique
+    across `exprs`, such as the thickness symbols.
+    """
+    sregistry = kwargs.get('sregistry')
+
+    # {root Dimension -> {SubDimension -> concrete SubDimension}}
+    mapper = defaultdict(dict)
+
+    _concretize_subdims(exprs, mapper, sregistry)
+    if not mapper:
+        return exprs
+
+    subs = {}
+    for i in mapper.values():
+        subs.update(i)
+
+    processed = [uxreplace(e, subs) for e in exprs]
+
+    return processed
+
+
+@singledispatch
+def _concretize_subdims(a, mapper, sregistry):
+    pass
+
+
+@_concretize_subdims.register(list)
+@_concretize_subdims.register(tuple)
+def _(v, mapper, sregistry):
+    for i in v:
+        _concretize_subdims(i, mapper, sregistry)
+
+
+@_concretize_subdims.register(Eq)
+def _(expr, mapper, sregistry):
+    for d in expr.free_symbols:
+        _concretize_subdims(d, mapper, sregistry)
+
+
+@_concretize_subdims.register(SubDimension)
+def _(d, mapper, sregistry):
+    # TODO: to be implemented as soon as we drop the counter machinery in
+    # Grid.__subdomain_finalize__
+    pass
+
+
+@_concretize_subdims.register(ConditionalDimension)
+def _(d, mapper, sregistry):
+    # TODO: to be implemented as soon as we drop the counter machinery in
+    # Grid.__subdomain_finalize__
+    # TODO: call `_concretize_subdims(d.parent, mapper)` as the parent might be
+    # a SubDimension!
+    pass
+
+
+@_concretize_subdims.register(MultiSubDimension)
+def _(d, mapper, sregistry):
+    if not d.is_abstract:
+        # TODO: for now Grid.__subdomain_finalize__ creates the thickness, but
+        # soon it will be done here instead
+        return
+
+    pd = d.parent
+
+    subs = mapper[pd]
+
+    if d in subs:
+        # Already have a substitution for this dimension
+        return
+
+    name = sregistry.make_name(prefix=d.name)
+    ltkn, rtkn = MultiSubDimension._symbolic_thickness(name)
+
+    thickness = (ltkn, rtkn)
+
+    subs[d] = d._rebuild(d.name, pd, thickness)

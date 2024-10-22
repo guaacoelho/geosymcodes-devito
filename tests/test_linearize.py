@@ -2,11 +2,10 @@ import pytest
 import numpy as np
 import scipy.sparse
 
-from conftest import skipif
 from devito import (Grid, Function, TimeFunction, SparseTimeFunction, Operator, Eq,
-                    Inc, MatrixSparseTimeFunction, sin)
+                    Inc, MatrixSparseTimeFunction, sin, switchconfig)
 from devito.ir import Call, Callable, DummyExpr, Expression, FindNodes, SymbolRegistry
-from devito.passes import Graph, linearize
+from devito.passes import Graph, linearize, generate_macros
 from devito.types import Array, Bundle, DefaultDimension
 
 
@@ -31,9 +30,8 @@ def test_basic():
     assert np.all(u.data == u1.data)
 
 
-@skipif(['nompi'])
 @pytest.mark.parallel(mode=[(1, 'basic'), (1, 'diag2'), (1, 'full')])
-def test_mpi():
+def test_mpi(mode):
     grid = Grid(shape=(4, 4))
 
     u = TimeFunction(name='u', grid=grid, space_order=2)
@@ -51,7 +49,7 @@ def test_mpi():
     op0.apply(time_M=10)
     op1.apply(time_M=10, u=u1)
 
-    assert np.all(u.data == u1.data)
+    assert np.allclose(u.data, u1.data, rtol=1e-5)
 
 
 def test_cire():
@@ -128,6 +126,27 @@ def test_interpolation():
     assert np.all(u.data == u1.data)
 
 
+def test_interpolation_enforcing_int64_indexing():
+    grid = Grid(shape=(4, 4))
+
+    src = SparseTimeFunction(name='src', grid=grid, npoint=1, nt=10)
+    rec = SparseTimeFunction(name='rec', grid=grid, npoint=1, nt=10)
+    u = TimeFunction(name="u", grid=grid, time_order=2)
+
+    eqns = ([Eq(u.forward, u + 1)] +
+            src.inject(field=u.forward, expr=src) +
+            rec.interpolate(expr=u.forward))
+
+    op = Operator(eqns, opt=('advanced', {'linearize': True,
+                                          'index-mode': 'int32'}))
+
+    # Check generated code
+    assert 'uL0' in str(op)
+    assert 'int x_stride0' in str(op)  # for `u`
+    assert 'long p_rec_stride0' in str(op)  # for `rec`
+    assert 'long p_src_stride0' in str(op)  # for `src`
+
+
 def test_interpolation_msf():
     grid = Grid(shape=(4, 4))
 
@@ -154,26 +173,23 @@ def test_interpolation_msf():
     assert op1.cfunction
 
 
-@skipif(['nompi'])
-@pytest.mark.parallel(mode=[(1, 'diag2')])
-def test_codegen_quality0():
+@pytest.mark.parallel(mode=[(2, 'diag2')])
+def test_codegen_quality0(mode):
     grid = Grid(shape=(4, 4))
-
     u = TimeFunction(name='u', grid=grid, space_order=2)
 
     eqn = Eq(u.forward, u.dx2 + 1.)
 
     op = Operator(eqn, opt=('advanced', {'linearize': True}))
-
     assert 'uL0' in str(op)
 
     exprs = FindNodes(Expression).visit(op)
     assert len(exprs) == 6
-    assert all('const long' in str(i) for i in exprs[:-2])
+    assert all('const int' in str(i) for i in exprs[:-2])
 
     # Only four access macros necessary, namely `uL0`, `bufL0`, `bufL1`
     # for the efunc args
-    # (the other three obviously are _POSIX_C_SOURCE, START_TIMER, STOP_TIMER)
+    # (the other three obviously are _POSIX_C_SOURCE, START, STOP)
     assert len(op._headers) == 6
 
 
@@ -191,11 +207,11 @@ def test_codegen_quality1():
     # 11 expressions in total are expected, 8 of which are for the linearized accesses
     exprs = FindNodes(Expression).visit(op)
     assert len(exprs) == 11
-    assert all('const long' in str(i) for i in exprs[:-3])
-    assert all('const long' not in str(i) for i in exprs[-3:])
+    assert all('const int' in str(i) for i in exprs[:-3])
+    assert all('const int' not in str(i) for i in exprs[-3:])
 
     # Only two access macros necessary, namely `uL0` and `r1L0` (the other five
-    # obviously are _POSIX_C_SOURCE, MIN, MAX, START_TIMER, STOP_TIMER)
+    # obviously are _POSIX_C_SOURCE, MIN, MAX, START, STOP)
     assert len(op._headers) == 6
 
 
@@ -293,7 +309,7 @@ def test_strides_forwarding0():
     graph = Graph(foo)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int32'},
+    linearize(graph, callback=True, options={'index-mode': 'int32'},
               sregistry=SymbolRegistry())
 
     # Since `f` is passed via `f.indexed`, we expect the stride exprs to be
@@ -323,7 +339,7 @@ def test_strides_forwarding1():
     graph = Graph(foo)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int32'},
+    linearize(graph, callback=True, options={'index-mode': 'int32'},
               sregistry=SymbolRegistry())
 
     # Despite `a` is passed via `a.indexed`, and since it's an Array (which
@@ -371,7 +387,7 @@ def test_strides_forwarding2():
     graph.efuncs['foo0'] = foo0
     graph.efuncs['foo1'] = foo1
 
-    linearize(graph, lmode=True, options={'index-mode': 'int32'},
+    linearize(graph, callback=True, options={'index-mode': 'int32'},
               sregistry=SymbolRegistry())
 
     # Both foo's are expected to define `a`!
@@ -411,7 +427,7 @@ def test_strides_forwarding3():
     graph = Graph(root)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int64'},
+    linearize(graph, callback=True, options={'index-mode': 'int64'},
               sregistry=SymbolRegistry())
 
     # Both foo's are expected to define `a`!
@@ -443,7 +459,7 @@ def test_strides_forwarding4():
     graph = Graph(root)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int64'},
+    linearize(graph, callback=True, options={'index-mode': 'int64'},
               sregistry=SymbolRegistry())
 
     root = graph.root
@@ -517,8 +533,10 @@ def test_call_retval_indexed():
     # Emulate what the compiler would do
     graph = Graph(foo)
 
-    linearize(graph, lmode=True, options={'index-mode': 'int64'},
-              sregistry=SymbolRegistry())
+    sregistry = SymbolRegistry()
+    linearize(graph, callback=True, options={'index-mode': 'int64'},
+              sregistry=sregistry)
+    generate_macros(graph, sregistry=sregistry)
 
     foo = graph.root
 
@@ -543,7 +561,7 @@ def test_bundle():
     graph = Graph(foo)
     graph.efuncs['bar'] = bar
 
-    linearize(graph, lmode=True, options={'index-mode': 'int64'},
+    linearize(graph, callback=True, options={'index-mode': 'int64'},
               sregistry=SymbolRegistry())
 
     foo = graph.root
@@ -595,3 +613,29 @@ def test_inc_w_default_dims():
     assert f.shape[0]*k._default_value == 35
     assert np.all(g.data[3] == f.shape[0]*k._default_value)
     assert np.all(g.data[4:] == 0)
+
+
+@pytest.mark.parametrize('autopadding', [False, True, np.float64])
+def test_different_dtype(autopadding):
+
+    @switchconfig(autopadding=autopadding)
+    def _test_different_dtype():
+        space_order = 4
+
+        grid = Grid(shape=(4, 4))
+
+        f = Function(name='f', grid=grid, space_order=space_order)
+        b = Function(name='b', grid=grid, space_order=space_order, dtype=np.float64)
+
+        f.data[:] = 2.1
+        b.data[:] = 1.3
+
+        eq = Eq(f, b.dx + f.dy)
+
+        op1 = Operator(eq, opt=('advanced', {'linearize': True}))
+
+        # Check generated code has different strides for different dtypes
+        assert "bL0(x,y) b[(x)*y_stride0 + (y)]" in str(op1)
+        assert "L0(x,y) f[(x)*y_stride0 + (y)]" in str(op1)
+
+    _test_different_dtype()

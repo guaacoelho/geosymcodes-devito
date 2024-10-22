@@ -2,7 +2,7 @@
 
 import abc
 import inspect
-from cached_property import cached_property
+from functools import cached_property
 from collections import OrderedDict, namedtuple
 from collections.abc import Iterable
 
@@ -13,7 +13,7 @@ from devito.data import FULL
 from devito.ir.equations import DummyEq, OpInc, OpMin, OpMax
 from devito.ir.support import (INBOUND, SEQUENTIAL, PARALLEL, PARALLEL_IF_ATOMIC,
                                PARALLEL_IF_PVT, VECTORIZED, AFFINE, Property,
-                               Forward, detect_io)
+                               Forward, WithLock, PrefetchUpdate, detect_io)
 from devito.symbolics import ListInitializer, CallFromPointer, ccode
 from devito.tools import (Signer, as_tuple, filter_ordered, filter_sorted, flatten,
                           ctypes_to_cstr)
@@ -21,13 +21,14 @@ from devito.types.basic import (AbstractFunction, AbstractSymbol, Basic, Indexed
                                 Symbol)
 from devito.types.object import AbstractObject, LocalObject
 
-__all__ = ['Node', 'Block', 'Expression', 'Callable', 'Call',
-           'Conditional', 'Iteration', 'List', 'Section', 'TimedList', 'Prodder',
-           'MetaCall', 'PointerCast', 'HaloSpot', 'Definition', 'ExpressionBundle',
-           'AugmentedExpression', 'Increment', 'Return', 'While',
-           'ParallelIteration', 'ParallelBlock', 'Dereference', 'Lambda',
-           'SyncSpot', 'Pragma', 'DummyExpr', 'BlankLine', 'ParallelTree',
-           'BusyWait', 'CallableBody', 'Transfer']
+__all__ = ['Node', 'MultiTraversable', 'Block', 'Expression', 'Callable',
+           'Call', 'ExprStmt', 'Conditional', 'Iteration', 'List', 'Section',
+           'TimedList', 'Prodder', 'MetaCall', 'PointerCast', 'HaloSpot',
+           'Definition', 'ExpressionBundle', 'AugmentedExpression', 'Break',
+           'Increment', 'Return', 'While', 'ListMajor', 'ParallelIteration',
+           'ParallelBlock', 'Dereference', 'Lambda', 'SyncSpot', 'Pragma',
+           'DummyExpr', 'BlankLine', 'ParallelTree', 'BusyWait', 'UsingNamespace',
+           'CallableBody', 'Transfer']
 
 # First-class IET nodes
 
@@ -68,7 +69,7 @@ class Node(Signer):
     """
 
     def __new__(cls, *args, **kwargs):
-        obj = super(Node, cls).__new__(cls)
+        obj = super().__new__(cls)
         argnames, _, _, defaultvalues, _, _, _ = inspect.getfullargspec(cls.__init__)
         try:
             defaults = dict(zip(argnames[-len(defaultvalues):], defaultvalues))
@@ -132,12 +133,12 @@ class Node(Signer):
 
     @property
     def functions(self):
-        """All AbstractFunction objects used by this node."""
+        """All AbstractFunctions and AbstractObjects used by this node."""
         return ()
 
     @property
     def expr_symbols(self):
-        """All symbols appearing in an expression within this node."""
+        """All symbols appearing within this node."""
         return ()
 
     @property
@@ -154,7 +155,7 @@ class Node(Signer):
         return (str(self.ccode),)
 
 
-class ExprStmt(object):
+class ExprStmt:
 
     """
     A mixin for Nodes that represent C expression statements, which are expressions
@@ -170,6 +171,15 @@ class ExprStmt(object):
     Notes
     -----
     An ExprStmt does *not* have children Nodes.
+    """
+
+    pass
+
+
+class MultiTraversable(Node):
+
+    """
+    An abstract base class for Nodes comprising more than one traversable children.
     """
 
     pass
@@ -240,15 +250,17 @@ class Call(ExprStmt, Node):
         Defaults to False.
     writes : list, optional
         The AbstractFunctions that will be written to by the called function.
-        Explicitly tagging these AbstractFunctions is useful in the case of external
-        calls, that is whenever the compiler would be unable to retrieve that
-        information by analysis of the IET graph.
+        Explicitly tagging these AbstractFunctions is useful in the case of
+        external calls, that is whenever the compiler would be unable to
+        retrieve that information by analysis of the IET graph.
+    templates : list of Basic, optional
+        The template arguments of the Call.
     """
 
     is_Call = True
 
     def __init__(self, name, arguments=None, retobj=None, is_indirect=False,
-                 cast=False, writes=None):
+                 cast=False, writes=None, templates=None):
         if isinstance(name, CallFromPointer):
             self.base = name.base
         else:
@@ -259,10 +271,21 @@ class Call(ExprStmt, Node):
         self.is_indirect = is_indirect
         self.cast = cast
         self._writes = as_tuple(writes)
+        self.templates = as_tuple(templates)
 
     def __repr__(self):
         ret = "" if self.retobj is None else "%s = " % self.retobj
         return "%sCall::\n\t%s(...)" % (ret, self.name)
+
+    def _rebuild(self, *args, **kwargs):
+        if args:
+            # Not elegant, but basically it handles the fact that a Call might
+            # have nested Calls/Lambdas among its `arguments`, and these might
+            # change, and we are in such a case *if and only if* we have `args`
+            assert len(args) == len(self.children)
+            mapper = dict(zip(self.children, args))
+            kwargs['arguments'] = [mapper.get(i, i) for i in self.arguments]
+        return super()._rebuild(**kwargs)
 
     @property
     def children(self):
@@ -326,8 +349,6 @@ class Call(ExprStmt, Node):
     @property
     def defines(self):
         ret = ()
-        if self.base is not None:
-            ret += (self.base,)
         if isinstance(self.retobj, Basic):
             ret += (self.retobj,)
         return ret
@@ -411,8 +432,8 @@ class Expression(ExprStmt, Node):
         """
         True if it can be an initializing assignment, False otherwise.
         """
-        return ((self.is_scalar and not self.is_reduction) or
-                (self.is_tensor and isinstance(self.expr.rhs, ListInitializer)))
+        return (((self.is_scalar and not self.is_reduction) or
+                 (self.is_tensor and isinstance(self.expr.rhs, ListInitializer))))
 
     @property
     def defines(self):
@@ -722,14 +743,14 @@ class Callable(Node):
     @property
     def functions(self):
         return tuple(i.function for i in self.all_parameters
-                     if isinstance(i.function, AbstractFunction))
+                     if isinstance(i.function, (AbstractFunction, AbstractObject)))
 
     @property
     def defines(self):
         return self.all_parameters
 
 
-class CallableBody(Node):
+class CallableBody(MultiTraversable):
 
     """
     The immediate child of a Callable.
@@ -743,8 +764,16 @@ class CallableBody(Node):
     init : Node, optional
         A piece of IET to perform some initialization relevant for `body`
         (e.g., to initialize the target language runtime).
+    standalones : list of Definitions, optional
+        Object definitions for `body`. Instantiating these objects does not
+        require passing any arguments to their constructors, so these
+        Definitions can be scheduled safely right after `init`. They may or may
+        not be required by some of the subsequent nodes (e.g., `allocs`,
+        `maps`).
     allocs : list of Nodes, optional
         Data definitions and allocations for `body`.
+    stacks : list of Definitions, optional
+        Definitions for the stack-scoped objects appearing in `body`.
     casts : list of PointerCasts, optional
         Sequence of PointerCasts required by the `body`.
     bundles : list of Nodes, optional
@@ -756,22 +785,30 @@ class CallableBody(Node):
     strides : list of Nodes, optional
         Statements defining symbols used to access linearized arrays.
     objs : list of Definitions, optional
-        Object definitions for `body`.
+        Object definitions for `body`. Instantiating these objects may or may
+        not require some of the symbols defined in the previous nodes (e.g.,
+        `allocs`, `maps`).
     unmaps : Transfer or list of Transfer, optional
         Data unmaps for `body`.
     unbundles : list of Nodes, optional
         Data unbundling for `body`.
     frees : list of Calls, optional
         Data deallocations for `body`.
+    errors : list of Nodes, optional
+        Error handling for `body`.
+    retstmt : Node, optional
+        The return statement for `body`.
     """
 
     is_CallableBody = True
 
-    _traversable = ['unpacks', 'init', 'allocs', 'casts', 'bundles', 'maps',
-                    'strides', 'objs', 'body', 'unmaps', 'unbundles', 'frees']
+    _traversable = ['unpacks', 'init', 'standalones', 'allocs', 'stacks',
+                    'casts', 'bundles', 'maps', 'strides', 'objs', 'body',
+                    'unmaps', 'unbundles', 'frees', 'errors', 'retstmt']
 
-    def __init__(self, body, init=(), unpacks=(), strides=(), allocs=(), casts=(),
-                 bundles=(), objs=(), maps=(), unmaps=(), unbundles=(), frees=()):
+    def __init__(self, body, init=(), standalones=(), unpacks=(), strides=(),
+                 allocs=(), stacks=(), casts=(), bundles=(), objs=(), maps=(),
+                 unmaps=(), unbundles=(), frees=(), errors=(), retstmt=()):
         # Sanity check
         assert not isinstance(body, CallableBody), "CallableBody's cannot be nested"
 
@@ -779,7 +816,9 @@ class CallableBody(Node):
 
         self.unpacks = as_tuple(unpacks)
         self.init = as_tuple(init)
+        self.standalones = as_tuple(standalones)
         self.allocs = as_tuple(allocs)
+        self.stacks = as_tuple(stacks)
         self.casts = as_tuple(casts)
         self.strides = as_tuple(strides)
         self.bundles = as_tuple(bundles)
@@ -788,6 +827,8 @@ class CallableBody(Node):
         self.unmaps = as_tuple(unmaps)
         self.unbundles = as_tuple(unbundles)
         self.frees = as_tuple(frees)
+        self.errors = as_tuple(errors)
+        self.retstmt = as_tuple(retstmt)
 
     def __repr__(self):
         return ("<CallableBody <unpacks=%d, allocs=%d, casts=%d, maps=%d, "
@@ -850,20 +891,20 @@ class TimedList(List):
         self._name = lname
         self._timer = timer
 
-        super().__init__(header=c.Line('START_TIMER(%s)' % lname),
+        super().__init__(header=c.Line('START(%s)' % lname),
                          body=body,
-                         footer=c.Line('STOP_TIMER(%s,%s)' % (lname, timer.name)))
+                         footer=c.Line('STOP(%s,%s)' % (lname, timer.name)))
 
     @classmethod
     def _start_timer_header(cls):
-        return ('START_TIMER(S)', ('struct timeval start_ ## S , end_ ## S ; '
-                                   'gettimeofday(&start_ ## S , NULL);'))
+        return ('START(S)', ('struct timeval start_ ## S , end_ ## S ; '
+                             'gettimeofday(&start_ ## S , NULL);'))
 
     @classmethod
     def _stop_timer_header(cls):
-        return ('STOP_TIMER(S,T)', ('gettimeofday(&end_ ## S, NULL); T->S += (double)'
-                                    '(end_ ## S .tv_sec-start_ ## S.tv_sec)+(double)'
-                                    '(end_ ## S .tv_usec-start_ ## S .tv_usec)/1000000;'))
+        return ('STOP(S,T)', ('gettimeofday(&end_ ## S, NULL); T->S += (double)'
+                              '(end_ ## S .tv_sec-start_ ## S.tv_sec)+(double)'
+                              '(end_ ## S .tv_usec-start_ ## S .tv_usec)/1000000;'))
 
     @property
     def name(self):
@@ -894,7 +935,12 @@ class Definition(ExprStmt, Node):
 
     @property
     def functions(self):
-        return (self.function,)
+        ret = [self.function]
+        for i in self.expr_symbols:
+            f = i.function
+            if f.is_AbstractFunction or f.is_AbstractObject:
+                ret.append(i.function)
+        return tuple(ret)
 
     @property
     def defines(self):
@@ -905,16 +951,25 @@ class Definition(ExprStmt, Node):
 
     @property
     def expr_symbols(self):
-        if not self.function.is_Array or self.function.initvalue is None:
-            return ()
-        # These are just a handful of values so it's OK to iterate them over
-        ret = set()
-        for i in self.function.initvalue:
+        f = self.function
+        if f.is_LocalObject:
+            ret = set(flatten(i.free_symbols for i in f.cargs))
             try:
-                ret.update(i.free_symbols)
+                ret.update(f.initvalue.free_symbols)
             except AttributeError:
                 pass
-        return tuple(ret)
+            return tuple(ret)
+        elif f.is_Array and f.initvalue is not None:
+            # These are just a handful of values so it's OK to iterate them over
+            ret = set()
+            for i in f.initvalue:
+                try:
+                    ret.update(i.free_symbols)
+                except AttributeError:
+                    pass
+            return tuple(ret)
+        else:
+            return ()
 
 
 class PointerCast(ExprStmt, Node):
@@ -1018,7 +1073,7 @@ class Lambda(Node):
     A callable C++ lambda function. Several syntaxes are possible; here we
     implement one of the common ones:
 
-        [captures](parameters){body}
+        [captures](parameters){body} SPECIAL [[attributes]]
 
     For more info about C++ lambda functions:
 
@@ -1032,20 +1087,36 @@ class Lambda(Node):
         The captures of the lambda function.
     parameters : list of Basic or expr-like, optional
         The objects in input to the lambda function.
+    special : list of Basic, optional
+        Placeholder for custom lambdas, to add in e.g. macros.
+    attributes : list of str, optional
+        The attributes of the lambda function.
     """
 
     _traversable = ['body']
 
-    def __init__(self, body, captures=None, parameters=None):
+    def __init__(self, body, captures=None, parameters=None, special=None,
+                 attributes=None):
         self.body = as_tuple(body)
         self.captures = as_tuple(captures)
         self.parameters = as_tuple(parameters)
+        self.special = as_tuple(special)
+        self.attributes = as_tuple(attributes)
 
     def __repr__(self):
         return "Lambda[%s](%s)" % (self.captures, self.parameters)
 
+    @property
+    def functions(self):
+        return tuple(i.function for i in self.parameters
+                     if isinstance(i.function, AbstractFunction))
+
     @cached_property
     def expr_symbols(self):
+        return tuple(self.parameters)
+
+    @property
+    def defines(self):
         return tuple(self.parameters)
 
 
@@ -1064,7 +1135,7 @@ class Section(List):
     is_Section = True
 
     def __init__(self, name, body=None, is_subsection=False):
-        super(Section, self).__init__(body=body)
+        super().__init__(body=body)
         self.name = name
         self.is_subsection = is_subsection
 
@@ -1085,7 +1156,7 @@ class ExpressionBundle(List):
     is_ExpressionBundle = True
 
     def __init__(self, ispace, ops, traffic, body=None):
-        super(ExpressionBundle, self).__init__(body=body)
+        super().__init__(body=body)
         self.ispace = ispace
         self.ops = ops
         self.traffic = traffic
@@ -1130,27 +1201,44 @@ class Prodder(Call):
         return self._periodic
 
 
+class UsingNamespace(Node):
+
+    """
+    A C++ using namespace directive.
+    """
+
+    def __init__(self, namespace):
+        self.namespace = namespace
+
+    def __repr__(self):
+        return "<UsingNamespace(%s)>" % self.namespace
+
+
 class Pragma(Node):
 
     """
-    One or more pragmas floating in the IET constructed through a callback.
+    One or more pragmas floating in the IET.
     """
 
-    def __init__(self, callback, arguments=None):
+    def __init__(self, pragma, arguments=None):
         super().__init__()
 
-        self.callback = callback
+        if not isinstance(pragma, str):
+            raise TypeError("Pragma name must be a string, not %s" % type(pragma))
+
+        self.pragma = pragma
         self.arguments = as_tuple(arguments)
 
     def __repr__(self):
-        return '<Pragmas>'
+        return '<Pragma>'
 
     @cached_property
-    def pragmas(self):
-        return as_tuple(self.callback(*self.arguments))
+    def _generate(self):
+        # Subclasses may override this property to customize the pragma generation
+        return self.pragma % self.arguments
 
 
-class Transfer(object):
+class Transfer:
 
     """
     An interface for Nodes that represent host-device data transfers.
@@ -1294,6 +1382,21 @@ class SyncSpot(List):
     def __repr__(self):
         return "<SyncSpot (%s)>" % ",".join(str(i) for i in self.sync_ops)
 
+    @property
+    def is_async_op(self):
+        """
+        True if the SyncSpot contains an asynchronous operation, False otherwise.
+        If False, the SyncSpot may for example represent a wait on a lock.
+        """
+        return any(isinstance(s, (WithLock, PrefetchUpdate))
+                   for s in self.sync_ops)
+
+    @property
+    def functions(self):
+        ret = [(s.lock, s.function, s.target) for s in self.sync_ops]
+        ret = tuple(filter_ordered(f for f in flatten(ret) if f is not None))
+        return ret
+
 
 class CBlankLine(List):
 
@@ -1304,10 +1407,18 @@ class CBlankLine(List):
         return ""
 
 
+class Break(Node):
+    pass
+
+
 class Return(Node):
 
     def __init__(self, value=None):
         self.value = value
+
+
+class ListMajor(List):
+    pass
 
 
 def DummyExpr(*args, init=False):
@@ -1332,7 +1443,7 @@ class HaloSpot(Node):
     _traversable = ['body']
 
     def __init__(self, body, halo_scheme):
-        super(HaloSpot, self).__init__()
+        super().__init__()
 
         if isinstance(body, Node):
             self._body = body

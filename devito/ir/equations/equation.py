@@ -1,15 +1,18 @@
-from cached_property import cached_property
+from functools import cached_property
+
+import numpy as np
 import sympy
 
 from devito.ir.equations.algorithms import dimension_sort, lower_exprs
 from devito.finite_differences.differentiable import diff2sympy
 from devito.ir.support import (GuardFactor, Interval, IntervalGroup, IterationSpace,
                                Stencil, detect_io, detect_accesses)
-from devito.symbolics import IntDiv, uxreplace
+from devito.symbolics import IntDiv, limits_mapper, uxreplace
 from devito.tools import Pickable, Tag, frozendict
-from devito.types import Eq, Inc, ReduceMax, ReduceMin
+from devito.types import Eq, Inc, ReduceMax, ReduceMin, relational_min
 
-__all__ = ['LoweredEq', 'ClusterizedEq', 'DummyEq', 'OpInc', 'OpMin', 'OpMax']
+__all__ = ['LoweredEq', 'ClusterizedEq', 'DummyEq', 'OpInc', 'OpMin', 'OpMax',
+           'identity_mapper']
 
 
 class IREq(sympy.Eq, Pickable):
@@ -70,7 +73,10 @@ class IREq(sympy.Eq, Pickable):
         """
         args = [func(self.lhs), func(self.rhs)]
         kwargs = dict(self.state)
-        kwargs['conditionals'] = {k: func(v) for k, v in self.conditionals.items()}
+
+        conditionals = {k: func(v) for k, v in self.conditionals.items()}
+        kwargs['conditionals'] = frozendict(conditionals)
+
         return self.func(*args, **kwargs)
 
     def __repr__(self):
@@ -79,7 +85,7 @@ class IREq(sympy.Eq, Pickable):
         elif self.operation is OpInc:
             return '%s += %s' % (self.lhs, self.rhs)
         else:
-            return '%s = %s(%s, %s)' % (self.lhs, self.operation, self.lhs, self.rhs)
+            return '%s = %s(%s)' % (self.lhs, self.operation, self.rhs)
 
     # Pickling support
     __reduce_ex__ = Pickable.__reduce_ex__
@@ -113,6 +119,22 @@ class Operation(Tag):
 OpInc = Operation('+')
 OpMax = Operation('max')
 OpMin = Operation('min')
+
+
+identity_mapper = {
+    np.int32: {OpInc: sympy.S.Zero,
+               OpMax: limits_mapper[np.int32].min,
+               OpMin: limits_mapper[np.int32].max},
+    np.int64: {OpInc: sympy.S.Zero,
+               OpMax: limits_mapper[np.int64].min,
+               OpMin: limits_mapper[np.int64].max},
+    np.float32: {OpInc: sympy.S.Zero,
+                 OpMax: limits_mapper[np.float32].min,
+                 OpMin: limits_mapper[np.float32].max},
+    np.float64: {OpInc: sympy.S.Zero,
+                 OpMax: limits_mapper[np.float64].min,
+                 OpMin: limits_mapper[np.float64].max},
+}
 
 
 class LoweredEq(IREq):
@@ -190,16 +212,23 @@ class LoweredEq(IREq):
             if d.condition is None:
                 conditionals[d] = GuardFactor(d)
             else:
-                conditionals[d] = diff2sympy(lower_exprs(d.condition))
-            if d.factor is not None:
-                expr = uxreplace(expr, {d: IntDiv(d.index, d.factor)})
+                cond = diff2sympy(lower_exprs(d.condition))
+                if d._factor is not None:
+                    cond = sympy.And(cond, GuardFactor(d))
+                conditionals[d] = cond
+            # Replace dimension with index
+            index = d.index
+            if d.condition is not None and d in expr.free_symbols:
+                index = index - relational_min(d.condition, d.parent)
+            expr = uxreplace(expr, {d: IntDiv(index, d.factor)})
+
         conditionals = frozendict(conditionals)
 
         # Lower all Differentiable operations into SymPy operations
         rhs = diff2sympy(expr.rhs)
 
         # Finally create the LoweredEq with all metadata attached
-        expr = super(LoweredEq, cls).__new__(cls, expr.lhs, rhs, evaluate=False)
+        expr = super().__new__(cls, expr.lhs, rhs, evaluate=False)
 
         expr._ispace = ispace
         expr._conditionals = conditionals

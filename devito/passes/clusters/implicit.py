@@ -2,21 +2,21 @@
 Passes to gather and form implicit equations from DSL abstractions.
 """
 
+from collections import defaultdict
 from functools import singledispatch
-from math import floor
 
-from devito.ir import (Cluster, Interval, IntervalGroup, IterationSpace, Queue,
-                       FetchUpdate, PrefetchUpdate, SEQUENTIAL)
+from devito.ir import SEQUENTIAL, Queue, Forward
 from devito.symbolics import retrieve_dimensions
-from devito.tools import as_tuple, timed_pass
+from devito.tools import Bunch, frozendict, timed_pass
 from devito.types import Eq
-from devito.types.grid import MultiSubDimension, SubDomainSet
+from devito.types.dimension import BlockDimension
+from devito.types.grid import MultiSubDimension
 
 __all__ = ['generate_implicit']
 
 
 @timed_pass()
-def generate_implicit(clusters, sregistry):
+def generate_implicit(clusters):
     """
     Create and add implicit expressions from high-level abstractions.
 
@@ -27,16 +27,24 @@ def generate_implicit(clusters, sregistry):
 
         * MultiSubDomains attached to input equations.
     """
-    clusters = LowerMultiSubDimensions(sregistry).process(clusters)
+    clusters = LowerExplicitMSD().process(clusters)
+    clusters = LowerImplicitMSD().process(clusters)
 
     return clusters
 
 
-class LowerMultiSubDimensions(Queue):
+class LowerMSD(Queue):
+    pass
+
+
+class LowerExplicitMSD(LowerMSD):
 
     """
-    Bind the free thickness symbols defined by MultiSubDimensions to
-    suitable values.
+    An Explicit MultiSubDomain (MSD) encodes the thickness of N (N > 0)
+    user-defined SubDomains.
+
+    This pass augments the IterationSpace to iterate over the N SubDomains and
+    bind the free thickness symbols to their corresponding values.
 
     Examples
     --------
@@ -53,25 +61,8 @@ class LowerMultiSubDimensions(Queue):
         Cluster([Eq(f[t1, xi_n, yi_n], f[t0, xi_n, yi_n] + 1)])
     """
 
-    def __init__(self, sregistry):
-        super().__init__()
-
-        self.sregistry = sregistry
-
-    def _hook_syncs(self, cluster, level):
-        """
-        The *fetchUpdate SyncOps may require their own suitably adjusted
-        thickness assigments. This method pulls such SyncOps.
-        """
-        syncs = []
-        for i in cluster.ispace[:level]:
-            for s in cluster.syncs.get(i.dim, ()):
-                if isinstance(s, (FetchUpdate, PrefetchUpdate)):
-                    syncs.append(s)
-        return tuple(syncs)
-
-    def _make_key_hook(self, cluster, level):
-        return (self._hook_syncs(cluster, level),)
+    _q_guards_in_key = True
+    _q_syncs_in_key = True
 
     def callback(self, clusters, prefix):
         try:
@@ -86,9 +77,7 @@ class LowerMultiSubDimensions(Queue):
 
         idx = len(prefix)
 
-        seen = set()
         tip = None
-
         processed = []
         for c in clusters:
             try:
@@ -98,80 +87,125 @@ class LowerMultiSubDimensions(Queue):
                 d = None
             if d is None:
                 processed.append(c)
+                # If no MultiSubDomain present in this cluster, then tip should be reset
+                tip = None
                 continue
 
-            n = c.ispace.index(dd)
-            ispace0 = c.ispace[:n]
-            ispace1 = c.ispace[n:]
+            # Get all MultiSubDimensions in the cluster and get the dynamic thickness
+            # mapper for the associated MultiSubDomain
+            mapper, dims = lower_msd({msdim(i.dim) for i in c.ispace[idx:]} - {None}, c)
 
-            # The "implicit expressions" created for the MultiSubDomain
-            exprs, dims, sub_iterators = make_implicit_exprs(d.msd, c)
-
-            # Make sure the "implicit expressions" aren't scheduled in
-            # an inner loop. E.g schedule both for `t, xi, yi` and `t, d, xi, yi`
-            edims = set(retrieve_dimensions(exprs, deep=True))
-            if dim not in edims and any(d.dim in edims for d in prefix):
+            if not dims:
+                # An Implicit MSD
                 processed.append(c)
                 continue
 
-            # The IterationSpace induced by the MultiSubDomain
-            if dims:
-                intervals = [Interval(i) for i in dims]
-                ispaceN = IterationSpace(IntervalGroup(intervals), sub_iterators)
+            exprs = make_implicit_exprs(mapper)
 
-                relations = (ispace0.itdims + dims, dims + ispace1.itdims)
-                ispace = IterationSpace.union(ispace0, ispaceN, relations=relations)
-            else:
-                ispaceN = None
-                ispace = ispace0
+            ispace = c.ispace.insert(dim, dims)
 
-            properties = {i.dim: {SEQUENTIAL} for i in ispace}
+            # The Cluster computing the thicknesses
+            ispaceN = ispace.prefix(dims)
 
-            if not ispaceN:
-                # Special case: we can factorize the thickness assignments
-                # once and for all at the top of the current IterationInterval,
-                # and reuse them for one or more (potentially non-consecutive)
-                # `clusters`
-                if d not in seen:
-                    # Retain the guards and the syncs along the outer Dimensions
-                    retained = {None} | set(c.ispace[:n-1].dimensions)
+            if tip is None or tip != ispaceN:
+                properties = {i.dim: {SEQUENTIAL} for i in ispace}
+                processed.append(
+                    c.rebuild(exprs=exprs, ispace=ispaceN, properties=properties)
+                )
+                tip = ispaceN
 
-                    # A fetch SyncOp along `dim` binds the thickness assignments
-                    if self._hook_syncs(c, n):
-                        retained.add(dim)
-
-                    guards = {d: v for d, v in c.guards.items() if d in retained}
-                    syncs = {d: v for d, v in c.syncs.items() if d in retained}
-
-                    processed.insert(
-                        0, Cluster(exprs, ispace, guards, properties, syncs)
-                    )
-                    seen.add(ispaceN)
-            else:
-                nxt = self._make_tip(c, ispaceN)
-                if tip is None or tip != nxt:
-                    processed.append(
-                        c.rebuild(exprs=exprs, ispace=ispace, properties=properties)
-                    )
-                    tip = nxt
-
-            if ispaceN:
-                ispace = IterationSpace.union(c.ispace, ispaceN, relations=relations)
-                processed.append(c.rebuild(ispace=ispace))
-            else:
-                processed.append(c)
-            seen.add(d)
+            # The Cluster performing the actual computation, enriched with
+            # the thicknesses
+            processed.append(c.rebuild(ispace=ispace))
 
         return processed
 
-    def _make_tip(self, c, ispaceN):
-        return (c.guards, c.syncs, ispaceN)
+
+class LowerImplicitMSD(LowerMSD):
+
+    """
+    An Implicit MultiSubDomain (MSD) encodes the thicknesses of N (N > 0)
+    indirectly-defined SubDomains, that is SubDomains whose thicknesses are
+    evaluated (e.g., computed on-the-fly, fetched from a Function) along a
+    certain problem Dimension.
+
+    Examples
+    --------
+    Given:
+
+        Cluster([Eq(f[t1, xi, yi], f[t0, xi, yi] + 1)])
+
+    where `xi_n` and `yi_n` are MultiSubDimensions, generate:
+
+        Cluster([Eq(xi_ltkn, xi_n_m[time])
+                 Eq(xi_rtkn, xi_n_M[time])
+                 Eq(yi_ltkn, yi_n_m[time])
+                 Eq(yi_rtkn, yi_n_M[time])])
+        Cluster([Eq(f[t1, xi, yi], f[t0, xi, yi] + 1)])
+    """
+
+    def callback(self, clusters, prefix):
+        try:
+            dim = prefix[-1].dim
+        except IndexError:
+            return clusters
+
+        try:
+            pd = prefix[-2].dim
+        except IndexError:
+            pd = None
+
+        # There could be several MultiSubDomains around, spread over different
+        # Clusters. At the same time, the same MultiSubDomain might be required
+        # by multiple Clusters, and each Cluster may require accessing the
+        # MultiSubDomain at different iteration points along `dim`
+        found = defaultdict(lambda: Bunch(clusters=[], mapper={}))
+        for c in clusters:
+            ispace = c.ispace.project(msdim)
+            try:
+                d = msdim(ispace.outermost.dim)
+            except IndexError:
+                continue
+
+            # Get the dynamic thickness mapper for the given MultiSubDomain
+            mapper, dims = lower_msd(ispace.itdims, c)
+            if dims:
+                # An Explicit MSD
+                continue
+
+            # Make sure the "implicit expressions" are scheduled in
+            # the innermost loop such that the thicknesses can be computed
+            edims = set(retrieve_dimensions(mapper.values(), deep=True))
+            if dim not in edims or not edims.issubset(prefix.dimensions):
+                continue
+
+            found[d.functions].clusters.append(c)
+            found[d.functions].mapper = reduce(found[d.functions].mapper,
+                                               mapper, edims, prefix)
+
+        # Turn the reduced mapper into a list of equations
+        processed = []
+        for bunch in found.values():
+            exprs = make_implicit_exprs(bunch.mapper)
+
+            # Only retain outer guards (e.g., along None) if any
+            key = lambda i: i is None or i in prefix.prefix([pd])
+            guards = c.guards.filter(key)
+            syncs = {d: v for d, v in c.syncs.items() if key(d)}
+
+            processed.append(
+                c.rebuild(exprs=exprs, ispace=prefix, guards=guards, syncs=syncs)
+            )
+
+        processed.extend(clusters)
+
+        return processed
 
 
 def msdim(d):
     try:
         for i in d._defines:
-            if isinstance(i, MultiSubDimension):
+            if i.is_MultiSub:
                 return i
     except AttributeError:
         pass
@@ -179,19 +213,57 @@ def msdim(d):
 
 
 @singledispatch
-def make_implicit_exprs(msd, cluster):
-    # Retval: (exprs, iteration dimensions, subiterators)
-    return (), (), {}
+def _lower_msd(dim, cluster):
+    # Retval: (dynamic thickness mapper, iteration dimension)
+    return {}, None
 
 
-@make_implicit_exprs.register(SubDomainSet)
-def _(msd, *args):
-    ret = []
-    for j in range(len(msd._local_bounds)):
-        index = floor(j/2)
-        d = msd.dimensions[index]
-        f = msd._functions[j]
+@_lower_msd.register(MultiSubDimension)
+def _(dim, cluster):
+    i_dim = dim.implicit_dimension
+    mapper = {tkn: dim.functions[i_dim, mM]
+              for tkn, mM in zip(dim.tkns, dim.bounds_indices)}
+    return mapper, i_dim
 
-        ret.append(Eq(d.thickness[j % 2][0], f.indexify()))
 
-    return as_tuple(ret), (msd._implicit_dimension,), {}
+@_lower_msd.register(BlockDimension)
+def _(dim, cluster):
+    # Pull out the parent MultiSubDimension
+    msd = [d for d in dim._defines if d.is_MultiSub]
+    assert len(msd) == 1  # Sanity check. MultiSubDimensions shouldn't be nested.
+    msd = msd.pop()
+    return _lower_msd(msd, cluster)
+
+
+def lower_msd(msdims, cluster):
+    mapper = {}
+    dims = set()
+    for d in msdims:
+        dmapper, ddim = _lower_msd(d, cluster)
+        mapper.update(dmapper)
+        dims.add(ddim)
+    return frozendict(mapper), tuple(dims - {None})
+
+
+def make_implicit_exprs(mapper):
+    return [Eq(k, v) for k, v in mapper.items()]
+
+
+def reduce(m0, m1, edims, prefix):
+    if len(edims) != 1:
+        raise NotImplementedError
+    d, = edims
+
+    if prefix[d].direction is Forward:
+        func = max
+    else:
+        func = min
+
+    key = lambda i: i.indices[d]
+
+    mapper = {}
+    for k, e in m1.items():
+        candidates = {e, m0.get(k, e)}
+        mapper[k] = func(candidates, key=key)
+
+    return frozendict(mapper)

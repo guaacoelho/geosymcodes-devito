@@ -69,10 +69,9 @@ def test_bench(mode, problem, op):
         assert True
 
 
-@skipif(['nompi'])
 @pytest.mark.parallel(mode=2)
 @switchconfig(profiling='advanced')
-def test_run_mpi():
+def test_run_mpi(mode):
     """
     Test the `run` mode over MPI, with all key arguments used.
     """

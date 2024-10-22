@@ -1,25 +1,9 @@
 import numpy as np
 
 import devito as dv
-from devito.builtins.utils import MPIReduction
-
+from devito.builtins.utils import make_retval
 
 __all__ = ['norm', 'sumall', 'sum', 'inner', 'mmin', 'mmax']
-
-accumulator_mapper = {
-    # Integer accumulates on Float64
-    np.int8: np.float64, np.uint8: np.float64,
-    np.int16: np.float64, np.uint16: np.float64,
-    np.int32: np.float64, np.uint32: np.float64,
-    np.int64: np.float64, np.uint64: np.float64,
-    # FloatX accumulates on Float2X
-    np.float16: np.float32,
-    np.float32: np.float64,
-    # NOTE: np.float128 isn't really a thing, see for example
-    # https://github.com/numpy/numpy/issues/10288
-    # https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html#1070
-    np.float64: np.float64
-}
 
 
 @dv.switchconfig(log_level='ERROR')
@@ -31,8 +15,8 @@ def norm(f, order=2):
     ----------
     f : Function
         Input Function.
-    order : int, optional
-        The order of the norm. Defaults to 2.
+    order : int, default=2
+        The order of the norm.
     """
     Pow = dv.finite_differences.differentiable.Pow
     kwargs = {}
@@ -43,16 +27,15 @@ def norm(f, order=2):
     # otherwise we would eventually be summing more than expected
     p, eqns = f.guard() if f.is_SparseFunction else (f, [])
 
-    dtype = accumulator_mapper[f.dtype]
-    s = dv.types.Symbol(name='sum', dtype=dtype)
+    n = make_retval(f)
+    s = dv.types.Symbol(name='sum', dtype=n.dtype)
 
-    with MPIReduction(f, dtype=dtype) as mr:
-        op = dv.Operator([dv.Eq(s, 0.0)] + eqns +
-                         [dv.Inc(s, dv.Abs(Pow(p, order))), dv.Eq(mr.n[0], s)],
-                         name='norm%d' % order)
-        op.apply(**kwargs)
+    op = dv.Operator([dv.Eq(s, 0.0)] + eqns +
+                     [dv.Inc(s, dv.Abs(Pow(p, order))), dv.Eq(n[0], s)],
+                     name='norm%d' % order)
+    op.apply(**kwargs)
 
-    v = np.power(mr.v, 1/order)
+    v = np.power(n.data[0], 1/order)
 
     return f.dtype(v)
 
@@ -128,16 +111,15 @@ def sumall(f):
     # otherwise we would eventually be summing more than expected
     p, eqns = f.guard() if f.is_SparseFunction else (f, [])
 
-    dtype = accumulator_mapper[f.dtype]
-    s = dv.types.Symbol(name='sum', dtype=dtype)
+    n = make_retval(f)
+    s = dv.types.Symbol(name='sum', dtype=n.dtype)
 
-    with MPIReduction(f, dtype=dtype) as mr:
-        op = dv.Operator([dv.Eq(s, 0.0)] + eqns +
-                         [dv.Inc(s, p), dv.Eq(mr.n[0], s)],
-                         name='sum')
-        op.apply(**kwargs)
+    op = dv.Operator([dv.Eq(s, 0.0)] + eqns +
+                     [dv.Inc(s, p), dv.Eq(n[0], s)],
+                     name='sum')
+    op.apply(**kwargs)
 
-    return f.dtype(mr.v)
+    return f.dtype(n.data[0])
 
 
 @dv.switchconfig(log_level='ERROR')
@@ -183,16 +165,15 @@ def inner(f, g):
     # otherwise we would eventually be summing more than expected
     rhs, eqns = f.guard(f*g) if f.is_SparseFunction else (f*g, [])
 
-    dtype = accumulator_mapper[f.dtype]
-    s = dv.types.Symbol(name='sum', dtype=dtype)
+    n = make_retval(f)
+    s = dv.types.Symbol(name='sum', dtype=n.dtype)
 
-    with MPIReduction(f, g, dtype=dtype) as mr:
-        op = dv.Operator([dv.Eq(s, 0.0)] + eqns +
-                         [dv.Inc(s, rhs), dv.Eq(mr.n[0], s)],
-                         name='inner')
-        op.apply(**kwargs)
+    op = dv.Operator([dv.Eq(s, 0.0)] + eqns +
+                     [dv.Inc(s, rhs), dv.Eq(n[0], s)],
+                     name='inner')
+    op.apply(**kwargs)
 
-    return f.dtype(mr.v)
+    return f.dtype(n.data[0])
 
 
 @dv.switchconfig(log_level='ERROR')
@@ -208,11 +189,14 @@ def mmin(f):
     if isinstance(f, dv.Constant):
         return f.data
     elif isinstance(f, dv.types.dense.DiscreteFunction):
-        with MPIReduction(f, op=dv.mpi.MPI.MIN) as mr:
-            mr.n.data[0] = np.min(f.data_ro_domain).item()
-        return mr.v.item()
+        v = np.min(f.data_ro_domain)
+        if f.grid is None or not dv.configuration['mpi']:
+            return v.item()
+        else:
+            comm = f.grid.distributor.comm
+            return comm.allreduce(v, dv.mpi.MPI.MIN).item()
     else:
-        raise ValueError("Expected Function, not `%s`" % type(f))
+        raise ValueError("Expected Function, got `%s`" % type(f))
 
 
 @dv.switchconfig(log_level='ERROR')
@@ -228,8 +212,11 @@ def mmax(f):
     if isinstance(f, dv.Constant):
         return f.data
     elif isinstance(f, dv.types.dense.DiscreteFunction):
-        with MPIReduction(f, op=dv.mpi.MPI.MAX) as mr:
-            mr.n.data[0] = np.max(f.data_ro_domain).item()
-        return mr.v.item()
+        v = np.max(f.data_ro_domain)
+        if f.grid is None or not dv.configuration['mpi']:
+            return v.item()
+        else:
+            comm = f.grid.distributor.comm
+            return comm.allreduce(v, dv.mpi.MPI.MAX).item()
     else:
-        raise ValueError("Expected Function, not `%s`" % type(f))
+        raise ValueError("Expected Function, got `%s`" % type(f))

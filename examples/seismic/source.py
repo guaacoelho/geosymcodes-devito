@@ -1,5 +1,5 @@
+from functools import cached_property
 from scipy import interpolate
-from cached_property import cached_property
 import numpy as np
 try:
     import matplotlib.pyplot as plt
@@ -12,7 +12,7 @@ __all__ = ['PointSource', 'Receiver', 'Shot', 'WaveletSource',
            'RickerSource', 'GaborSource', 'DGaussSource', 'TimeAxis']
 
 
-class TimeAxis(object):
+class TimeAxis:
     """
     Data object to store the TimeAxis. Exactly three of the four key arguments
     must be prescribed. Because of remainder values, it is not possible to create
@@ -124,7 +124,7 @@ class PointSource(SparseTimeFunction):
         data = kwargs.pop('data', None)
 
         kwargs.setdefault('time_order', 2)
-        super(PointSource, self).__init_finalize__(*args, **kwargs)
+        super().__init_finalize__(*args, **kwargs)
 
         self._time_range = time_range._rebuild()
 
@@ -205,10 +205,10 @@ class WaveletSource(PointSource):
     def __args_setup__(cls, *args, **kwargs):
         kwargs.setdefault('npoint', 1)
 
-        return super(WaveletSource, cls).__args_setup__(*args, **kwargs)
+        return super().__args_setup__(*args, **kwargs)
 
     def __init_finalize__(self, *args, **kwargs):
-        super(WaveletSource, self).__init_finalize__(*args, **kwargs)
+        super().__init_finalize__(*args, **kwargs)
 
         self.f0 = kwargs.get('f0')
         self.a = kwargs.get('a')

@@ -3,7 +3,6 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 from scipy.misc import ascent
 
-from conftest import skipif
 from devito import ConditionalDimension, Grid, Function, TimeFunction, switchconfig
 from devito.builtins import (assign, norm, gaussian_smooth, initialize_function,
                              inner, mmin, mmax, sum, sumall)
@@ -12,7 +11,7 @@ from devito.tools import as_tuple
 from devito.types import SubDomain, SparseTimeFunction
 
 
-class TestAssign(object):
+class TestAssign:
 
     """
     Class for testing the assign builtin.
@@ -92,9 +91,8 @@ class TestAssign(object):
 
         assert np.all(f.data == 1)
 
-    @skipif('nompi')
     @pytest.mark.parallel(mode=4)
-    def test_assign_parallel(self):
+    def test_assign_parallel(self, mode):
         a = np.arange(64).reshape((8, 8))
         grid = Grid(shape=a.shape)
 
@@ -124,7 +122,7 @@ class TestAssign(object):
         assert np.all(f.data_with_halo == 4)
 
 
-class TestGaussianSmooth(object):
+class TestGaussianSmooth:
 
     """
     Class for testing the Gaussian smooth builtin.
@@ -175,9 +173,8 @@ class TestGaussianSmooth(object):
 
         assert np.amax(np.abs(sp_smoothed - np.array(dv_smoothed))) <= 1e-5
 
-    @skipif('nompi')
     @pytest.mark.parallel(mode=[(4, 'full')])
-    def test_gs_parallel(self):
+    def test_gs_parallel(self, mode):
         a = np.arange(64).reshape((8, 8))
         grid = Grid(shape=a.shape)
 
@@ -199,7 +196,7 @@ class TestGaussianSmooth(object):
         assert np.all(sp_smoothed[slices] - np.array(dv_smoothed.data[:]) == 0)
 
 
-class TestInitializeFunction(object):
+class TestInitializeFunction:
 
     """
     Class for testing the initialize function builtin.
@@ -238,9 +235,8 @@ class TestInitializeFunction(object):
 
         assert np.all(a[:] - np.array(f.data[:]) == 0)
 
-    @skipif('nompi')
     @pytest.mark.parallel(mode=4)
-    def test_if_parallel(self):
+    def test_if_parallel(self, mode):
         a = np.arange(36).reshape((6, 6))
         grid = Grid(shape=(18, 18))
         x, y = grid.dimensions
@@ -294,10 +290,9 @@ class TestInitializeFunction(object):
             assert np.take(f._data_with_outhalo, 0, axis=-1)[7] == 1
             assert np.take(f._data_with_outhalo, -1, axis=-1)[7] == 3
 
-    @skipif('nompi')
     @pytest.mark.parametrize('nbl', [0, 2])
     @pytest.mark.parallel(mode=4)
-    def test_if_halo_mpi(self, nbl):
+    def test_if_halo_mpi(self, nbl, mode):
         """
         Test that FD halo is padded as well.
         """
@@ -345,7 +340,7 @@ class TestInitializeFunction(object):
             assert np.all(a[::-1, :] - np.array(i.data[8:12, 4:8]) == 0)
 
 
-class TestBuiltinsResult(object):
+class TestBuiltinsResult:
 
     """
     Test the builtins
@@ -453,7 +448,7 @@ class TestBuiltinsResult(object):
 
     def test_min_max_sparse(self):
         """
-        Test that mmin/mmax work on SparseFunction
+        Test that mmin/mmax work on SparseFunction.
         """
         grid = Grid((101, 101), extent=(1000., 1000.))
 
@@ -468,6 +463,18 @@ class TestBuiltinsResult(object):
         term1 = np.max(rec0.data)
         term2 = mmax(rec0)
         assert np.isclose(term1/term2 - 1, 0.0, rtol=0.0, atol=1e-5)
+
+    @pytest.mark.parallel(mode=4)
+    def test_min_max_mpi(self, mode):
+        grid = Grid(shape=(100, 100))
+
+        f = Function(name='f', grid=grid)
+
+        # Populate data with increasing values starting at 1
+        f.data[:] = np.arange(1, 10001).reshape((100, 100))
+
+        assert mmin(f) == 1
+        assert mmax(f) == 10000
 
     def test_issue_1860(self):
         grid = Grid(shape=(401, 301, 181))

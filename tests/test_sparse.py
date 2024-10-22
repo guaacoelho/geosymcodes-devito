@@ -4,29 +4,29 @@ import pytest
 import numpy as np
 import scipy.sparse
 
-from devito import Grid, TimeFunction, Eq, Operator, Dimension
-from devito import (SparseFunction, SparseTimeFunction, PrecomputedSparseFunction,
-                    PrecomputedSparseTimeFunction, MatrixSparseTimeFunction)
-from conftest import skipif
+from devito import (Grid, TimeFunction, Eq, Operator, Dimension, Function,
+                    SparseFunction, SparseTimeFunction, PrecomputedSparseFunction,
+                    PrecomputedSparseTimeFunction, MatrixSparseTimeFunction,
+                    switchconfig)
 
 
 _sptypes = [SparseFunction, SparseTimeFunction,
             PrecomputedSparseFunction, PrecomputedSparseTimeFunction]
 
 
-class TestMatrixSparseTimeFunction(object):
+class TestMatrixSparseTimeFunction:
 
     def _precompute_linear_interpolation(self, points, grid, origin):
         """ Sample precompute function that, given point and grid information
             precomputes gridpoints and coefficients according to a linear
             scheme to be used in PrecomputedSparseFunction.
         """
-        gridpoints = [
+        gridpoints = np.array([
             tuple(
                 floor((point[i] - origin[i]) / grid.spacing[i]) for i in range(len(point))
             )
             for point in points
-        ]
+        ])
 
         coefficients = np.zeros((len(points), 2, 2))
         for i, point in enumerate(points):
@@ -41,7 +41,7 @@ class TestMatrixSparseTimeFunction(object):
 
     def test_precomputed_interpolation(self):
         shape = (101, 101)
-        points = [(0.05, 0.9), (0.01, 0.8), (0.07, 0.84)]
+        points = np.array([(0.05, 0.9), (0.01, 0.8), (0.07, 0.84)])
         origin = (0, 0)
 
         grid = Grid(shape=shape, origin=origin)
@@ -342,9 +342,8 @@ class TestMatrixSparseTimeFunction(object):
         assert m.data[0, 39, 40] == pytest.approx(2.0)
         assert m.data[0, 40, 39] == pytest.approx(2.0)
 
-    @skipif(['nompi'])
     @pytest.mark.parallel(mode=4)
-    def test_mpi(self):
+    def test_mpi(self, mode):
         # Shape chosen to get a source in multiple ranks
         shape = (91, 91)
         grid = Grid(shape=shape)
@@ -402,7 +401,7 @@ class TestMatrixSparseTimeFunction(object):
             assert sf.data[0, 0] == -3.0  # 1 * (1 * 1) * 1 + (-1) * (2 * 2) * 1
 
 
-class TestSparseFunction(object):
+class TestSparseFunction:
 
     @pytest.mark.parametrize('sptype', _sptypes)
     def test_rebuild(self, sptype):
@@ -418,21 +417,30 @@ class TestSparseFunction(object):
                 assert getattr(sp, subf).name.startswith("s_")
 
         # Rebuild with different name, this should drop the function
-        # and create new data
+        # and create new data, while the coordinates and more generally all
+        # SubFunctions remain the same
         sp2 = sp._rebuild(name="sr")
-
-        # Check new subfunction
         for subf in sp2._sub_functions:
             if getattr(sp2, subf) is not None:
-                assert getattr(sp2, subf).name.startswith("sr_")
-                assert np.all(getattr(sp2, subf).data == 0)
+                assert getattr(sp2, subf) == getattr(sp, subf)
 
         # Rebuild with different name as an alias
         sp2 = sp._rebuild(name="sr2", alias=True)
+        assert sp2.name == "sr2"
+        assert sp2.dimensions == sp.dimensions
         for subf in sp2._sub_functions:
             if getattr(sp2, subf) is not None:
                 assert getattr(sp2, subf).name.startswith("sr2_")
                 assert getattr(sp2, subf).data is None
+
+        # Rebuild with different name and dimensions. This is expected to recreate
+        # the SubFunctions as well
+        sp2 = sp._rebuild(name="sr3", dimensions=None)
+        assert sp2.name == "sr3"
+        assert sp2.dimensions == sp.dimensions
+        for subf in sp2._sub_functions:
+            if getattr(sp2, subf) is not None:
+                assert getattr(sp2, subf) == getattr(sp, subf)
 
     @pytest.mark.parametrize('sptype', _sptypes)
     def test_subs(self, sptype):
@@ -457,6 +465,38 @@ class TestSparseFunction(object):
                 assert getattr(sps, subf).indices[0] == new_spdim
                 assert np.all(getattr(sps, subf).data == getattr(sp, subf).data)
 
+    @switchconfig(safe_math=True)
+    @pytest.mark.parallel(mode=[1, 4])
+    def test_mpi_no_data(self, mode):
+        grid = Grid((11, 11), extent=(10, 10))
+        time = grid.time_dim
+        # Base object
+        sp = SparseTimeFunction(name="s", grid=grid, npoint=1, nt=1,
+                                coordinates=[[5., 5.]])
+
+        m = TimeFunction(name="m", grid=grid, space_order=2, time_order=1)
+        eq = [Eq(m.forward, m + m.laplace)]
+
+        op = Operator(eq + sp.inject(field=m.forward, expr=time))
+        # Not using the source data so can run with any time_M
+        op(time_M=5)
+
+        expected = np.array([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.],
+                            [0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0.],
+                            [0., 0., 0., 0., 4., -10., 4., 0., 0., 0., 0.],
+                            [0., 0., 0., 6., -30., 55., -30., 6., 0., 0., 0.],
+                            [0., 0., 4., -30., 102., -158., 102., -30., 4., 0., 0.],
+                            [0., 1., -10., 55., -158., 239., -158., 55., -10., 1., 0.],
+                            [0., 0., 4., -30., 102., -158., 102., -30., 4., 0., 0.],
+                            [0., 0., 0., 6., -30., 55., -30., 6., 0., 0., 0.],
+                            [0., 0., 0., 0., 4., -10., 4., 0., 0., 0., 0.],
+                            [0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0.],
+                            [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]])
+
+        ftest = Function(name='ftest', grid=grid, space_order=2)
+        ftest.data[:] = expected
+        assert np.all(m.data[0, :, :] == ftest.data[:])
+
 
 if __name__ == "__main__":
-    TestMatrixSparseTimeFunction().test_mpi()
+    TestMatrixSparseTimeFunction().test_mpi_no_data()

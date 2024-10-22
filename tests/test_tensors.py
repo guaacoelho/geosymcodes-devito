@@ -100,10 +100,10 @@ def test_tensor_matmul(func1, func2, out_type):
 
 
 @pytest.mark.parametrize('func1, func2, out_type', [
-    (VectorFunction, TensorFunction, VectorFunction),
-    (VectorTimeFunction, TensorFunction, VectorTimeFunction),
-    (VectorFunction, TensorTimeFunction, VectorTimeFunction),
-    (VectorTimeFunction, TensorTimeFunction, VectorTimeFunction)])
+    (VectorFunction, TensorFunction, TensorFunction),
+    (VectorTimeFunction, TensorFunction, TensorTimeFunction),
+    (VectorFunction, TensorTimeFunction, TensorTimeFunction),
+    (VectorTimeFunction, TensorTimeFunction, TensorTimeFunction)])
 def test_tensor_matmul_T(func1, func2, out_type):
     grid = Grid(tuple([5]*3))
     f1 = func1(name="f1", grid=grid)
@@ -200,6 +200,9 @@ def test_tensor_eq(func1, symm, diag, expected):
     grid = Grid(tuple([5]*3))
     f1 = func1(name="f1", grid=grid, symmetric=symm, diagonal=diag)
     for attr in f1[0]._fd:
+        # Skip rotated derivatives as the staggering isn't compatible with it
+        if '45' in attr:
+            continue
         eq = Eq(f1, getattr(f1, attr))
         assert len(eq.evaluate._flatten) == expected
 
@@ -384,3 +387,15 @@ def test_shifted_lap_of_tensor(shift, ndim):
                       type(shift) is tuple else d + shift * d.spacing)
                 ref += getattr(v[j, i], 'd%s2' % d.name)(x0=x0, fd_order=order)
             assert df[j] == ref
+
+
+def test_basic_arithmetic():
+    grid = Grid(tuple([5]*3))
+    tau = TensorFunction(name="tau", grid=grid)
+
+    # Scalar operations
+    t1 = tau + 1
+    assert all(t1i == ti + 1 for (t1i, ti) in zip(t1, tau))
+
+    t1 = tau * 2
+    assert all(t1i == ti * 2 for (t1i, ti) in zip(t1, tau))

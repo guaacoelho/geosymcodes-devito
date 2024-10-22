@@ -2,10 +2,11 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from functools import singledispatch
 
-from sympy import Pow, Add, Mul, Min, Max, SympifyError, Tuple, sympify
+from sympy import Pow, Add, Mul, Min, Max, S, SympifyError, Tuple, sympify
 from sympy.core.add import _addsort
 from sympy.core.mul import _mulsort
 
+from devito.finite_differences.differentiable import EvalDerivative
 from devito.symbolics.extended_sympy import DefFunction, rfunc
 from devito.symbolics.queries import q_leaf
 from devito.symbolics.search import retrieve_indexed, retrieve_functions
@@ -17,7 +18,7 @@ from devito.types.relational import Le, Lt, Gt, Ge
 
 __all__ = ['xreplace_indices', 'pow_to_mul', 'indexify', 'subs_op_args',
            'normalize_args', 'uxreplace', 'Uxmapper', 'reuse_if_untouched',
-           'evalrel']
+           'evalrel', 'flatten_args']
 
 
 def uxreplace(expr, rule):
@@ -139,6 +140,7 @@ def _(expr, args, kwargs):
     if all(i.is_commutative for i in args):
         _addsort(args)
         _eval_numbers(expr, args)
+        args = flatten_args(args, Add, ignore=EvalDerivative)
         return expr.func(*args, evaluate=False)
     else:
         return expr._new_rawargs(*args)
@@ -146,9 +148,15 @@ def _(expr, args, kwargs):
 
 @_uxreplace_handle.register(Mul)
 def _(expr, args, kwargs):
+    # Perform some basic simplifications at least
+    args = [i for i in args if i != 1]
+    if any(i == 0 for i in args):
+        return S.Zero
+
     if all(i.is_commutative for i in args):
         _mulsort(args)
         _eval_numbers(expr, args)
+        args = flatten_args(args, Mul, ignore=EvalDerivative)
         return expr.func(*args, evaluate=False)
     else:
         return expr._new_rawargs(*args)
@@ -271,6 +279,25 @@ def _eval_numbers(expr, args):
         args[:] = [expr.func(*numbers)] + others
 
 
+def flatten_args(args, op, ignore=None):
+    """
+    Flatten the arguments of type `op` in `args`.
+
+    Examples
+    --------
+    * (a+b)+c -> a+b+c
+    * (a*b)*c -> a*b*c
+    * (a+b)*c -> (a+b)*c
+    """
+    if ignore is not None and any(isinstance(a, ignore) for a in args):
+        return args
+
+    key = lambda e: isinstance(e, op)
+    nested, others = split(args, key)
+
+    return flatten(e.args for e in nested) + list(others)
+
+
 def pow_to_mul(expr):
     if q_leaf(expr) or isinstance(expr, Basic):
         return expr
@@ -281,12 +308,12 @@ def pow_to_mul(expr):
         except TypeError:
             # E.g., a Symbol, or possibly a generic expression
             return expr
-        if exp > 10 or exp < -10 or int(exp) != exp or exp == 0:
-            # Large and non-integer powers remain untouched
+        if exp > 10 or exp < -10 or exp == 0:
+            # Large powers remain untouched
             return expr
-        elif exp == -1:
-            # Reciprocals also remain untouched, but we traverse the base
-            # looking for other Pows
+        elif exp == -1 or (int(exp) - exp != 0):
+            # Reciprocals and fractional powers also remain untouched,
+            # but at least we traverse the base looking for other Pows
             return expr.func(pow_to_mul(base), exp, evaluate=False)
         elif exp > 0:
             return Mul(*[base]*int(exp), evaluate=False)

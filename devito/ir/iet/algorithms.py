@@ -32,15 +32,22 @@ def iet_build(stree):
             body = Conditional(i.guard, queues.pop(i))
 
         elif i.is_Iteration:
-            body = Iteration(queues.pop(i), i.dim, i.limits, direction=i.direction,
-                             properties=i.properties, uindices=i.sub_iterators)
+            if i.dim.is_Virtual:
+                body = List(body=queues.pop(i))
+            else:
+                body = Iteration(queues.pop(i), i.dim, i.limits,
+                                 direction=i.direction, properties=i.properties,
+                                 uindices=i.sub_iterators)
 
         elif i.is_Section:
             body = Section('section%d' % nsections, body=queues.pop(i))
             nsections += 1
 
         elif i.is_Halo:
-            body = HaloSpot(queues.pop(i), i.halo_scheme)
+            try:
+                body = HaloSpot(queues.pop(i), i.halo_scheme)
+            except KeyError:
+                body = HaloSpot(None, i.halo_scheme)
 
         elif i.is_Sync:
             body = SyncSpot(i.sync_ops, body=queues.pop(i, None))

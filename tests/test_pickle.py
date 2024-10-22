@@ -5,12 +5,11 @@ import pytest
 import numpy as np
 from sympy import Symbol
 
-from conftest import skipif
 from devito import (Constant, Eq, Function, TimeFunction, SparseFunction, Grid,
                     Dimension, SubDimension, ConditionalDimension, IncrDimension,
                     TimeDimension, SteppingDimension, Operator, MPI, Min, solve,
                     PrecomputedSparseTimeFunction)
-from devito.ir import GuardFactor
+from devito.ir import Backward, Forward, GuardFactor, GuardBound, GuardBoundNext
 from devito.data import LEFT, OWNED
 from devito.mpi.halo_scheme import Halo
 from devito.mpi.routines import (MPIStatusObject, MPIMsgEnriched, MPIRequestObject,
@@ -19,7 +18,7 @@ from devito.types import (Array, CustomDimension, Symbol as dSymbol, Scalar,
                           PointerArray, Lock, PThreadArray, SharedData, Timer,
                           DeviceID, NPThreads, ThreadID, TempFunction, Indirection,
                           FIndexed)
-from devito.types.basic import BoundSymbol
+from devito.types.basic import BoundSymbol, AbstractSymbol
 from devito.tools import EnrichedTuple
 from devito.symbolics import (IntDiv, ListInitializer, FieldFromPointer,
                               CallFromPointer, DefFunction)
@@ -28,7 +27,23 @@ from examples.seismic import (demo_model, AcquisitionGeometry,
 
 
 @pytest.mark.parametrize('pickle', [pickle0, pickle1])
-class TestBasic(object):
+class TestBasic:
+
+    def test_abstractsymbol(self, pickle):
+        s0 = AbstractSymbol('s')
+        s1 = AbstractSymbol('s', nonnegative=True, integer=False)
+
+        pkl_s0 = pickle.dumps(s0)
+        pkl_s1 = pickle.dumps(s1)
+
+        new_s0 = pickle.loads(pkl_s0)
+        new_s1 = pickle.loads(pkl_s1)
+
+        assert s0.assumptions0 == new_s0.assumptions0
+        assert s1.assumptions0 == new_s1.assumptions0
+
+        assert s0 == new_s0
+        assert s1 == new_s1
 
     def test_constant(self, pickle):
         c = Constant(name='c')
@@ -59,7 +74,16 @@ class TestBasic(object):
         new_t = pickle.loads(pkl_t)
 
         assert new_t == tup  # This only tests the actual tuple
-        assert new_t._getters == tup._getters
+        assert new_t.getters == tup.getters
+        assert new_t.left == tup.left
+        assert new_t.right == tup.right
+
+    def test_enrichedtuple_rebuild(self, pickle):
+        tup = EnrichedTuple(11, 31, getters=('a', 'b'), left=[3, 4], right=[5, 6])
+        new_t = tup._rebuild()
+
+        assert new_t == tup
+        assert new_t.getters == tup.getters
         assert new_t.left == tup.left
         assert new_t.right == tup.right
 
@@ -79,10 +103,12 @@ class TestBasic(object):
         assert f.dtype == new_f.dtype
         assert f.shape == new_f.shape
 
-    def test_sparse_function(self, pickle):
+    @pytest.mark.parametrize('interp', ['linear', 'sinc'])
+    def test_sparse_function(self, pickle, interp):
         grid = Grid(shape=(3,))
         sf = SparseFunction(name='sf', grid=grid, npoint=3, space_order=2,
-                            coordinates=[(0.,), (1.,), (2.,)])
+                            coordinates=[(0.,), (1.,), (2.,)],
+                            interpolation=interp)
         sf.data[0] = 1.
 
         pkl_sf = pickle.dumps(sf)
@@ -91,6 +117,7 @@ class TestBasic(object):
         # .data is initialized, so it should have been pickled too
         assert np.all(sf.data[0] == 1.)
         assert np.all(new_sf.data[0] == 1.)
+        assert new_sf.interpolation == interp
 
         # coordinates should also have been pickled
         assert np.all(sf.coordinates.data == new_sf.coordinates.data)
@@ -314,12 +341,14 @@ class TestBasic(object):
         assert sdata.cfields == new_sdata.cfields
         assert sdata.ncfields == new_sdata.ncfields
 
-        ffp = FieldFromPointer(sdata._field_flag, sdata.symbolic_base)
+        ffp = FieldFromPointer(sdata.symbolic_flag, sdata.indexed)
 
         pkl_ffp = pickle.dumps(ffp)
         new_ffp = pickle.loads(pkl_ffp)
 
-        assert ffp == new_ffp
+        assert ffp.field == new_ffp.field
+        assert ffp.base.name == new_ffp.base.name
+        assert ffp.function.fields == new_ffp.function.fields
 
         indexed = sdata[0]
 
@@ -330,16 +359,20 @@ class TestBasic(object):
 
     def test_findexed(self, pickle):
         grid = Grid(shape=(3, 3, 3))
+        x, y, z = grid.dimensions
+
         f = Function(name='f', grid=grid)
 
-        fi = FIndexed.from_indexed(f.indexify(), "foo", strides=(1, 2))
+        strides_map = {x: 1, y: 2, z: 3}
+        fi = FIndexed(f.base, x+1, y, z-2, strides_map=strides_map, accessor='fL')
 
         pkl_fi = pickle.dumps(fi)
         new_fi = pickle.loads(pkl_fi)
 
         assert new_fi.name == fi.name
-        assert new_fi.pname == fi.pname
-        assert new_fi.strides == fi.strides
+        assert new_fi.accessor == 'fL'
+        assert new_fi.indices == (x+1, y, z-2)
+        assert new_fi.strides_map == fi.strides_map
 
     def test_symbolics(self, pickle):
         a = Symbol('a')
@@ -385,6 +418,29 @@ class TestBasic(object):
         new_gf = pickle.loads(pkl_gf)
 
         assert str(gf) == str(new_gf)
+
+    def test_guard_bound(self, pickle):
+        d = Dimension(name='d')
+
+        gb = GuardBound(d, 3)
+
+        pkl_gb = pickle.dumps(gb)
+        new_gb = pickle.loads(pkl_gb)
+
+        assert str(gb) == str(new_gb)
+
+    @pytest.mark.parametrize('direction', [Backward, Forward])
+    def test_guard_bound_next(self, pickle, direction):
+        d = Dimension(name='d')
+        cd = ConditionalDimension(name='cd', parent=d, factor=4)
+
+        for i in [d, cd]:
+            gbn = GuardBoundNext(i, direction)
+
+            pkl_gbn = pickle.dumps(gbn)
+            new_gbn = pickle.loads(pkl_gbn)
+
+            assert str(gbn) == str(new_gbn)
 
     def test_temp_function(self, pickle):
         grid = Grid(shape=(3, 3))
@@ -449,8 +505,31 @@ class TestBasic(object):
         assert np.all(new_rec.coordinates.data == [[0.], [1.], [2.]])
 
 
+class TestAdvanced:
+
+    def test_foreign(self):
+        MySparseFunction = type('MySparseFunction', (SparseFunction,), {'attr': 42})
+
+        grid = Grid(shape=(3,))
+
+        msf = MySparseFunction(name='msf', grid=grid, npoint=3, space_order=2,
+                               coordinates=[(0.,), (1.,), (2.,)])
+
+        # Plain `pickle` doesn't support pickling of dynamic classes
+        with pytest.raises(Exception):
+            pickle0.dumps(msf)
+
+        # But `cloudpickle` does
+        pkl_msf = pickle1.dumps(msf)
+        new_msf = pickle1.loads(pkl_msf)
+
+        assert new_msf.attr == 42
+        assert new_msf.name == 'msf'
+        assert new_msf.npoint == 3
+
+
 @pytest.mark.parametrize('pickle', [pickle0, pickle1])
-class TestOperator(object):
+class TestOperator:
 
     def test_geometry(self, pickle):
 
@@ -571,6 +650,17 @@ class TestOperator(object):
         new_op.apply(time_m=1, time_M=1, f=f)
         assert np.all(f.data[2] == 2)
 
+    def test_collected_coeffs(self, pickle):
+        grid = Grid(shape=(8, 8, 8))
+        f = TimeFunction(name='f', grid=grid, space_order=4)
+
+        op = Operator(Eq(f.forward, f.dx2 + 1))
+
+        pkl_op = pickle.dumps(op)
+        new_op = pickle.loads(pkl_op)
+
+        assert str(op) == str(new_op)
+
     def test_elemental(self, pickle):
         """
         Tests that elemental functions don't get reconstructed differently.
@@ -597,9 +687,8 @@ class TestOperator(object):
 
         assert str(op) == str(new_op)
 
-    @skipif(['nompi'])
     @pytest.mark.parallel(mode=[1])
-    def test_mpi_objects(self, pickle):
+    def test_mpi_objects(self, pickle, mode):
         grid = Grid(shape=(4, 4, 4))
 
         # Neighbours
@@ -646,9 +735,8 @@ class TestOperator(object):
         assert tid.symbolic_min.name == new_tid.symbolic_min.name
         assert tid.symbolic_max.name == new_tid.symbolic_max.name
 
-    @skipif(['nompi'])
     @pytest.mark.parallel(mode=[2])
-    def test_mpi_grid(self, pickle):
+    def test_mpi_grid(self, pickle, mode):
         grid = Grid(shape=(4, 4, 4))
 
         pkl_grid = pickle.dumps(grid)
@@ -667,9 +755,8 @@ class TestOperator(object):
             assert new_grid.distributor.comm.size == 1
         MPI.COMM_WORLD.Barrier()
 
-    @skipif(['nompi'])
     @pytest.mark.parallel(mode=[(1, 'full')])
-    def test_mpi_fullmode_objects(self, pickle):
+    def test_mpi_fullmode_objects(self, pickle, mode):
         grid = Grid(shape=(4, 4, 4))
         x, y, _ = grid.dimensions
 
@@ -707,9 +794,8 @@ class TestOperator(object):
             assert v[0] is d.symbolic_min
             assert v[1] == Min(d.symbolic_max, d.symbolic_min)
 
-    @skipif(['nompi'])
     @pytest.mark.parallel(mode=[(1, 'basic'), (1, 'full')])
-    def test_mpi_operator(self, pickle):
+    def test_mpi_operator(self, pickle, mode):
         grid = Grid(shape=(4,))
         f = TimeFunction(name='f', grid=grid)
 
@@ -794,7 +880,8 @@ class TestOperator(object):
         assert np.isclose(np.linalg.norm(ricker.data), np.linalg.norm(new_ricker.data))
         # FIXME: fails randomly when using data.flatten() AND numpy is using MKL
 
-    def test_usave_sampled(self, pickle):
+    @pytest.mark.parametrize('subs', [False, True])
+    def test_usave_sampled(self, pickle, subs):
         grid = Grid(shape=(10, 10, 10))
         u = TimeFunction(name="u", grid=grid, time_order=2, space_order=8)
 
@@ -814,7 +901,9 @@ class TestOperator(object):
 
         eqn = [stencil] + src_term
         eqn += [Eq(u0_save, u)]
-        op_fwd = Operator(eqn)
+
+        subs = grid.spacing_map if subs else {}
+        op_fwd = Operator(eqn, subs=subs)
 
         tmp_pickle_op_fn = "tmp_operator.pickle"
         pickle.dump(op_fwd, open(tmp_pickle_op_fn, "wb"))

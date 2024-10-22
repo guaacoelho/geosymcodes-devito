@@ -1,9 +1,3 @@
 matplotlib
-pandas
-pyrevolve==2.2.3
-sotb-wrapper
-segyio
-h5py
-pooch
-distributed
+pyrevolve==2.2.4
 scipy

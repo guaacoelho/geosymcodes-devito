@@ -7,9 +7,9 @@ identifying a device attached to a node).
 """
 
 import os
-from ctypes import c_void_p
+from ctypes import POINTER, c_void_p
+from functools import cached_property
 
-from cached_property import cached_property
 import numpy as np
 
 from devito.exceptions import InvalidArgument
@@ -21,11 +21,11 @@ from devito.types.dimension import CustomDimension
 from devito.types.misc import Fence, VolatileInt
 
 __all__ = ['NThreads', 'NThreadsNested', 'NThreadsNonaffine', 'NThreadsBase',
-           'DeviceID', 'ThreadID', 'Lock', 'PThreadArray', 'SharedData',
-           'NPThreads', 'DeviceRM', 'QueueID', 'Barrier', 'TBArray']
+           'DeviceID', 'ThreadID', 'Lock', 'ThreadArray', 'PThreadArray',
+           'SharedData', 'NPThreads', 'DeviceRM', 'QueueID', 'Barrier', 'TBArray']
 
 
-class NThreadsBase(Scalar):
+class NThreadsAbstract(Scalar):
 
     is_Input = True
     is_PerfKnob = True
@@ -39,10 +39,29 @@ class NThreadsBase(Scalar):
     def __dtype_setup__(cls, **kwargs):
         return np.int32
 
+
+class NThreadsBase(NThreadsAbstract):
+
     @cached_property
     def default_value(self):
-        return int(os.environ.get('OMP_NUM_THREADS',
-                                  configuration['platform'].cores_physical))
+        return int(os.environ.get(
+            'OMP_NUM_THREADS',
+            configuration['platform'].cores_physical_per_numa_domain
+        ))
+
+    def _arg_defaults(self, **kwargs):
+        base_nthreads = self.default_value
+
+        try:
+            npthreads = kwargs['metadata']['npthreads']
+        except KeyError:
+            raise InvalidArgument("Cannot determine `npthreads`")
+
+        # If a symbolic object, it must be resolved
+        if isinstance(npthreads, NPThreads):
+            npthreads = kwargs.get(npthreads.name, npthreads.size)
+
+        return {self.name: max(base_nthreads - npthreads, 1)}
 
 
 class NThreads(NThreadsBase):
@@ -64,7 +83,7 @@ class NThreadsNested(NThreadsBase):
         return configuration['platform'].threads_per_core
 
 
-class NPThreads(NThreadsBase):
+class NPThreads(NThreadsAbstract):
 
     name = 'npthreads'
 
@@ -111,6 +130,9 @@ class ThreadID(CustomDimension):
 
 class ThreadArray(ArrayObject):
 
+    # Not a performance-sensitive object
+    _data_alignment = False
+
     @classmethod
     def __indices_setup__(cls, **kwargs):
         try:
@@ -126,20 +148,20 @@ class ThreadArray(ArrayObject):
         return self.dimensions[0]
 
     @property
+    def npthreads(self):
+        return self.dim.symbolic_size
+
+    @property
     def index(self):
         if self.size == 1:
             return 0
         else:
             return self.dim
 
-    @cached_property
-    def symbolic_base(self):
-        return Symbol(name=self.name, dtype=None)
-
 
 class PThreadArray(ThreadArray):
 
-    dtype = type('pthread_t', (c_void_p,), {})
+    dtype = POINTER(type('pthread_t', (c_void_p,), {}))
 
     @classmethod
     def __dtype_setup__(cls, **kwargs):
@@ -203,6 +225,9 @@ class Lock(Array):
     """
 
     is_volatile = True
+
+    # Not a performance-sensitive object
+    _data_alignment = False
 
     def __init_finalize__(self, *args, **kwargs):
         kwargs.setdefault('scope', 'stack')
