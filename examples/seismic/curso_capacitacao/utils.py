@@ -5,9 +5,11 @@ import matplotlib as mpl
 from matplotlib import cm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from devito import (Eq, Operator, VectorTimeFunction, TimeFunction,Function, NODE, div, grad)
+from examples.seismic import RickerSource, AcquisitionGeometry
+from examples.seismic.viscoacoustic.operators import *
 
 
-def image_show(model, data1, vmin1, vmax1, data2, vmin2, vmax2, data3, vmin3, vmax3, data4, vmin4, vmax4):
+def image_show(model, data1, data2, data3, data4, vmin1, vmax1):
     
 
     fig, ax = plt.subplots(nrows=2, ncols=2, figsize=(15, 13))
@@ -26,7 +28,7 @@ def image_show(model, data1, vmin1, vmax1, data2, vmin2, vmax2, data3, vmin3, vm
     ax[0][0].set_ylabel('Depth (m)', fontsize=20)
     ax[0][0].set_aspect('auto')
 
-    img2 = ax[0][1].imshow(np.transpose(np.diff(data2.data[slices], axis=1)), vmin=vmin2, vmax=vmax2,
+    img2 = ax[0][1].imshow(np.transpose(np.diff(data2.data[slices], axis=1)), vmin=vmin1, vmax=vmax1,
                         cmap='gray')
     fig.colorbar(img2, cax=cax1)
     ax[0][1].set_title("SLS", fontsize=20)
@@ -34,23 +36,26 @@ def image_show(model, data1, vmin1, vmax1, data2, vmin2, vmax2, data3, vmin3, vm
     ax[0][1].set_ylabel('Depth (m)', fontsize=20)
     ax[0][1].set_aspect('auto')
 
-    img3 = ax[1][0].imshow(np.transpose(np.diff(data3.data[slices], axis=1)), vmin=vmin3, vmax=vmax3,
+    img3 = ax[1][0].imshow(np.transpose(np.diff(data3.data[slices], axis=1)), vmin=vmin1, vmax=vmax1,
                         cmap='gray')
+    fig.colorbar(img3, cax=cax1)
     ax[1][0].set_title("Kelvin-Voigt", fontsize=20)
     ax[1][0].set_xlabel('X (m)', fontsize=20)
     ax[1][0].set_ylabel('Depth (m)', fontsize=20)
     ax[1][0].set_aspect('auto')
 
-    img4 = ax[1][1].imshow(np.transpose(np.diff(data2.data[slices], axis=1)), vmin=vmin4, vmax=vmax4,
+    img4 = ax[1][1].imshow(np.transpose(np.diff(data2.data[slices], axis=1)), vmin=vmin1, vmax=vmax1,
                         cmap='gray')
-    fig.colorbar(img2, cax=cax1)
+    fig.colorbar(img4, cax=cax1)
     ax[1][1].set_title("Max", fontsize=20)
     ax[1][1].set_xlabel('X (m)', fontsize=20)
     ax[1][1].set_ylabel('Depth (m)', fontsize=20)
     ax[1][1].set_aspect('auto')    
     
     plt.tight_layout()
-
+    plt.show()
+    
+    
 
 def plot(model, a, amax, time_range, nsnaps, title=None):
     
@@ -117,9 +122,9 @@ def V_Q_plot(model):
     ax[2].set_xlabel('X (m)', fontsize=20)
     ax[2].set_ylabel('Depth (m)', fontsize=20)
     ax[2].set_aspect('auto')
-
+    
     plt.tight_layout()
-
+    plt.show()
 
 def plot_shot(rec1, rec2, rec3, rec4, model, t0, tn, colorbar=True):
     
@@ -156,7 +161,7 @@ def plot_shot(rec1, rec2, rec3, rec4, model, t0, tn, colorbar=True):
     ax[3].set_xlabel('Afastamento (km)', fontsize=10)
     ax[3].set_ylabel('Tempo (s)', fontsize=10)
     ax[3].set_aspect('auto')
-    
+    plt.show()
     plt.tight_layout()
     #     plt.show()
 
@@ -210,6 +215,7 @@ def lapla (model, image):
     stencil=Eq(lapla, image.laplace)
     op = Operator([stencil])
     op.apply()
+    
     return lapla
 
 
@@ -256,3 +262,55 @@ def acoustic_2nd_order(model, geometry, field2, **kwargs):
         u_q = Eq(field2.backward, damp * pde_q)
 
         return [u_q]
+
+
+def src_rec1(p, model, time_range, f0, dt):
+    
+    src = RickerSource(name='src', grid=model.grid, f0=f0, time_range=time_range, t0=1/f0)
+    expr= src*dt**2 / model.m # source expression for inject
+
+    # Primeiro, posicionareoms a fonte centralmente e, em seguida, definiremos a profundidade.
+    src.coordinates.data[0, :] = np.array(model.domain_size) * .5
+    src.coordinates.data[0, -1] = 20.  # Profundidade em 20m
+
+    rec = Receiver(name='rec', grid=model.grid, npoint=model.shape[0], time_range=time_range)
+
+    rec.coordinates.data[:, 0] = np.linspace(0, model.domain_size[0], num=model.shape[0])
+    rec.coordinates.data[:, 1] = 20.  # Profundidade 20m
+
+    src_term = src.inject(field=p.forward, expr=expr)
+    rec_term = rec.interpolate(expr=p)
+
+    return src_term + rec_term, src, rec, p
+    
+    
+def modelling(model, time_range, f0, dt, **kwargs):
+
+    time_order = kwargs.get('time_order')
+    kernel = kwargs.get('kernel') 
+    sl = kwargs.get('sl', [0, 0]) 
+
+    space_order = model.space_order
+    
+    p = TimeFunction(name="p", grid=model.grid, time_order=time_order, 
+                     space_order=space_order, staggered=NODE, save=time_range.num)
+          
+    src_rec_expr, src, rec, p = src_rec1(p, model, time_range, f0, dt)
+    
+    geometry = AcquisitionGeometry(model, rec.coordinates.data, src.coordinates.data, 
+                                   0, int(time_range.stop), f0=f0, src_type='Ricker')
+    
+    if sl[1] != 0:
+        geometry.src_positions[0, :] = sl
+   
+    
+    # Equations kernels
+    eq_kernel = kernels[kernel]
+    eqn = eq_kernel(model, geometry, p, space_order=space_order)
+        
+    op = Operator(eqn + src_rec_expr, subs=model.spacing_map)
+    op(dt=dt, src=src, rec=rec)
+    
+    return rec, p
+
+kernels = {'sls2': sls_2nd_order,'kv2': kv_2nd_order, 'max2': maxwell_2nd_order, 'acoustic2':acoustic_2nd_order}
