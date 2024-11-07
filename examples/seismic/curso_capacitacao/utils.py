@@ -5,7 +5,7 @@ import matplotlib as mpl
 from matplotlib import cm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from devito import (Eq, Operator, VectorTimeFunction, TimeFunction,Function, NODE, div, grad)
-from examples.seismic import RickerSource, AcquisitionGeometry
+from examples.seismic import RickerSource, AcquisitionGeometry, Receiver
 from examples.seismic.viscoacoustic.operators import *
 
 
@@ -31,7 +31,7 @@ def image_show(model, data1, data2, data3, data4, vmin1, vmax1):
     img2 = ax[0][1].imshow(np.transpose(np.diff(data2.data[slices], axis=1)), vmin=vmin1, vmax=vmax1,
                         cmap='gray')
     fig.colorbar(img2, cax=cax1)
-    ax[0][1].set_title("SLS", fontsize=20)
+    ax[0][1].set_title("Maxwell", fontsize=20)
     ax[0][1].set_xlabel('X (m)', fontsize=20)
     ax[0][1].set_ylabel('Depth (m)', fontsize=20)
     ax[0][1].set_aspect('auto')
@@ -44,16 +44,15 @@ def image_show(model, data1, data2, data3, data4, vmin1, vmax1):
     ax[1][0].set_ylabel('Depth (m)', fontsize=20)
     ax[1][0].set_aspect('auto')
 
-    img4 = ax[1][1].imshow(np.transpose(np.diff(data2.data[slices], axis=1)), vmin=vmin1, vmax=vmax1,
+    img4 = ax[1][1].imshow(np.transpose(np.diff(data4.data[slices], axis=1)), vmin=vmin1, vmax=vmax1,
                         cmap='gray')
     fig.colorbar(img4, cax=cax1)
-    ax[1][1].set_title("Max", fontsize=20)
+    ax[1][1].set_title("SLS", fontsize=20)
     ax[1][1].set_xlabel('X (m)', fontsize=20)
     ax[1][1].set_ylabel('Depth (m)', fontsize=20)
     ax[1][1].set_aspect('auto')    
     
     plt.tight_layout()
-    plt.show()
     
     
 
@@ -161,7 +160,6 @@ def plot_shot(rec1, rec2, rec3, rec4, model, t0, tn, colorbar=True):
     ax[3].set_xlabel('Afastamento (km)', fontsize=10)
     ax[3].set_ylabel('Tempo (s)', fontsize=10)
     ax[3].set_aspect('auto')
-    plt.show()
     plt.tight_layout()
     #     plt.show()
 
@@ -299,6 +297,7 @@ def modelling(model, time_range, f0, dt, **kwargs):
     
     geometry = AcquisitionGeometry(model, rec.coordinates.data, src.coordinates.data, 
                                    0, int(time_range.stop), f0=f0, src_type='Ricker')
+    geometry.resample(dt)
     
     if sl[1] != 0:
         geometry.src_positions[0, :] = sl
