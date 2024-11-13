@@ -31,6 +31,8 @@ from devito.tools import (DAG, OrderedSet, Signer, ReducerMap, as_mapper, as_tup
                           split, timed_pass, timed_region, contains_val)
 from devito.types import (Buffer, Grid, Evaluable, host_layer, device_layer,
                           disk_layer)
+from devito.types.dimension import Thickness
+
 
 __all__ = ['Operator']
 
@@ -517,6 +519,11 @@ class Operator(Callable):
         return tuple(i for i in self.parameters if i.is_TempFunction)
 
     @cached_property
+    def transients(self):
+        return tuple(i for i in self.parameters
+                     if i.is_AbstractFunction and i.is_transient)
+
+    @cached_property
     def objects(self):
         return tuple(i for i in self.parameters if i.is_Object)
 
@@ -560,7 +567,10 @@ class Operator(Callable):
 
         # Prepare to process data-carriers
         args = kwargs['args'] = ReducerMap()
-        kwargs['metadata'] = self.threads_info
+        kwargs['metadata'] = {'language': self._language,
+                              'platform': self._platform,
+                              'transients': self.transients,
+                              **self.threads_info}
 
         overrides, defaults = split(self.input, lambda p: p.name in kwargs)
 
@@ -631,6 +641,11 @@ class Operator(Callable):
         # Process Dimensions
         for d in reversed(toposort):
             args.update(d._arg_values(self._dspace[d], grid, **kwargs))
+
+        # Process Thicknesses
+        for p in self.parameters:
+            if isinstance(p, Thickness):
+                args.update(p._arg_values(grid=grid, **kwargs))
 
         # Process Objects
         for o in self.objects:

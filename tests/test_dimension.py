@@ -12,6 +12,8 @@ from devito import (ConditionalDimension, Grid, Function, TimeFunction, floor,  
                     CustomDimension, dimensions, configuration, norm, Inc, sum)
 from devito.ir.iet import (Conditional, Expression, Iteration, FindNodes,
                            FindSymbols, retrieve_iteration_tree)
+from devito.ir.equations.algorithms import concretize_subdims
+from devito.ir import SymbolRegistry
 from devito.symbolics import indexify, retrieve_functions, IntDiv, INT
 from devito.types import Array, StencilDimension, Symbol
 from devito.types.dimension import AffineIndexAccessFunction
@@ -321,15 +323,15 @@ class TestSubDimension:
         xleft = SubDimension.left(name='xleft', parent=x, thickness=thickness)
         assert xleft.is_left
         assert not xleft.is_middle
-        assert xleft.symbolic_size == xleft.thickness.left[0]
+        assert xleft.symbolic_size == xleft.thickness.left
 
         xi = SubDimension.middle(name='xi', parent=x,
                                  thickness_left=thickness, thickness_right=thickness)
         assert xi.symbolic_size == (x.symbolic_max - x.symbolic_min -
-                                    xi.thickness.left[0] - xi.thickness.right[0] + 1)
+                                    xi.thickness.left - xi.thickness.right + 1)
 
         xright = SubDimension.right(name='xright', parent=x, thickness=thickness)
-        assert xright.symbolic_size == xright.thickness.right[0]
+        assert xright.symbolic_size == xright.thickness.right
 
     @pytest.mark.parametrize('opt', opts_tiling)
     def test_bcs(self, opt):
@@ -749,6 +751,7 @@ class TestSubDimension:
         a = Array(name='a', dimensions=(xi,), dtype=grid.dtype)
         op = Operator([Eq(a[xi], 1), Eq(f, f + a[xi + 1], subdomain=grid.interior)],
                       opt=('advanced', {'openmp': False}))
+
         assert len(op.parameters) == 6
         # neither `x_size` nor `xi_size` are expected here
         assert not any(i.name in ('x_size', 'xi_size') for i in op.parameters)
@@ -775,7 +778,7 @@ class TestSubDimension:
         op = Operator(eqn, opt=opt)
 
         op.apply(time=3, x_m=2, x_M=5, y_m=2, y_M=5,
-                 xi_ltkn=0, xi_rtkn=0, yi_ltkn=0, yi_rtkn=0)
+                 x_ltkn0=0, x_rtkn0=0, y_ltkn0=0, y_rtkn0=0)
 
         assert np.all(u.data[0, 2:-2, 2:-2] == 4.)
         assert np.all(u.data[1, 2:-2, 2:-2] == 3.)
@@ -783,6 +786,18 @@ class TestSubDimension:
         assert np.all(u.data[:, -2:] == 0.)
         assert np.all(u.data[:, :, :2] == 0.)
         assert np.all(u.data[:, :, -2:] == 0.)
+
+    def test_standalone_thickness(self):
+        x = Dimension('x')
+        ix = SubDimension.left('ix', x, 2)
+        f = Function(name="f", dimensions=(ix,), shape=(5,), dtype=np.int32)
+
+        eqns = Eq(f[ix.symbolic_max], 1)
+
+        op = Operator(eqns)
+        assert 'x_ltkn0' in str(op.ccode)
+        op(x_m=0)
+        assert np.all(f.data == np.array([0, 1, 0, 0, 0]))
 
 
 class TestConditionalDimension:
@@ -1929,7 +1944,7 @@ class TestMashup:
 
         # Check generated code -- expect the gsave equation to be scheduled together
         # in the same loop nest with the fsave equation
-        bns, _ = assert_blocking(op, {'x0_blk0', 'x1_blk0', 'i0x0_blk0'})
+        bns, _ = assert_blocking(op, {'x0_blk0', 'x1_blk0', 'ix0_blk0'})
         exprs = FindNodes(Expression).visit(bns['x0_blk0'])
         assert len(exprs) == 2
         assert exprs[0].write is f
@@ -1940,7 +1955,7 @@ class TestMashup:
         assert exprs[0].write is fsave
         assert exprs[1].write is gsave
 
-        exprs = FindNodes(Expression).visit(bns['i0x0_blk0'])
+        exprs = FindNodes(Expression).visit(bns['ix0_blk0'])
         assert len(exprs) == 1
         assert exprs[0].write is h
 
@@ -1970,8 +1985,8 @@ class TestMashup:
 
         # Check generated code -- expect the gsave equation to be scheduled together
         # in the same loop nest with the fsave equation
-        bns, _ = assert_blocking(op, {'i0x0_blk0', 'x0_blk0'})
-        assert len(FindNodes(Expression).visit(bns['i0x0_blk0'])) == 3
+        bns, _ = assert_blocking(op, {'ix0_blk0', 'x0_blk0'})
+        assert len(FindNodes(Expression).visit(bns['ix0_blk0'])) == 3
         exprs = FindNodes(Expression).visit(bns['x0_blk0'])
         assert len(exprs) == 2
         assert exprs[0].write is fsave
@@ -2003,8 +2018,8 @@ class TestMashup:
 
         # Check generated code -- expect the gsave equation to be scheduled together
         # in the same loop nest with the fsave equation
-        bns, _ = assert_blocking(op, {'i0x0_blk0', 'x0_blk0', 'i0x1_blk0'})
-        exprs = FindNodes(Expression).visit(bns['i0x0_blk0'])
+        bns, _ = assert_blocking(op, {'ix0_blk0', 'x0_blk0', 'ix1_blk0'})
+        exprs = FindNodes(Expression).visit(bns['ix0_blk0'])
         assert len(exprs) == 2
         assert exprs[0].write is f
         assert exprs[1].write is g
@@ -2015,6 +2030,28 @@ class TestMashup:
         assert exprs[1].write is gsave
 
         # Additional nest due to anti-dependence
-        exprs = FindNodes(Expression).visit(bns['i0x1_blk0'])
+        exprs = FindNodes(Expression).visit(bns['ix1_blk0'])
         assert len(exprs) == 2
         assert exprs[1].write is h
+
+
+class TestConcretization:
+    """
+    Class for testing renaming of SubDimensions and MultiSubDimensions
+    during compilation.
+    """
+
+    def test_correct_thicknesses(self):
+        """
+        Check that thicknesses aren't created where they shouldn't be.
+        """
+        x = Dimension('x')
+        ix0 = SubDimension.left('x', x, 2)
+        ix1 = SubDimension.right('x', x, 2)
+        ix2 = SubDimension.middle('x', x, 2, 2)
+
+        rebuilt = concretize_subdims([ix0, ix1, ix2], sregistry=SymbolRegistry())
+
+        assert rebuilt[0].is_left
+        assert rebuilt[1].is_right
+        assert rebuilt[2].is_middle

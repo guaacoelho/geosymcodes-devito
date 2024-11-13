@@ -43,10 +43,6 @@ jobs:
        environment-file: environment-dev.yml
        auto-activate-base: false
 
-    - name: Install dependencies
-      run: |
-        pip install -e .[tests,extras]
-
     - name: Tests in examples
       run: |
         py.test --cov --cov-config=.coveragerc --cov-report=xml examples/

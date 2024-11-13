@@ -12,7 +12,7 @@ from devito import (NODE, Eq, Inc, Constant, Function, TimeFunction,  # noqa
                     ConditionalDimension, DefaultDimension, Grid, Operator,
                     norm, grad, div, dimensions, switchconfig, configuration,
                     centered, first_derivative, solve, transpose, Abs, cos,
-                    sin, sqrt, floor, Ge, Lt)
+                    sin, sqrt, floor, Ge, Lt, Derivative)
 from devito.exceptions import InvalidArgument, InvalidOperator
 from devito.ir import (Conditional, DummyEq, Expression, Iteration, FindNodes,
                        FindSymbols, ParallelIteration, retrieve_iteration_tree)
@@ -581,11 +581,11 @@ class TestAliases:
                                               'cire-rotate': rotate}))
 
         # Check code generation
-        bns, pbs = assert_blocking(op1, {'i0x0_blk0'})
-        xs, ys, zs = get_params(op1, 'i0x0_blk0_size', 'i0y0_blk0_size', 'z_size')
-        arrays = [i for i in FindSymbols().visit(bns['i0x0_blk0']) if i.is_Array]
+        bns, pbs = assert_blocking(op1, {'ix0_blk0'})
+        xs, ys, zs = get_params(op1, 'ix0_blk0_size', 'iy0_blk0_size', 'z_size')
+        arrays = [i for i in FindSymbols().visit(bns['ix0_blk0']) if i.is_Array]
         assert len(arrays) == 1
-        assert len(FindNodes(VExpanded).visit(pbs['i0x0_blk0'])) == 1
+        assert len(FindNodes(VExpanded).visit(pbs['ix0_blk0'])) == 1
         check_array(arrays[0], ((1, 1), (1, 1), (1, 1)), (xs+2, ys+2, zs+2), rotate)
 
         # Check numerical output
@@ -755,11 +755,11 @@ class TestAliases:
                                   'cire-mingain': 0, 'cire-rotate': rotate}))
 
         # Check code generation
-        bns, pbs = assert_blocking(op1, {'i0x0_blk0'})
-        xs, ys, zs = get_params(op1, 'i0x0_blk0_size', 'i0y0_blk0_size', 'z_size')
-        arrays = [i for i in FindSymbols().visit(bns['i0x0_blk0']) if i.is_Array]
+        bns, pbs = assert_blocking(op1, {'ix0_blk0'})
+        xs, ys, zs = get_params(op1, 'ix0_blk0_size', 'iy0_blk0_size', 'z_size')
+        arrays = [i for i in FindSymbols().visit(bns['ix0_blk0']) if i.is_Array]
         assert len(arrays) == 2
-        assert len(FindNodes(VExpanded).visit(pbs['i0x0_blk0'])) == 2
+        assert len(FindNodes(VExpanded).visit(pbs['ix0_blk0'])) == 2
         check_array(arrays[0], ((1, 0), (1, 0), (0, 0)), (xs+1, ys+1, zs), rotate)
         check_array(arrays[1], ((1, 1), (1, 0)), (ys+2, zs+1), rotate)
 
@@ -1131,13 +1131,13 @@ class TestAliases:
         # Check code generation
         bns, _ = assert_blocking(op1, {'x0_blk0', 'x1_blk0'})
         trees = retrieve_iteration_tree(bns['x0_blk0'])
-        assert len(trees) == 2
-        assert trees[0][-1].nodes[0].body[0].write.is_Array
-        assert trees[1][-1].nodes[0].body[0].write is u
+        assert len(trees) == 4 if rotate else 2
+        assert trees[-2][-1].nodes[0].body[0].write.is_Array
+        assert trees[-1][-1].nodes[0].body[0].write is u
         trees = retrieve_iteration_tree(bns['x1_blk0'])
-        assert len(trees) == 2
-        assert trees[0][-1].nodes[0].body[0].write.is_Array
-        assert trees[1][-1].nodes[0].body[0].write is v
+        assert len(trees) == 4 if rotate else 2
+        assert trees[-2][-1].nodes[0].body[0].write.is_Array
+        assert trees[-1][-1].nodes[0].body[0].write is v
 
         # Check numerical output
         op0(time_M=1)
@@ -1915,6 +1915,70 @@ class TestAliases:
         # all redundancies have been detected correctly
         assert summary1[('section1', None)].ops == 75
 
+    @switchconfig(profiling='advanced')
+    def test_tti_adjoint_akin_v3(self):
+        so = 8
+        fd_order = 2
+
+        grid = Grid(shape=(20, 20, 20))
+        x, y, z = grid.dimensions
+
+        vx = TimeFunction(name="vx", grid=grid, space_order=so)
+        vy = TimeFunction(name="vy", grid=grid, space_order=so)
+        vz = TimeFunction(name="vz", grid=grid, space_order=so)
+        txy = TimeFunction(name="txy", grid=grid, space_order=so)
+        txz = TimeFunction(name="txz", grid=grid, space_order=so)
+        theta = Function(name='theta', grid=grid, space_order=so)
+        phi = Function(name='phi', grid=grid, space_order=so)
+
+        r00 = cos(theta)*cos(phi)
+        r01 = cos(theta)*sin(phi)
+        r02 = -sin(theta)
+        r10 = -sin(phi)
+        r11 = cos(phi)
+        r12 = cos(theta)
+        r20 = sin(theta)*cos(phi)
+        r21 = sin(theta)*sin(phi)
+        r22 = cos(theta)
+
+        def foo0(field):
+            return ((r00 * field).dx(x0=x+x.spacing/2) +
+                    Derivative(r01 * field, x, deriv_order=0, fd_order=fd_order,
+                               x0=x+x.spacing/2).dy(x0=y) +
+                    Derivative(r02 * field, x, deriv_order=0, fd_order=fd_order,
+                               x0=x+x.spacing/2).dz(x0=z))
+
+        def foo1(field):
+            return (Derivative(r10 * field, y, deriv_order=0, fd_order=fd_order,
+                               x0=y+y.spacing/2).dx(x0=x) +
+                    (r11 * field).dy(x0=y+y.spacing/2) +
+                    Derivative(r12 * field, y, deriv_order=0, fd_order=fd_order,
+                               x0=y+y.spacing/2).dz(x0=z))
+
+        def foo2(field):
+            return (Derivative(r20 * field, z, deriv_order=0, fd_order=fd_order,
+                               x0=z+z.spacing/2).dx(x0=x) +
+                    Derivative(r21 * field, z, deriv_order=0, fd_order=fd_order,
+                               x0=z+z.spacing/2).dy(x0=y) +
+                    (r22 * field).dz(x0=z+z.spacing/2))
+
+        eqns = [Eq(txz.forward, txz + foo0(vz.forward) + foo2(vx.forward)),
+                Eq(txy.forward, txy + foo0(vy.forward) + foo1(vx.forward))]
+
+        op = Operator(eqns, subs=grid.spacing_map,
+                      opt=('advanced', {'openmp': True,
+                                        'cire-rotate': True}))
+
+        # Check code generation
+        bns, _ = assert_blocking(op, {'x0_blk0'})
+        xs, ys, zs = get_params(op, 'x0_blk0_size', 'y0_blk0_size', 'z_size')
+        arrays = [i for i in FindSymbols().visit(bns['x0_blk0']) if i.is_Array]
+        assert len(arrays) == 10
+        assert len([i for i in arrays if i.shape == (zs,)]) == 2
+        assert len([i for i in arrays if i.shape == (9, zs)]) == 2
+
+        assert op._profiler._sections['section1'].sops == 184
+
     @pytest.mark.parametrize('rotate', [False, True])
     @switchconfig(profiling='advanced')
     def test_nested_first_derivatives(self, rotate):
@@ -2093,14 +2157,67 @@ class TestAliases:
         # Check code generation
         bns, _ = assert_blocking(op1, {'x0_blk0'})
         trees = retrieve_iteration_tree(bns['x0_blk0'])
-        assert len(trees) == 2
+        if rotate:
+            assert len(trees) == 5
+        else:
+            assert len(trees) == 2
+            assert trees[0][2] is not trees[1][2]
         assert trees[0][1] is trees[1][1]
-        assert trees[0][2] is not trees[1][2]
 
         # Check numerical output
         op0.apply(time_M=2)
         op1.apply(time_M=2, u=u1)
         assert np.isclose(norm(u), norm(u1), rtol=1e-5)
+
+    def test_multiple_rotating_dims(self):
+        space_order = 8
+        grid = Grid(shape=(51, 51, 51))
+        x, y, z = grid.dimensions
+
+        dt = 0.1
+        nt = 5
+
+        u = TimeFunction(name="u", grid=grid, space_order=space_order)
+        vx = TimeFunction(name="vx", grid=grid, space_order=space_order)
+        vy = TimeFunction(name="vy", grid=grid, space_order=space_order)
+
+        f = Function(name='f', grid=grid, space_order=space_order)
+        g = Function(name='g', grid=grid, space_order=space_order)
+
+        expr0 = 1-cos(f)**2
+        expr1 = sin(f)*cos(f)
+        expr2 = sin(g)*cos(f)
+        expr3 = (1-cos(g))*sin(f)*cos(f)
+
+        stencil0 = ((expr0*vx.forward).dx(x0=x-x.spacing/2) +
+                    Derivative(expr1*vx.forward, x, deriv_order=0, fd_order=2,
+                               x0=x-x.spacing/2).dy(x0=y) +
+                    Derivative(expr2*vx.forward, x, deriv_order=0, fd_order=2,
+                               x0=x-x.spacing/2).dz(x0=z))
+        stencil1 = Derivative(expr3*vy.forward, y, deriv_order=0, fd_order=2,
+                              x0=y-y.spacing/2).dx(x0=x)
+
+        eqns = [Eq(vx.forward, u*.1),
+                Eq(vy.forward, u*.1),
+                Eq(u.forward, stencil0 + stencil1 + .1)]
+
+        op0 = Operator(eqns)
+        op1 = Operator(eqns, opt=("advanced", {"cire-rotate": True}))
+
+        f.data_with_halo[:] = .3
+        g.data_with_halo[:] = .7
+
+        u1 = u.func(name='u1')
+        vx1 = vx.func(name='vx1')
+        vy1 = vy.func(name='vy1')
+
+        op0.apply(time_m=0, time_M=nt-2, dt=dt)
+
+        # NOTE: the main issue leading to this test was actually failing
+        # to jit-compile `op1`. However, we also check numerical correctness
+        op1.apply(time_m=0, time_M=nt-2, dt=dt, u=u1, vx=vx1, vy=vy1)
+
+        assert np.allclose(u.data, u1.data, rtol=1e-3)
 
     def test_maxpar_option_v2(self):
         """
@@ -2191,7 +2308,11 @@ class TestAliases:
         if rotate:
             assert_structure(
                 op1,
-                prefix + ['t,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,xc,y,z',
+                prefix + ['t,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x',
+                          't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,xc',
+                          't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,xc,y,z',
+                          't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,y',
+                          't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,y,yc',
                           't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,y,yc,z',
                           't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,y,z'],
                 't,x0_blk0,y0_blk0,x0_blk1,y0_blk1,x,xc,y,z,y,yc,z,z'

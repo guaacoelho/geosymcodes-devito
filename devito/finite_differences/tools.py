@@ -2,7 +2,7 @@ from functools import wraps, partial
 from itertools import product
 
 import numpy as np
-from sympy import S, finite_diff_weights, cacheit, sympify
+from sympy import S, finite_diff_weights, cacheit, sympify, Function, Rational
 
 from devito.tools import Tag, as_tuple
 from devito.types.dimension import StencilDimension
@@ -55,22 +55,6 @@ def check_input(func):
     return wrapper
 
 
-def check_symbolic(func):
-    @wraps(func)
-    def wrapper(expr, *args, **kwargs):
-        if expr._uses_symbolic_coefficients:
-            expr_dict = expr.as_coefficients_dict()
-            if any(v > 1 for k, v in expr_dict.items()):
-                raise NotImplementedError("Applying the chain rule to functions "
-                                          "with symbolic coefficients is not currently "
-                                          "supported")
-            kwargs['coefficients'] = 'symbolic'
-        else:
-            kwargs['coefficients'] = expr.coefficients
-        return func(expr, *args, **kwargs)
-    return wrapper
-
-
 def dim_with_order(dims, orders):
     """
     Create all possible derivative order for each dims
@@ -102,8 +86,14 @@ def generate_fd_shortcuts(dims, so, to=0):
     from devito.finite_differences.derivative import Derivative
 
     def diff_f(expr, deriv_order, dims, fd_order, side=None, **kwargs):
-        return Derivative(expr, *as_tuple(dims), deriv_order=deriv_order,
-                          fd_order=fd_order, side=side, **kwargs)
+        # Separate dimensions to always have cross derivatives return nested
+        # derivatives. E.g `u.dxdy -> u.dx.dy`
+        dims = as_tuple(dims)
+        deriv_order = as_tuple(deriv_order)
+        fd_order = as_tuple(fd_order)
+        for (d, do, fo) in zip(dims, deriv_order, fd_order):
+            expr = Derivative(expr, d, deriv_order=do, fd_order=fo, side=side, **kwargs)
+        return expr
 
     all_combs = dim_with_order(dims, orders)
 
@@ -233,12 +223,7 @@ def make_stencil_dimension(expr, _min, _max):
     Create a StencilDimension for `expr` with unique name.
     """
     n = len(expr.find(StencilDimension))
-    return StencilDimension(name='i%d' % n, _min=_min, _max=_max)
-
-
-def symbolic_weights(function, deriv_order, indices, x0):
-    return [function._coeff_symbol(indices[j], deriv_order, function, x0)
-            for j in range(0, len(indices))]
+    return StencilDimension('i%d' % n, _min, _max)
 
 
 @cacheit
@@ -247,11 +232,11 @@ def numeric_weights(function, deriv_order, indices, x0):
 
 
 fd_weights_registry = {'taylor': numeric_weights, 'standard': numeric_weights,
-                       'symbolic': symbolic_weights}
-coeff_priority = {'taylor': 1, 'standard': 1, 'symbolic': 0}
+                       'symbolic': numeric_weights}  # Backward compat for 'symbolic'
+coeff_priority = {'taylor': 1, 'standard': 1}
 
 
-def generate_indices(expr, dim, order, side=None, matvec=None, x0=None):
+def generate_indices(expr, dim, order, side=None, matvec=None, x0=None, nweights=0):
     """
     Indices for the finite-difference scheme.
 
@@ -299,6 +284,15 @@ def generate_indices(expr, dim, order, side=None, matvec=None, x0=None):
         else:
             o_min -= 1
 
+    if nweights > 0 and (o_max - o_min + 1) != nweights:
+        # We cannot infer how the stencil should be centered
+        # if nweights is more than one extra point.
+        assert nweights == (o_max - o_min + 1) + 1
+        # In the "one extra" case  we need to pad with one point to symmetrize
+        if (o_max - mid) > (mid - o_min):
+            o_min -= 1
+        else:
+            o_max += 1
     # StencilDimension and expression
     d = make_stencil_dimension(expr, o_min, o_max)
     iexpr = expr.indices_ref[dim] + d * dim.spacing
@@ -314,8 +308,8 @@ def make_shift_x0(shift, ndim):
     """
     if shift is None:
         return lambda s, d, i, j: None
-    elif isinstance(shift, float):
-        return lambda s, d, i, j: d + s * d.spacing
+    elif sympify(shift).is_Number:
+        return lambda s, d, i, j: d + Rational(s) * d.spacing
     elif type(shift) is tuple and np.shape(shift) == ndim:
         if len(ndim) == 1:
             return lambda s, d, i, j: d + s[j] * d.spacing
@@ -325,3 +319,18 @@ def make_shift_x0(shift, ndim):
             raise ValueError("ndim length must be equal to 1 or 2")
     raise ValueError("shift parameter must be one of the following options: "
                      "None, float or tuple with shape equal to %s" % (ndim,))
+
+
+def process_weights(weights, expr):
+    if weights is None:
+        return 0, None
+    elif isinstance(weights, Function):
+        if len(weights.dimensions) == 1:
+            return weights.shape[0], weights.dimensions[0]
+        wdim = {d for d in weights.dimensions if d not in expr.dimensions}
+        assert len(wdim) == 1
+        wdim = wdim.pop()
+        shape = weights.shape
+        return shape[weights.dimensions.index(wdim)], wdim
+    else:
+        return len(list(weights)), None

@@ -47,6 +47,7 @@ def sniff_compiler_version(cc, allow_fail=False):
         else:
             raise RuntimeError("The `%s` compiler isn't available on this system" % cc)
 
+    ver = ver.strip()
     if ver.startswith("gcc"):
         compiler = "gcc"
     elif ver.startswith("clang"):
@@ -63,13 +64,15 @@ def sniff_compiler_version(cc, allow_fail=False):
         compiler = "icx"
     elif ver.startswith("pgcc"):
         compiler = "pgcc"
+    elif ver.startswith("nvc++"):
+        compiler = "nvc"
     elif ver.startswith("cray"):
         compiler = "cray"
     else:
         compiler = "unknown"
 
     ver = Version("0")
-    if compiler in ["gcc", "icc", "icx"]:
+    if compiler in ["gcc", "icc", "icx", "nvc"]:
         try:
             # gcc-7 series only spits out patch level on dumpfullversion.
             res = run([cc, "-dumpfullversion"], stdout=PIPE, stderr=DEVNULL)
@@ -398,8 +401,12 @@ class Compiler(GCCToolchain):
     def add_include_dirs(self, dirs):
         self.include_dirs = filter_ordered(self.include_dirs + as_list(dirs))
 
-    def add_library_dirs(self, dirs):
+    def add_library_dirs(self, dirs, rpath=False):
         self.library_dirs = filter_ordered(self.library_dirs + as_list(dirs))
+        if rpath:
+            # Add rpath flag to embed library dir
+            for d in as_list(dirs):
+                self.ldflags.append('-Wl,-rpath,%s' % d)
 
     def add_libraries(self, libs):
         self.libraries = filter_ordered(self.libraries + as_list(libs))
@@ -601,7 +608,11 @@ class PGICompiler(Compiler):
         platform = kwargs.pop('platform', configuration['platform'])
 
         if platform is NVIDIAX:
-            self.cflags.append('-gpu=pinned')
+            if self.version >= Version("24.9"):
+                self.cflags.append('-gpu=mem:separate:pinnedalloc')
+            else:
+                self.cflags.append('-gpu=pinned')
+
             if language == 'openacc':
                 self.cflags.extend(['-mp', '-acc:gpu'])
             elif language == 'openmp':
@@ -686,6 +697,10 @@ class CudaCompiler(Compiler):
 
         if not configuration['safe-math']:
             self.cflags.append('--use_fast_math')
+
+        # Optionally print out per-kernel shared memory and register usage
+        if configuration['profiling'] == 'advanced2':
+            self.cflags.append('--ptxas-options=-v')
 
         self.src_ext = 'cu'
 

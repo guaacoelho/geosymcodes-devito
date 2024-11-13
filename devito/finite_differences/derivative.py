@@ -9,13 +9,13 @@ from .differentiable import Differentiable, interp_for_fd
 from .tools import direct, transpose
 from .rsfd import d45
 from devito.tools import (as_mapper, as_tuple, filter_ordered, frozendict, is_integer,
-                          Reconstructable)
+                          Pickable)
 from devito.types.utils import DimensionTuple
 
 __all__ = ['Derivative']
 
 
-class Derivative(sympy.Derivative, Differentiable, Reconstructable):
+class Derivative(sympy.Derivative, Differentiable, Pickable):
 
     """
     An unevaluated Derivative, which carries metadata (Dimensions,
@@ -89,7 +89,7 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
 
     __rargs__ = ('expr', '*dims')
     __rkwargs__ = ('side', 'deriv_order', 'fd_order', 'transpose', '_ppsubs',
-                   'x0', 'method')
+                   'x0', 'method', 'weights')
 
     def __new__(cls, expr, *dims, **kwargs):
         if type(expr) is sympy.Derivative:
@@ -103,13 +103,12 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
         obj = Differentiable.__new__(cls, expr, *var_count)
         obj._dims = tuple(OrderedDict.fromkeys(new_dims))
 
-        skip = kwargs.get('preprocessed', False) or obj.ndims == 1
-
-        obj._fd_order = fd_o if skip else DimensionTuple(*fd_o, getters=obj._dims)
-        obj._deriv_order = orders if skip else DimensionTuple(*orders, getters=obj._dims)
+        obj._fd_order = DimensionTuple(*as_tuple(fd_o), getters=obj._dims)
+        obj._deriv_order = DimensionTuple(*as_tuple(orders), getters=obj._dims)
         obj._side = kwargs.get("side")
         obj._transpose = kwargs.get("transpose", direct)
         obj._method = kwargs.get("method", 'FD')
+        obj._weights = cls._process_weights(**kwargs)
 
         ppsubs = kwargs.get("subs", kwargs.get("_ppsubs", []))
         processed = []
@@ -136,7 +135,7 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
             fd_orders = kwargs.get('fd_order')
             deriv_orders = kwargs.get('deriv_order')
             if len(dims) == 1:
-                dims = tuple([dims[0]]*max(1, deriv_orders))
+                dims = tuple([dims[0]]*max(1, deriv_orders[0]))
             variable_count = [sympy.Tuple(s, dims.count(s))
                               for s in filter_ordered(dims)]
             return dims, deriv_orders, fd_orders, variable_count
@@ -209,26 +208,56 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
 
         return x0
 
-    def __call__(self, x0=None, fd_order=None, side=None, method=None):
-        side = side or self._side
+    @classmethod
+    def _process_weights(cls, **kwargs):
+        weights = kwargs.get('weights', kwargs.get('w'))
+        if weights is None:
+            return None
+        elif isinstance(weights, sympy.Function):
+            return weights
+        else:
+            return as_tuple(weights)
 
-        x0 = self._process_x0(self.dims, x0=x0)
-        _x0 = frozendict({**self.x0, **x0})
-        if self.ndims == 1:
-            fd_order = fd_order or self._fd_order
-            method = method or self._method
-            return self._rebuild(fd_order=fd_order, side=side, x0=_x0, method=method)
+    def __call__(self, x0=None, fd_order=None, side=None, method=None, weights=None):
+        rkw = {}
+        if side is not None:
+            rkw['side'] = side
+        if method is not None:
+            rkw['method'] = method
+        if weights is not None:
+            rkw['weights'] = weights
 
-        # Cross derivative
-        _fd_order = dict(self.fd_order.getters)
-        try:
-            _fd_order.update(fd_order or {})
-            _fd_order = tuple(_fd_order.values())
-            _fd_order = DimensionTuple(*_fd_order, getters=self.dims)
-        except AttributeError:
-            raise TypeError("Multi-dimensional Derivative, input expected as a dict")
+        if x0 is not None:
+            x0 = self._process_x0(self.dims, x0=x0)
+            rkw['x0'] = frozendict({**self.x0, **x0})
 
-        return self._rebuild(fd_order=_fd_order, x0=_x0, side=side)
+        if fd_order is not None:
+            try:
+                _fd_order = dict(fd_order)
+            except TypeError:
+                assert self.ndims == 1
+                _fd_order = {self.dims[0]: fd_order}
+            except AttributeError:
+                raise TypeError("fd_order incompatible with dimensions")
+
+        if isinstance(self.expr, Derivative):
+            # In case this was called on a perfect cross-derivative `u.dxdy`
+            # we need to propagate the call to the nested derivative
+            rkwe = dict(rkw)
+            rkwe.pop('weights', None)
+            if 'x0' in rkwe:
+                rkwe['x0'] = self._filter_dims(self.expr._filter_dims(rkw['x0']),
+                                               neg=True)
+            if fd_order is not None:
+                fdo = self.expr._filter_dims(_fd_order)
+                if fdo:
+                    rkwe['fd_order'] = fdo
+            rkw['expr'] = self.expr(**rkwe)
+
+        if fd_order is not None:
+            rkw['fd_order'] = self._filter_dims(_fd_order, as_tuple=True)
+
+        return self._rebuild(**rkw)
 
     def _rebuild(self, *args, **kwargs):
         kwargs['preprocessed'] = True
@@ -281,14 +310,31 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
             except AttributeError:
                 return new, True
 
+        # Resolve nested derivatives
+        dsubs = {k: v for k, v in subs.items() if isinstance(k, Derivative)}
+        expr = self.expr.xreplace(dsubs)
+
         subs = self._ppsubs + (subs,)  # Postponed substitutions
-        return self._rebuild(subs=subs), True
+        return self._rebuild(subs=subs, expr=expr), True
 
     @cached_property
     def _metadata(self):
         ret = [self.dims] + [getattr(self, i) for i in self.__rkwargs__]
         ret.append(self.expr.staggered or (None,))
         return tuple(ret)
+
+    def _filter_dims(self, col, as_tuple=False, neg=False):
+        """
+        Filter collection to only keep the Derivative's dimensions as keys.
+        """
+        if neg:
+            filtered = {k: v for k, v in col.items() if k not in self.dims}
+        else:
+            filtered = {k: v for k, v in col.items() if k in self.dims}
+        if as_tuple:
+            return DimensionTuple(*filtered.values(), getters=self.dims)
+        else:
+            return filtered
 
     @property
     def dims(self):
@@ -325,6 +371,10 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
     @property
     def method(self):
         return self._method
+
+    @property
+    def weights(self):
+        return self._weights
 
     @property
     def T(self):
@@ -406,13 +456,9 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
         """
         # Step 1: Evaluate non-derivative x0. We currently enforce a simple 2nd order
         # interpolation to avoid very expensive finite differences on top of it
-        x0_interp = {}
-        x0_deriv = {}
-        for d, v in self.x0.items():
-            if d in self.dims:
-                x0_deriv[d] = v
-            elif not d.is_Time:
-                x0_interp[d] = v
+        x0_deriv = self._filter_dims(self.x0)
+        x0_interp = {d: v for d, v in self.x0.items()
+                     if d not in x0_deriv and not d.is_Time}
 
         if x0_interp and self.method == 'FD':
             expr = interp_for_fd(expr, x0_interp, **kwargs)
@@ -430,7 +476,7 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
         # Step 3: Evaluate FD of the new expression
         if self.method == 'RSFD':
             assert len(self.dims) == 1
-            assert self.deriv_order == 1
+            assert self.deriv_order[0] == 1
             res = d45(expr, self.dims[0], x0=self.x0, expand=expand)
         elif len(self.dims) > 1:
             assert self.method == 'FD'
@@ -439,9 +485,10 @@ class Derivative(sympy.Derivative, Differentiable, Reconstructable):
                                    side=self.side)
         else:
             assert self.method == 'FD'
-            res = generic_derivative(expr, self.dims[0], as_tuple(self.fd_order)[0],
-                                     self.deriv_order, side=self.side,
-                                     matvec=self.transpose, x0=x0_deriv, expand=expand)
+            res = generic_derivative(expr, self.dims[0], self.fd_order[0],
+                                     self.deriv_order[0], weights=self.weights,
+                                     side=self.side, matvec=self.transpose,
+                                     x0=self.x0, expand=expand)
 
         # Step 4: Apply substitutions
         for e in self._ppsubs:

@@ -5,9 +5,10 @@ import numpy as np
 import sympy
 
 from devito.finite_differences import Max, Min
-from devito.ir import (Any, Forward, Iteration, List, Prodder, FindApplications,
-                       FindNodes, FindSymbols, Transformer, Uxreplace,
-                       filter_iterations, retrieve_iteration_tree, pull_dims)
+from devito.ir import (Any, Forward, DummyExpr, Iteration, List, Prodder,
+                       FindApplications, FindNodes, FindSymbols, Transformer,
+                       Uxreplace, filter_iterations, retrieve_iteration_tree,
+                       pull_dims)
 from devito.passes.iet.engine import iet_pass
 from devito.ir.iet.efunc import DeviceFunction, EntryFunction
 from devito.symbolics import (ValueLimit, evalrel, has_integer_args, limits_mapper,
@@ -231,10 +232,13 @@ def minimize_symbols(iet):
 
         * Remove redundant ModuloDimensions (e.g., due to using the
           `save=Buffer(2)` API)
+        * Simplify Iteration headers (e.g., ModuloDimensions with identical
+          starting point and step)
         * Abridge SubDimension names where possible to declutter generated
           loop nests and shrink indices
     """
     iet = remove_redundant_moddims(iet)
+    iet = simplify_iteration_headers(iet)
     iet = abridge_dim_names(iet)
 
     return iet, {}
@@ -246,25 +250,44 @@ def remove_redundant_moddims(iet):
     if not mds:
         return iet
 
-    mapper = as_mapper(mds, key=lambda md: md.offset % md.modulo)
+    degenerates, others = split(mds, lambda d: d.modulo == 1)
+    subs = {d: sympy.S.Zero for d in degenerates}
 
-    subs = {}
-    for k, v in mapper.items():
+    redundants = as_mapper(others, key=lambda d: d.offset % d.modulo)
+    for k, v in redundants.items():
         chosen = v.pop(0)
         subs.update({d: chosen for d in v})
 
+    # Transform the `body`, rather than `iet`, to avoid applying substitutions
+    # to `iet.parameters`, so e.g. `..., t0, t1, t2, ...` remains unchanged
+    # instead of becoming `..., t0, t1, t1, ...`. The IET `engine` will then
+    # take care of cleaning up the `parameters` list
     body = Uxreplace(subs).visit(iet.body)
     iet = iet._rebuild(body=body)
 
-    # ModuloDimensions are defined in Iteration headers, hence they must be
-    # removed from there too
-    subs = {}
-    for n in FindNodes(Iteration).visit(iet):
-        if not set(n.uindices) & set(mds):
-            continue
-        subs[n] = n._rebuild(uindices=filter_ordered(n.uindices))
+    return iet
 
-    iet = Transformer(subs, nested=True).visit(iet)
+
+def simplify_iteration_headers(iet):
+    mapper = {}
+    for i in FindNodes(Iteration).visit(iet):
+        candidates = [d for d in i.uindices
+                      if d.is_Modulo and d.symbolic_min == d.symbolic_incr]
+
+        # Don't touch `t0, t1, ...` for codegen aesthetics and to avoid
+        # massive changes in the test suite
+        candidates = [d for d in candidates
+                      if not any(dd.is_Time for dd in d._defines)]
+
+        if not candidates:
+            continue
+
+        uindices = [d for d in i.uindices if d not in candidates]
+        stmts = [DummyExpr(d, d.symbolic_incr, init=True) for d in candidates]
+
+        mapper[i] = i._rebuild(nodes=tuple(stmts) + i.nodes, uindices=uindices)
+
+    iet = Transformer(mapper, nested=True).visit(iet)
 
     return iet
 
