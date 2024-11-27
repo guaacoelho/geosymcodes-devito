@@ -1027,7 +1027,7 @@ def _(expr, x0, **kwargs):
 def _(expr, x0, **kwargs):
     from devito.finite_differences.derivative import Derivative
     x0_expr = {d: v for d, v in x0.items() if v is not expr.indices_ref[d]}
-    if x0_expr:
+    if x0_expr and not expr.is_parameter:
         dims = tuple((d, 0) for d in x0_expr)
         fd_o = tuple([2]*len(dims))
         return Derivative(expr, *dims, fd_order=fd_o, x0=x0_expr)
