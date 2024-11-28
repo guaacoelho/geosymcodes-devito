@@ -58,7 +58,6 @@ def ram_mean():
     yield rmean
 
 
-'''
 def test_regular_mean(ram_mean):
     grid = Grid(shape=(200, 200, 200))
 
@@ -116,14 +115,16 @@ def test_regular_mean(ram_mean):
     assert (not np.isnan(ds_mean))
 
     assert ram_mean == ds_mean
-'''
-
-
 
 
 @pytest.mark.parallel(mode=4)
-def test_mpi_means(mode):
+@pytest.mark.parametrize("x_displacement",
+                         [False, True],
+                         ids=["no_halo", "with_halo"])
+def test_mpi_means(x_displacement, mode):
     grid = Grid(shape=(200, 200, 200))
+    t = grid.stepping_dim
+    x, y, z = grid.dimensions
     
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -146,7 +147,10 @@ def test_mpi_means(mode):
     w = Function(name='w', grid=grid, space_order=2)
 
     # DSWAP Equations
-    u_rhs = ALPHA*(u - ub) + C
+    # X displacement forces the creation of halo spots
+    # and ensures communication among processes
+    u_disp = u[t, x-1, y, z] if x_displacement else 0
+    u_rhs = ALPHA*(u - ub - u_disp) + C
     eq_u = Eq(u_next, u_rhs)
 
     v_rhs = ALPHA*(v - vb) + C
@@ -180,7 +184,7 @@ def test_mpi_means(mode):
     if rank == 0:
         remove_ds_path(ds_path)
 
-    '''
+    
     #RAM Functions, forward and backward terms
     u_ram = TimeFunction(name="u_ram", grid=grid, space_order=2, save=STEPS, time_order=2)
     ur_next = u_ram.forward
@@ -197,7 +201,10 @@ def test_mpi_means(mode):
     w_ram = Function(name='w_ram', grid=grid, space_order=2)
 
     # Equations
-    ur_rhs = ALPHA*(u_ram - urb) + C
+    # X displacement forces the creation of halo spots
+    # and ensures communication among processes
+    ur_disp = u_ram[t, x-1, y, z] if x_displacement else 0
+    ur_rhs = ALPHA*(u_ram - urb - ur_disp) + C
     eq_ur = Eq(ur_next, ur_rhs)
 
     vr_rhs = ALPHA*(v_ram - vrb) + C
@@ -216,104 +223,43 @@ def test_mpi_means(mode):
     read_opr = Operator([eq_pr, eq_wr], opt=('advanced', {'disk-swap': None}),
                     name="read_opr", language='openmp')
     read_opr.apply()
-    '''
-    print("ram mean:", 0, " dsmean:", np.mean(w.data))
-    #assert np.mean(w_func.data[-1]) == np.mean(w_ds_func.data[-1])
+    
+    ram_mean = np.mean(w_ram.data)
+    assert ram_mean != 0
+    assert (not np.isnan(ram_mean))
+    
+    ds_mean = np.mean(w.data)
+    assert ds_mean != 0
+    assert (not np.isnan(ds_mean))
+    
+    assert ram_mean == ds_mean
 
 
-'''
-@pytest.mark.parallel(mode=4)
-def test_mpi_means(mode):
-    grid = Grid(shape=(200, 200, 200))
-    
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    ds_path = create_ds_path("dswap_temp") if rank==0 else None
-    ds_path = comm.bcast(ds_path, root=0)
-        
-    t = grid.stepping_dim
-    x, y, z = grid.dimensions
-    
-    #RAM Functions and equations
-    u_func = TimeFunction(name="u", grid=grid, space_order=2, save=STEPS+1)
-    v_func = TimeFunction(name="v", grid=grid, space_order=2, save=STEPS+1)
-    w_func = TimeFunction(name='w', grid=grid, space_order=2)
-    
-    eq_u = Eq(u_func[t+1, x, y, z], ALPHA*u_func[t, x, y, z] + C)
-    eq_v = Eq(v_func[t+1, x, y, z], ALPHA*v_func[t, x, y, z] + C)
-    eq_w = Inc(w_func, (v_func + u_func) * 1/ALPHA)
-    
-    #DISK Functions and equations
-    u_ds_func = TimeFunction(name="u", grid=grid, space_order=2)
-    v_ds_func = TimeFunction(name="v", grid=grid, space_order=2)
-    w_ds_func = TimeFunction(name='w', grid=grid, space_order=2)
-
-    eq_ds_u = Eq(u_ds_func[t+1, x, y, z], ALPHA*u_ds_func[t, x, y, z] + C)
-    eq_ds_v = Eq(v_ds_func[t+1, x, y, z], ALPHA*v_ds_func[t, x, y, z] + C)
-    eq_ds_w = Inc(w_ds_func, (v_ds_func + u_ds_func) * 1/ALPHA)
-
-    #DISK write and read
-    write_config = DiskSwapConfig(functions=[u_ds_func, v_ds_func],
-                                mode="write",
-                                compression=False,
-                                path=ds_path,
-                                odirect=1)
-
-    write_ds_op = Operator([eq_ds_u, eq_ds_v], opt=('advanced', {'disk-swap': write_config}),
-                        name="write_ds_op", language='openmp')
-    write_ds_op.apply(time_M=STEPS)
-    
-    read_config = DiskSwapConfig(functions=[u_ds_func, v_ds_func],
-                                mode="read",
-                                compression=False,
-                                path=ds_path,
-                                odirect=1)
-
-    read_ds_op = Operator(eq_ds_w, opt=('advanced', {'disk-swap': read_config}),
-                        name="read_ds_op", language='openmp')
-    read_ds_op.apply(time_M=STEPS)
-    
-    comm.Barrier()
-    if rank == 0:
-        remove_ds_path(ds_path)
-    
-    #RAM write and read
-    write_op = Operator([eq_u, eq_v], opt=('advanced', {'disk-swap': None}),
-                        name="write_op", language='openmp')
-    write_op.apply()
-    
-    read_op = Operator(eq_w, opt=('advanced', {'disk-swap': None}),
-                    name="read_op", language='openmp')
-    read_op.apply()
-        
-    assert np.mean(w_func.data[-1]) == np.mean(w_ds_func.data[-1])
-'''
-
-'''
 @pytest.mark.parametrize('mode, value',
                          [("lossless", None),
-                          ('rate', 1),
-                          ('rate', 2),
-                          ('rate', 10),
-                          ('precision', 2),
-                          ('precision', 10),
-                          ('accuracy', 0.1),
-                          ('accuracy', 1),
-                          ('accuracy', 2),
-                          ('accuracy', 10),])
+                          ("rate", 8),
+                          ("precision", 23),
+                          ("accuracy", 1e-6)])
 def test_compression_means(ram_mean, mode, value):
     grid = Grid(shape=(200, 200, 200))
-    t = grid.stepping_dim
-    x, y, z = grid.dimensions
     
-    #DISK Functions and equations
-    u_ds_func = TimeFunction(name="u", grid=grid, space_order=2)
-    v_ds_func = TimeFunction(name="v", grid=grid, space_order=2)
-    w_ds_func = TimeFunction(name='w', grid=grid, space_order=2)
+    #Functions
+    u = TimeFunction(name="u", grid=grid, space_order=2, time_order=2)
+    v = TimeFunction(name="v", grid=grid, space_order=2, time_order=2)
+    p = TimeFunction(name="p", grid=grid, space_order=2, time_order=2)
+    w = Function(name='w', grid=grid, space_order=2)
 
-    eq_ds_u = Eq(u_ds_func[t+1, x, y, z], ALPHA*u_ds_func[t, x, y, z] + C)
-    eq_ds_v = Eq(v_ds_func[t+1, x, y, z], ALPHA*v_ds_func[t, x, y, z] + C)
-    eq_ds_w = Inc(w_ds_func, (v_ds_func + u_ds_func) * 1/ALPHA)
+    # Equations
+    u_rhs = ALPHA*(u - u.backward) + C
+    eq_u = Eq(u.forward, u_rhs)
+
+    v_rhs = ALPHA*(v - v.backward) + C
+    eq_v = Eq(v.forward, v_rhs)
+
+    p_rhs = ALPHA*(p - p.forward) + C
+    eq_p = Eq(p.backward, p_rhs)
+
+    eq_w = Inc(w, (u + v + p.backward) * 1/ALPHA)
 
     #Compression configuration
     value_type = "RATE" if mode == "rate" else "value"
@@ -322,29 +268,33 @@ def test_compression_means(ram_mean, mode, value):
     
     #DISK write and read
     ds_path = create_ds_path("dswap_folder")
-    write_config = DiskSwapConfig(functions=[u_ds_func, v_ds_func],
+    write_config = DiskSwapConfig(functions=[u, v],
                                 mode="write",
                                 compression=cc,
                                 path=ds_path,
                                 odirect=1)
 
-    write_ds_op = Operator([eq_ds_u, eq_ds_v], opt=('advanced', {'disk-swap': write_config}),
-                        name="write_ds_op", language='openmp')
-    write_ds_op.apply(time_M=STEPS)
+    write_op = Operator([eq_u, eq_v], opt=('advanced', {'disk-swap': write_config}),
+                        name="write_op", language='openmp')
+    write_op.apply(time_m=1, time_M=STEPS-2)
     
-    read_config = DiskSwapConfig(functions=[u_ds_func, v_ds_func],
+    read_config = DiskSwapConfig(functions=[u, v],
                                 mode="read",
                                 compression=cc,
                                 path=ds_path,
                                 odirect=1)
 
-    read_ds_op = Operator(eq_ds_w, opt=('advanced', {'disk-swap': read_config}),
-                        name="read_ds_op", language='openmp')
-    read_ds_op.apply(time_M=STEPS)
+    read_op = Operator([eq_p, eq_w], opt=('advanced', {'disk-swap': read_config}),
+                        name="read_op", language='openmp')
+    read_op.apply(time_m=1, time_M=STEPS-2)
     
     remove_ds_path(ds_path)
 
-    ds_mean = np.mean(w_ds_func.data[-1])
-
+    ds_mean = np.mean(w.data)
+    assert ds_mean != 0
     assert (not np.isnan(ds_mean))
-'''
+
+    if mode == "lossless":
+        assert ram_mean == ds_mean
+    else:
+        assert np.isclose(ram_mean, ds_mean, atol=1e-2)
