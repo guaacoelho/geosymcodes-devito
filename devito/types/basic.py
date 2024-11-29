@@ -1,4 +1,5 @@
 import abc
+import inspect
 from collections import namedtuple
 from ctypes import POINTER, _Pointer, c_char_p, c_char
 from functools import reduce, cached_property
@@ -353,6 +354,7 @@ class AbstractSymbol(sympy.Symbol, Basic, Pickable, Evaluable):
         for i in list(kwargs):
             if i in _assume_rules.defined_facts:
                 assumptions[i] = kwargs.pop(i)
+
         return assumptions, kwargs
 
     def __new__(cls, *args, **kwargs):
@@ -495,6 +497,11 @@ class Symbol(AbstractSymbol, Cached):
 
         # From the kwargs
         key.update(kwargs)
+
+        # Any missing __rkwargs__ along with their default values
+        params = inspect.signature(cls.__init_finalize__).parameters
+        missing = [i for i in cls.__rkwargs__ if i in set(params).difference(key)]
+        key.update({i: params[i].default for i in missing})
 
         return frozendict(key)
 

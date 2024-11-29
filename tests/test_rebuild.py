@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
-from devito import Dimension, Function
+from devito import Dimension, Function, Grid
+from devito.types import StencilDimension, SparseFunction, PrecomputedSparseFunction
 from devito.data.allocators import DataReference
 
 
@@ -40,3 +42,42 @@ class TestFunction:
         assert f3.function is f3
         assert f3.dimensions == dims0
         assert np.all(f3.data[:] == 1)
+
+
+class TestDimension:
+
+    def test_stencil_dimension(self):
+        sd0 = StencilDimension('i', 0, 1)
+        sd1 = StencilDimension('i', 0, 1)
+
+        # StencilDimensions are cached by devito so they are guaranteed to be
+        # unique for a given set of args/kwargs
+        assert sd0 is sd1
+
+        # Same applies to reconstruction
+        sd2 = sd0._rebuild()
+        assert sd0 is sd2
+
+    @pytest.mark.xfail(reason="Borked caching when supplying a kwarg for an arg")
+    def test_stencil_dimension_borked(self):
+        sd0 = StencilDimension('i', 0, _max=1)
+        sd1 = sd0._rebuild()
+
+        # TODO: Look into Symbol._cache_key and the way the key is generated
+        assert sd0 is sd1
+
+
+class TestSparseFunction:
+
+    @pytest.mark.parametrize('sfunc', [SparseFunction, PrecomputedSparseFunction])
+    def test_none_subfunc(self, sfunc):
+        grid = Grid((4, 4))
+        coords = np.zeros((5, 2))
+
+        s = sfunc(name='s', grid=grid, npoint=5, coordinates=coords, r=1)
+
+        assert s.coordinates is not None
+
+        # Explicity set coordinates to None
+        sr = s._rebuild(function=None, initializer=None, coordinates=None)
+        assert sr.coordinates is None

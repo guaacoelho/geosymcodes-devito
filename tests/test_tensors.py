@@ -1,5 +1,6 @@
 import numpy as np
 import sympy
+from sympy import Rational
 
 import pytest
 
@@ -353,7 +354,7 @@ def test_shifted_curl_of_vector(shift, ndim):
         dorder = order or 4
         for drv in drvs:
             assert drv.expr in f
-            assert drv.fd_order == dorder
+            assert drv.fd_order == (dorder,)
             if shift is None:
                 assert drv.x0 == {}
             else:
@@ -372,7 +373,8 @@ def test_shifted_lap_of_vector(shift, ndim):
             assert dfvi == ref
 
 
-@pytest.mark.parametrize('shift, ndim', [(None, 2), (.5, 2), (.5, 3),
+@pytest.mark.parametrize('shift, ndim', [(None, 2), (Rational(1/2), 2),
+                                         (Rational(1/2), 3),
                                          (tuple([tuple([.5]*3)]*3), 3)])
 def test_shifted_lap_of_tensor(shift, ndim):
     grid = Grid(tuple([11]*ndim))
