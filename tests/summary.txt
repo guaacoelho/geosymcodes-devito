@@ -1,0 +1,1 @@
+PerfEntry(time=0.01, gflopss=0.2958592, gpointss=0.0093312, oi=0.9792304351970513, ops=None, itershapes=None)

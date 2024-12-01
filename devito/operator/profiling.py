@@ -23,11 +23,15 @@ from devito.tools import DefaultOrderedDict, flatten
 __all__ = ['create_profile']
 
 
-SectionData = namedtuple('SectionData', 'ops sops points traffic itermaps')
+BaseSectionData = namedtuple('SectionData', 'ops sops points traffic itermaps time_only_profiling')
 PerfKey = namedtuple('PerfKey', 'name rank')
 PerfInput = namedtuple('PerfInput', 'time ops points traffic sops itershapes')
 PerfEntry = namedtuple('PerfEntry', 'time gflopss gpointss oi ops itershapes')
 
+class SectionData(BaseSectionData):
+    __slots__ = ()
+    def __new__(cls, ops, sops, points, traffic, itermaps, time_only_profiling=False):
+        return super(SectionData, cls).__new__(cls, ops, sops, points, traffic, itermaps, time_only_profiling)
 
 class Profiler:
 
@@ -100,7 +104,8 @@ class Profiler:
                     points.add(i.ispace.zero().size)
             points = sum(points, S.Zero)
 
-            self._sections[s.name] = SectionData(ops, sops, points, traffic, itermaps)
+            self._sections[s.name] = SectionData(ops, sops, points, traffic, itermaps,
+                                                 time_only_profiling=s.time_only_profiling)
 
     def track_subsection(self, sname, name):
         v = self._subsections.setdefault(sname, OrderedDict())
@@ -259,9 +264,9 @@ class AdvancedProfiler(Profiler):
             # a sequence of unrecognized or non-conventional expr statements
             itershapes = ()
 
-        return time, ops, points, traffic, sops, itershapes
+        return time, ops, points, traffic, sops, itershapes, data.time_only_profiling
 
-    def _allgather_from_comm(self, comm, time, ops, points, traffic, sops, itershapes):
+    def _allgather_from_comm(self, comm, time, ops, points, traffic, sops, itershapes, time_only_profiling):
         times = comm.allgather(time)
         assert comm.size == len(times)
 
@@ -270,8 +275,9 @@ class AdvancedProfiler(Profiler):
         traffics = comm.allgather(traffic)
         sops = [sops]*comm.size
         itershapess = comm.allgather(itershapes)
-
-        return list(zip(times, opss, pointss, traffics, sops, itershapess))
+        topfs = comm.allgather(time_only_profiling)
+        
+        return list(zip(times, opss, pointss, traffics, sops, itershapess, topfs))
 
     # Override basic summary so that arguments other than runtime are computed.
     def summary(self, args, dtype, reduce_over=None):
@@ -291,7 +297,6 @@ class AdvancedProfiler(Profiler):
                     summary.add(name, rank, *items[rank])
             else:
                 summary.add(name, None, *items)
-
         # Enrich summary with subsections data
         for sname, v in self._subsections.items():
             for name, data in v.items():
@@ -334,7 +339,7 @@ class AdvancedProfiler(Profiler):
                     # Same as above but without setup overheads (e.g., host-device
                     # data transfers)
                     summary.add_glb_fdlike('fdlike-nosetup', points, reduce_over_nosetup)
-
+                    
         return summary
 
 
@@ -409,18 +414,18 @@ class PerformanceSummary(OrderedDict):
         self.globals = {}
 
     def add(self, name, rank, time,
-            ops=None, points=None, traffic=None, sops=None, itershapes=None):
+            ops=None, points=None, traffic=None, sops=None, itershapes=None, time_only_profiling=False):
         """
         Add performance data for a given code section. With MPI enabled, the
         performance data is local, that is "per-rank".
         """
         # Do not show unexecuted Sections (i.e., loop trip count was 0)
-        if traffic == 0:
+        if traffic == 0 and not time_only_profiling:
             return
 
         k = PerfKey(name, rank)
 
-        if not ops or any(not np.isfinite(i) for i in [ops, points, traffic]):
+        if not ops or any(not np.isfinite(i) for i in [ops, points, traffic]) or time_only_profiling:
             self[k] = PerfEntry(time, 0.0, 0.0, 0.0, 0, [])
         else:
             gflops = float(ops)/10**9

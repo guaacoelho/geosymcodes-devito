@@ -1250,7 +1250,6 @@ class TestNestedParallelism:
 
         # Does it produce the right result
         op.apply(t_M=9)
-
         assert np.all(u.data[0] == 10)
 
         bns, _ = assert_blocking(op, {'x0_blk0'})

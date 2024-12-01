@@ -1,10 +1,12 @@
-from devito.ir.iet import FindSections, FindSymbols
-from devito.symbolics import Keyword, Macro
+from devito.ir.iet import FindSections, FindSymbols, Call, Conditional, FindNodes, Transformer, Iteration, Section
+from devito.symbolics import Keyword, Macro, CondEq, String, Null
 from devito.tools import filter_ordered
-from devito.types import Global
+from devito.types import Global, SpaceDimension, TimeDimension, Indexed
+from sympy import Or
 
 __all__ = ['filter_iterations', 'retrieve_iteration_tree', 'derive_parameters',
-           'maybe_alias']
+           'maybe_alias', 'dswap_array_alloc_check', 'get_first_space_dim_index',
+           'dswap_update_iet', 'dswap_get_compress_mode_function', 'dswap_get_read_time_iterator']
 
 
 class IterationTree(tuple):
@@ -112,7 +114,7 @@ def derive_parameters(iet, drop_locals=False, ordering='default'):
 
     # Filter off symbols which are defined somewhere within `iet`
     defines = [s.name for s in FindSymbols('defines').visit(iet)]
-    parameters = [s for s in candidates if s.name not in defines]
+    parameters = [s for s in candidates if (s.name not in defines and not s.ignoreDefinition)]
 
     # Drop globally-visible objects
     parameters = [p for p in parameters
@@ -166,3 +168,107 @@ def maybe_alias(obj, candidate):
         # the __rkwargs__ except for e.g. the name
 
     return False
+
+def dswap_array_alloc_check(arrays):
+    """
+    Checks wether malloc worked for array allocation in disk swap build.
+
+    Args:
+        arrays (list): list of Array (files or counters)
+
+    Returns:
+        Conditional: condition to handle allocated array
+    """
+    
+    eqs = []
+    for arr in arrays:
+        eqs.append(CondEq(arr, Macro('NULL')))
+    
+    ors = Or(*eqs)
+    
+    pstring = String("\"Error to alloc\"")
+    printf_call = Call(name="printf", arguments=pstring)
+    exit_call = Call(name="exit", arguments=1)
+    return Conditional(ors, [printf_call, exit_call])
+
+def get_first_space_dim_index(dimensions):
+    """
+    This method returns the index of the first space dimension of the Function.
+
+    Args:
+        dimensions (tuple): dimensions
+
+    Returns:
+        int: index
+    """
+    
+    first_space_dim_index = 0
+    for dim in dimensions:
+        if isinstance(dim, SpaceDimension):
+            break
+        else:
+            first_space_dim_index += 1
+    
+    return first_space_dim_index
+
+def dswap_update_iet(iet_body, temp_name, dswap_section):
+    """
+    This function substitute a temp section by a definitive section.
+
+    Args:
+        iet_body (List): IET body nodes
+        temp_name (string): temp section name
+        dswap_section (Section): Read/Decompress or Write/Compress section
+    """
+    
+    sections = FindNodes(Section).visit(iet_body)
+    temp_sec = next((section for section in sections if section.name == temp_name), None)
+    mapper={temp_sec: dswap_section}
+
+    time_index = next((i for i, node in enumerate(iet_body) if isinstance(node, Iteration)
+                       and isinstance(node.dim, TimeDimension)), None)
+    transformed_iet = Transformer(mapper).visit(iet_body[time_index])
+    iet_body[time_index] = transformed_iet 
+
+def dswap_get_compress_mode_function(compress_config, zfp, field, type_symbol):
+    """
+    Returns the propper compress function according to a specific compress mode
+    Args:
+        compress_config (CompressionConfig): object with compress settings
+        zfp (Pointer): pointer to a zfp_stream type
+        field (Pointer): zfp field pointer
+        type_symbol (Symbol): Symbol for zfp_type
+
+    Returns:
+        Call : call to a zfp stream mode specific function
+    """
+    
+    arguments = [zfp]
+    if compress_config.method == "set_rate":
+        arguments += [compress_config.rate, type_symbol, Call(name="zfp_field_dimensionality", arguments=[field]), String(r"zfp_false")]
+    elif compress_config.method == "set_accuracy" or compress_config.method == "set_precision":
+        arguments.append(compress_config.value)     
+        
+    return Call(name="zfp_stream_"+compress_config.method, arguments=arguments)
+
+
+def dswap_get_read_time_iterator(expressions, func):
+    """
+    D
+    Args:
+
+    Returns:
+        
+    """
+    grad = next((exp for exp in expressions if func in exp.reads), None)
+    
+    if not grad:
+        raise RuntimeError("Function {} provided as being read from disk, but no reading found".format(func))
+        
+    rhs = grad.expr.rhs
+    indexing = next((symb for symb in rhs.free_symbols if
+                        (isinstance(symb, Indexed) and symb.function == func)),
+                    None)
+    time_iterator = indexing.indices[0]
+    
+    return time_iterator

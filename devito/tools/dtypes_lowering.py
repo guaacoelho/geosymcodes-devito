@@ -210,12 +210,19 @@ for base_name, base_dtype in mapper.items():
 
 def ctypes_to_cstr(ctype, toarray=None):
     """Translate ctypes types into C strings."""
+    
+    # NOTE: Try to fix circular import error on devito.types.misc.FILE
+    import devito.types as Dtypes
+
     if ctype in ctypes_vector_mapper.values():
         retval = ctype.__name__
     elif isinstance(ctype, CustomDtype):
         retval = str(ctype)
     elif issubclass(ctype, ctypes.Structure):
-        retval = 'struct %s' % ctype.__name__
+        if issubclass(ctype, Dtypes.FILE):
+            retval = '%s *' % ctype.__name__
+        else:
+            retval = 'struct %s' % ctype.__name__
     elif issubclass(ctype, ctypes.Union):
         retval = 'union %s' % ctype.__name__
     elif issubclass(ctype, ctypes._Pointer):

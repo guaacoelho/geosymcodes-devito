@@ -6,12 +6,11 @@ import numpy as np
 import sympy
 from sympy import Expr, Function, Number, Tuple, sympify
 from sympy.core.decorators import call_highest_priority
-
 from devito.finite_differences.elementary import Min, Max
 from devito.tools import (Pickable, Bunch, as_tuple, is_integer, float2,  # noqa
                           float3, float4, double2, double3, double4, int2, int3,
                           int4)
-from devito.types import Symbol
+from devito.types import Symbol, size_t
 from devito.types.basic import Basic
 
 __all__ = ['CondEq', 'CondNe', 'IntDiv', 'CallFromPointer',  # noqa
@@ -770,6 +769,13 @@ class CastStar:
 
     def __new__(cls, base=''):
         return cls.base(base, '*')
+    
+class CastStarStar(object):
+
+    base = None
+
+    def __new__(cls, base=''):
+        return cls.base(base, '**')
 
 
 # Dynamically create INT, INT2, .... INTP, INT2P, ... FLOAT, ...
@@ -822,6 +828,14 @@ class VOID(Cast):
 class CHARP(CastStar):
     base = CHAR
 
+class SIZET(Cast):
+    _base_typ = 'size_t'
+    
+class SIZETP(CastStar):
+    base = SIZET
+    
+class SIZETPP(CastStarStar):
+    base = SIZET
 
 class UCHARP(CastStar):
     base = UCHAR
@@ -847,7 +861,7 @@ cast_mapper = {
     np.float32: FLOAT,  # noqa
     float: DOUBLE,  # noqa
     np.float64: DOUBLE,  # noqa
-
+    size_t: SIZET,
     (np.int8, '*'): CHARP,
     (np.uint8, '*'): UCHARP,
     (int, '*'): INTP,  # noqa
@@ -857,7 +871,9 @@ cast_mapper = {
     (np.int64, '*'): INTP,  # noqa
     (np.float32, '*'): FLOATP,  # noqa
     (float, '*'): DOUBLEP,  # noqa
-    (np.float64, '*'): DOUBLEP  # noqa
+    (np.float64, '*'): DOUBLEP,  # noqa
+    (size_t, '*'): SIZETP,
+    (size_t, '**'): SIZETPP
 }
 
 for base_name in ['int', 'float', 'double']:

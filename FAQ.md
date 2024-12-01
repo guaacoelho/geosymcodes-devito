@@ -679,7 +679,6 @@ There are a few things you may want to check
 
 * To refer to the actual ("global") shape of the domain, you should always use `grid.shape` (or analogously through a `Function`, `f.grid.shape`). And unless you know well what you're doing, you should never use the function shape, namely `f.shape` or `f.data.shape`, as that will return the "local" domain shape, that is the data shape after domain decomposition, which might differ across the various MPI ranks. 
 
-
 [top](#Frequently-Asked-Questions)
 
 ## Why does my Operator kernel die suddenly

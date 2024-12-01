@@ -137,7 +137,6 @@ def test_precomputed_interpolation(r):
                                    interpolation_coeffs=interpolation_coeffs)
     eqn = sf.interpolate(m)
     op = Operator(eqn)
-
     op()
     expected_values = [sin(point[0]) + sin(point[1]) for point in points]
     assert(all(np.isclose(sf.data, expected_values, rtol=1e-6)))
@@ -171,7 +170,6 @@ def test_precomputed_interpolation_time(r):
 
     eqn = sf.interpolate(u)
     op = Operator(eqn)
-
     op(time_m=0, time_M=4)
 
     for it in range(5):
@@ -627,7 +625,6 @@ def test_edge_sparse():
     expr = sf1.interpolate(u)
     subs = {d.spacing: v for d, v in zip(u.grid.dimensions, u.grid.spacing)}
     op = Operator(expr, subs=subs)
-
     op()
     assert sf1.data[0] == 0
 

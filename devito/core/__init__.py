@@ -11,7 +11,9 @@ from devito.core.gpu import (DeviceNoopOmpOperator, DeviceNoopAccOperator,
                              DeviceAdvOmpOperator, DeviceAdvAccOperator,
                              DeviceFsgOmpOperator, DeviceFsgAccOperator,
                              DeviceCustomOmpOperator, DeviceCustomAccOperator)
+from devito.core.operator import (DiskSwapConfig, CompressionConfig)
 from devito.operator.registry import operator_registry
+
 
 # Register CPU Operators
 operator_registry.add(Cpu64CustomOperator, Cpu64, 'custom', 'C')
