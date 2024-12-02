@@ -16,6 +16,7 @@ from devito.symbolics import (ValueLimit, evalrel, has_integer_args, limits_mapp
 from devito.tools import Bunch, as_mapper, filter_ordered, split
 from devito.types import FIndexed
 
+
 __all__ = ['avoid_denormals', 'hoist_prodders', 'relax_incr_dimensions',
            'generate_macros', 'minimize_symbols']
 

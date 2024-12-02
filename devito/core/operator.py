@@ -1,3 +1,5 @@
+import os
+
 from collections.abc import Iterable
 from functools import cached_property
 
@@ -10,11 +12,12 @@ from devito.parameters import configuration
 from devito.operator import Operator
 from devito.tools import (as_tuple, is_integer, timed_pass,
                           UnboundTuple, UnboundedMultiTuple)
-from devito.types import NThreads, PThreadArray
+from devito.types import NThreads, TimeFunction, VectorTimeFunction, TensorTimeFunction, PThreadArray
+
 
 __all__ = ['CoreOperator', 'CustomOperator',
            # Optimization options
-           'ParTile']
+           'ParTile', 'DiskSwapConfig', 'CompressionConfig']
 
 
 class BasicOperator(Operator):
@@ -443,7 +446,150 @@ class ParTile(UnboundedMultiTuple, OptOption):
         obj.reduce = as_tuple(reduce)
 
         return obj
-
+    
     @property
     def is_multi(self):
         return len(self) > 1
+
+class CompressionConfig(OptOption):    
+    """
+    This class gathers objects that represent compression settings. 
+    This class receives RATE, value and mode.
+    
+    mode must be one of the following options:
+        - rate: in this case, you must give RATE
+        - lossless;
+        - accuracy: in this case you must give value as a tolerance
+        - precision: in this case, you must give value as a precision
+    """
+    
+    from typing import Union
+    _methods_ = {'lossless': 'set_reversible', 'rate': 'set_rate', 'precision': 'set_precision', 'accuracy': 'set_accuracy'}
+    
+    @classmethod
+    def _validate_params(cls, method, RATE, value):
+        if method not in cls._methods_:
+            raise Exception(f"mode must be one of the string options: {cls._methods_}")
+        else:
+            if method == 'rate' and (not isinstance(RATE, float) and not isinstance(RATE, int)):
+                raise TypeError("In case of rate method, RATE must be either float or int")
+            elif method == 'accuracy' and (not isinstance(value, float) and not isinstance(value, int)):
+                raise TypeError("In case of accuracy method, value must be float or int")
+            elif method == 'precision' and (not isinstance(value, int) or value <= 0):
+                raise TypeError("In case of precision method, value must be a positive int")
+    
+    def __new__(cls, method: str, RATE: Union[float, int, None]=None, value: Union[float, int, None]=None):
+        
+        # Error handling
+        cls._validate_params(method, RATE, value)
+        
+        obj = super().__new__(cls)
+        obj.rate = RATE
+        obj.value = value
+        obj.method = cls._methods_[method]
+        return obj
+
+class DiskSwapConfig(OptOption):
+    def _validate_functions(functions):
+        if not functions:
+            raise ValueError("Missing functions argument in disk swap configuration")
+        
+        funcs = functions if isinstance(functions, list) else [functions]
+        
+        # Unpack VectorTimeFunction and TensorTimeFunction
+        final_funcs=[]
+        for function in funcs:
+            if isinstance(function, (VectorTimeFunction, TensorTimeFunction)):
+                final_funcs.extend(function)
+            else:
+                final_funcs.append(function)
+        
+        for function in final_funcs:
+            if not isinstance(function, TimeFunction):
+                raise ValueError("Disk swap functions must be TimeFunction instances, got %s instead" % type(function))
+
+        return final_funcs
+    
+    def _validate_mode(mode):
+        if str(mode) != "write" and str(mode) != "read":
+            raise ValueError("Disk swap mode must be write or read")
+
+        return mode
+    
+    def _validate_compression(cc):
+        if isinstance(cc, CompressionConfig):
+            return cc
+        else:
+            return False
+    
+    def _validate_path(path):
+        if not path:
+             raise ValueError("Disk swap data path must be provided")
+        elif isinstance(path, str):
+            return path
+        else:
+            raise ValueError("Disk swap data path must be a string, got %s instead" % type(path))
+        
+    def _validate_folder(folder):
+        if not folder:
+             return None
+        elif isinstance(folder, str):
+            return folder
+        else:
+            raise ValueError("Disk swap data folder must be a string, got %s instead" % type(folder))
+    
+    def _validade_odirect(odirect):
+        return bool(odirect)
+    
+    def _get_env_vars():
+        #DiskSwapConfig parameters
+        env_mode = os.environ.get('DEVITO_DSWAP_MODE')
+            
+        env_path = os.environ.get('DEVITO_DSWAP_PATH')
+        
+        env_folder = os.environ.get('DEVITO_DSWAP_FOLDER')
+        
+        env_odirect = os.environ.get('DEVITO_DSWAP_ODIRECT')
+        
+        
+        #CompressionConfig parameters
+        env_comp_mode = os.environ.get('DEVITO_DSWAP_COMPRESSION_MODE')
+        
+        env_comp_rate = os.environ.get('DEVITO_DSWAP_COMPRESSION_RATE')
+        if env_comp_rate:
+            try:
+                env_comp_rate = float(env_comp_rate)
+            except ValueError:
+                raise ValueError("DEVITO_DSWAP_COMPRESSION_RATE must be a float-like representation, got %s instead" % env_comp_rate)
+        
+        env_comp_value = os.environ.get('DEVITO_DSWAP_COMPRESSION_VALUE')
+        if env_comp_value:
+            try:
+                is_set_precision = env_comp_mode and env_comp_mode == "set_precision"
+                env_comp_value = int(env_comp_value) if is_set_precision else float(env_comp_value)
+            except ValueError:
+                raise ValueError("DEVITO_DSWAP_COMPRESSION_VALUE must be an int (for set_precision mode) or float-like representation, got %s instead"
+                                 % env_comp_value)
+        
+        env_compression_config = CompressionConfig(mode=env_comp_mode, RATE=env_comp_rate, value=env_comp_value) if env_comp_mode else None
+        
+        return env_mode, env_path, env_folder, env_odirect, env_compression_config
+    
+    def __new__(cls, **kwargs):        
+        obj = super().__new__(cls)
+        
+        env_mode, env_path, env_folder, env_odirect, env_compression_config = cls._get_env_vars()
+        
+        kcomp = kwargs.get('compression')
+        comp = kcomp if kcomp is not None else env_compression_config
+        
+        kodirect = kwargs.get('odirect')
+        odirect = kodirect if kodirect is not None else env_odirect
+        
+        obj.functions = cls._validate_functions(kwargs.get('functions'))  
+        obj.mode = cls._validate_mode(kwargs.get('mode') or env_mode)
+        obj.compression = cls._validate_compression(comp)
+        obj.path = cls._validate_path(kwargs.get('path') or env_path)
+        obj.folder = cls._validate_folder(kwargs.get('folder') or env_folder)
+        obj.odirect = cls._validade_odirect(odirect)         
+        return obj

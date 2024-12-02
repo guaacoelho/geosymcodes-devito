@@ -38,12 +38,14 @@ class AbstractObject(Basic, sympy.Basic, Pickable):
     def __new__(cls, *args, **kwargs):
         with sympy_mutex:
             obj = sympy.Basic.__new__(cls)
+
         obj.__init__(*args, **kwargs)
         return obj
 
-    def __init__(self, name, dtype):
+    def __init__(self, name, dtype, **kwargs):
         self.name = name
         self._dtype = dtype
+        self.ignoreDefinition = self.__ignoreDefinition_setup__(**kwargs)
 
     def __repr__(self):
         return self.name
@@ -90,8 +92,8 @@ class Object(AbstractObject, ArgProvider, Uncached):
 
     is_Object = True
 
-    def __init__(self, name, dtype, value=None):
-        super().__init__(name, dtype)
+    def __init__(self, name, dtype, value=None, **kwargs):
+        super(Object, self).__init__(name, dtype, **kwargs)
         self.value = value
 
     __hash__ = Uncached.__hash__
@@ -134,10 +136,10 @@ class CompositeObject(Object):
 
     __rargs__ = ('name', 'pname', 'pfields')
 
-    def __init__(self, name, pname, pfields, value=None):
+    def __init__(self, name, pname, pfields, value=None, **kwargs):
         dtype = CtypesFactory.generate(pname, pfields)
         value = self.__value_setup__(dtype, value)
-        super().__init__(name, dtype, value)
+        super(CompositeObject, self).__init__(name, dtype, value, **kwargs)
 
     def __value_setup__(self, dtype, value):
         return value or byref(dtype._type_())
@@ -187,6 +189,7 @@ class LocalObject(AbstractObject, LocalType):
         self._liveness = liveness
 
         self._is_global = is_global
+        self.ignoreDefinition = self.__ignoreDefinition_setup__(**kwargs)
 
     def _hashable_content(self):
         return (super()._hashable_content() +

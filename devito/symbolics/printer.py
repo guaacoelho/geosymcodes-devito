@@ -14,6 +14,7 @@ from sympy.printing.c import C99CodePrinter
 
 from devito.arch.compiler import AOMPCompiler
 from devito.symbolics.inspection import has_integer_args, sympy_dtype
+from devito.types import Array
 from devito.types.basic import AbstractFunction
 
 __all__ = ['ccode']
@@ -58,7 +59,9 @@ class CodePrinter(C99CodePrinter):
             return super()._print_Function(expr)
 
     def _print_CondEq(self, expr):
-        return "%s == %s" % (self._print(expr.lhs), self._print(expr.rhs))
+        lhs = expr.lhs if not isinstance(expr.lhs, Array) else expr.lhs._C_name
+        rhs = expr.rhs if not isinstance(expr.rhs, Array) else expr.rhs._C_name
+        return "%s == %s" % (self._print(lhs), self._print(rhs))
 
     def _print_Indexed(self, expr):
         """

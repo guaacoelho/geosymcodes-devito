@@ -338,7 +338,7 @@ class DataManager:
         defines = FindSymbols('defines-aliases|globals').visit(iet)
 
         for i in FindSymbols().visit(iet):
-            if i in defines:
+            if i in defines or i.ignoreDefinition:
                 continue
             elif i.is_LocalObject:
                 self._alloc_object_on_low_lat_mem(iet, i, storage)
@@ -394,7 +394,7 @@ class DataManager:
         # (i) Dereferencing a PointerArray, e.g., `float (*r0)[.] = (float(*)[.]) pr0[.]`
         # (ii) Declaring a raw pointer, e.g., `float * r0 = NULL; *malloc(&(r0), ...)
         defines = set(FindSymbols('defines|globals').visit(iet))
-        bases = sorted({i.base for i in indexeds}, key=lambda i: i.name)
+        bases = sorted({i.base for i in indexeds if not i.function.ignoreDefinition}, key=lambda i: i.name)
 
         # Some objects don't distinguish their _C_symbol because they are known,
         # by construction, not to require it, thus making the generated code

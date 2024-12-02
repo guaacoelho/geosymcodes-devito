@@ -10,7 +10,7 @@ from devito.passes.clusters import (Lift, blocking, buffering, cire, cse,
                                     optimize_hyperplanes)
 from devito.passes.iet import (CTarget, OmpTarget, avoid_denormals, linearize,
                                mpiize, hoist_prodders, relax_incr_dimensions,
-                               check_stability)
+                               disk_swap_efuncs, check_stability)
 from devito.tools import timed_pass
 
 __all__ = ['Cpu64NoopCOperator', 'Cpu64NoopOmpOperator', 'Cpu64AdvCOperator',
@@ -29,6 +29,8 @@ class Cpu64OperatorMixin:
         o['openmp'] = oo.pop('openmp')
         o['mpi'] = oo.pop('mpi')
         o['parallel'] = o['openmp']  # Backwards compatibility
+
+        o['disk-swap'] = oo.pop('disk-swap', None)
 
         # Buffering
         o['buf-async-degree'] = oo.pop('buf-async-degree', None)
@@ -128,7 +130,6 @@ class Cpu64NoopOperator(Cpu64OperatorMixin, CoreOperator):
 
         # Distributed-memory parallelism
         mpiize(graph, **kwargs)
-
         # Shared-memory parallelism
         if options['openmp']:
             parizer = cls._Target.Parizer(sregistry, options, platform, compiler)
@@ -198,6 +199,10 @@ class Cpu64AdvOperator(Cpu64OperatorMixin, CoreOperator):
 
         # Distributed-memory parallelism
         mpiize(graph, **kwargs)
+
+        # Disk swap
+        if kwargs['options']['disk-swap']:
+            disk_swap_efuncs(graph, **kwargs)
 
         # Lower BlockDimensions so that blocks of arbitrary shape may be used
         relax_incr_dimensions(graph, **kwargs)

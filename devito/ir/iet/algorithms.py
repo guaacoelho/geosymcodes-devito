@@ -1,23 +1,31 @@
 from collections import OrderedDict
 
+from devito.tools import timed_pass
+from devito.types import (TimeDimension)
 from devito.ir.iet import (Expression, Increment, Iteration, List, Conditional, SyncSpot,
                            Section, HaloSpot, ExpressionBundle)
-from devito.tools import timed_pass
 
 __all__ = ['iet_build']
 
 
 @timed_pass(name='build')
-def iet_build(stree):
+def iet_build(stree, **kwargs):
     """
     Construct an Iteration/Expression tree(IET) from a ScheduleTree.
     """
+    dswap = kwargs['options']['disk-swap']
+    time_iterators = None
+
     nsections = 0
     queues = OrderedDict()
     for i in stree.visit():
         if i == stree:
             # We hit this handle at the very end of the visit
-            return List(body=queues.pop(i))
+            iet_body = queues.pop(i)
+            if(dswap):
+                from devito.passes.iet import disk_swap_build
+                iet_body = disk_swap_build(iet_body, dswap, kwargs['sregistry'].nthreads, kwargs['options']['mpi'], kwargs['language'], time_iterators)               
+            return List(body=iet_body)
 
         elif i.is_Exprs:
             exprs = []
@@ -35,9 +43,23 @@ def iet_build(stree):
             if i.dim.is_Virtual:
                 body = List(body=queues.pop(i))
             else:
-                body = Iteration(queues.pop(i), i.dim, i.limits,
-                                 direction=i.direction, properties=i.properties,
-                                 uindices=i.sub_iterators)
+                iteration_nodes = queues.pop(i) 
+                if isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'write':
+                    if dswap.compression:
+                        iteration_nodes.append(Section("compress_temp"))
+                    else:
+                        iteration_nodes.append(Section("write_temp"))
+                    time_iterators = i.sub_iterators
+                elif isinstance(i.dim, TimeDimension) and dswap and dswap.mode == 'read':
+                    if dswap.compression:
+                        iteration_nodes.insert(0, Section("decompress_temp"))
+                    else:
+                        iteration_nodes.insert(0, Section("read_temp"))
+                    time_iterators = i.sub_iterators
+
+                body = Iteration(iteration_nodes, i.dim, i.limits,
+                                direction=i.direction, properties=i.properties,
+                                uindices=i.sub_iterators)
 
         elif i.is_Section:
             body = Section('section%d' % nsections, body=queues.pop(i))

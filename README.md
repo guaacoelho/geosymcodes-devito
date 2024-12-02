@@ -10,15 +10,19 @@
 [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/devitocodes/devito/master)
 [![Docker](https://img.shields.io/badge/dockerhub-images-important.svg?logo=Docker?color=blueviolet&label=docker&sort=semver)](https://hub.docker.com/r/devitocodes/devito)
 
-[Devito](http://www.devitoproject.org) is a Python package to implement
-optimized stencil computation (e.g., finite differences, image processing,
-machine learning) from high-level symbolic problem definitions.  Devito builds
+[DEVITO SENAI CIMATEC](https://codigo-externo.petrobras.com.br/senai-cimatec-lde/devito) is a DSL
+developed based on the open-source Devito package [Devito](http://www.devitoproject.org):
+a Python package to implement optimized stencil computation (e.g., finite differences, image processing,
+machine learning) from high-level symbolic problem definitions. This DSL builds
 on [SymPy](http://www.sympy.org/en/index.html) and employs automated code
 generation and just-in-time compilation to execute optimized computational
 kernels on several computer platforms, including CPUs, GPUs, and clusters
 thereof.
 
 - [About Devito](#about-devito)
+- [Disk Swap](#disk-swap)
+- [CIMATEC Alocator](#cimatec-alocator)
+- [CIMATEC Seismic API](#cimatec-seismic-api)
 - [Installation](#installation)
 - [Resources](#resources)
 - [FAQs](https://github.com/devitocodes/devito/blob/master/FAQ.md)
@@ -74,39 +78,94 @@ Key features include:
   and SciPy, as well as machine learning frameworks such as TensorFlow and
   PyTorch.
 
+
+## Disk Swap
+The Disk Swap is an exclusive feature of DEVITO SENAI CIMATEC that enables
+the full storage of TimeFunctions (commonly used to represent wavefields in 
+various models) on high-performance devices, such as NVMe drives.
+
+This functionality overcomes the field size limitations imposed by executions 
+relying solely on RAM storage, as well as the poor performance of alternative 
+approaches employing checkpointing techniques.
+
+DEVITO SENAI CIMATEC provides an extremely simple and functional configuration 
+interface for Disk Swap, allowing its setup and application in just 
+a few lines of code.
+
+
+```python
+>>> grid = Grid(shape=(10, 10))
+>>> f = TimeFunction(name='f', grid=grid, space_order=2)
+>>> eqn = Eq(f.dt, 0.5 * f.laplace)
+>>> ds_config = DiskSwapConfig(functions=[f],
+                            mode="write",
+                            path="path_to_device")
+>>> op = Operator(Eq(f.forward, solve(eqn, f.forward)), opt=('advanced', {'disk-swap': ds_config})
+```
+
+The configuration, for example, for an operator that stores the wavefield to disk,
+can be done intuitively and without increasing the code complexity for the user, as demonstrated above.
+
+
+## CIMATEC Alocator
+(KEEP IT?)
+
+## CIMATEC SEISMIC API
+(KEEP IT?)
+
 ## Installation
+The use of virtual environments is recommended to isolate package dependencies, ensuring that the installation of DEVITO does not interfere with other projects or system configurations.
 
-The easiest way to try Devito is through Docker using the following commands:
+In addition to the installation of mandatory packages required for the basic functionality of the tool, DEVITO also supports the installation of additional dependencies for extended features, organized into four groups:
+
+- **extras**: dependencies for Jupyter notebooks, plotting, and benchmarking.
+- **tests**: dependencies for the testing infrastructure.
+- **mpi**: dependencies for the MPI infrastructure.
+- **nvidia**: dependencies to enable GPU execution.
+
+**venv install**:
 ```
-# get the code
-git clone https://github.com/devitocodes/devito.git
-cd devito
-
-# start a jupyter notebook server on port 8888
-docker-compose up devito
+>>># Creation
+>>>python -m venv <nome_do_ambiente>
+>>>
+>>># Activation
+>>>source <nome_do_ambiente>/bin/activate  # Para sistemas Linux/macOS
+>>>
+>>># Installing additional dependencies
+>>>pip install git+https://codigo-externo.petrobras.com.br/senai-cimatec-lde/devito.git
+>>>
+>>># ...or to install it with the additional dependencies already included:
+>>>pip install devito[tests,extras,nvidia,mpi] @ git+https://codigo-externo.petrobras.com.br/senai-cimatec-lde/devito.git@main
 ```
-After running the last command above, the terminal will display a URL such as
-`https://127.0.0.1:8888/?token=XXX`. Copy-paste this URL into a browser window
-to start a [Jupyter](https://jupyter.org/) notebook session where you can go
-through the [tutorials](https://github.com/devitocodes/devito/tree/master/examples)
-provided with Devito or create your own notebooks.
 
-[See here](http://devitocodes.github.io/devito/download.html) for detailed installation
-instructions and other options. If you encounter a problem during installation, please
-see the
-[installation issues](https://github.com/devitocodes/devito/wiki/Installation-Issues) we
-have seen in the past. 
+
+**conda install**:
+```
+>>># Creation
+>>>conda create --name <nome_do_ambiente>
+>>>
+>>># Activation
+>>>conda activate <nome_do_ambiente>
+>>>
+>>># Download repository
+>>>git clone https://codigo-externo.petrobras.com.br/senai-cimatec-lde/devito.git
+>>>
+>>># Install
+>>>cd devito
+>>>pip install -e .
+>>>
+>>># ...or to install it with the additional dependencies already included:
+>>>pip install -e .[extras,mpi,nvidia,tests]
+```
 
 ## Resources
 
-To learn how to use Devito,
-[here](https://github.com/devitocodes/devito/blob/master/examples) is a good
+To learn how to use the DEVITO SENAI CIMATEC,
+[here](https://codigo-externo.petrobras.com.br/senai-cimatec-lde/devito/blob/master/examples) is a good
 place to start, with lots of examples and tutorials.
 
-The [website](https://www.devitoproject.org/) also provides access to other
-information, including documentation and instructions for citing us.
-
-Some FAQs are discussed [here](FAQ.md).
+The original Devito [website](https://www.devitoproject.org/) also provides access to other
+information, including documentation and also a FAQs are discussed [here](FAQ.md).
 
 ## Performance
 
@@ -117,18 +176,18 @@ If you are interested in any of the following
 * Benchmarking operators;
 
 then you should take a look at this
-[README](https://github.com/devitocodes/devito/blob/master/benchmarks/user).
+[README](https://codigo-externo.petrobras.com.br/senai-cimatec-lde/devito/blob/master/benchmarks/user).
 
-You may also be interested in
-[TheMatrix](https://www.devitocodes.com/blog/thematrix) -- a cross-architecture
-benchmarking framework showing the performance of several production-grade
-seismic operators implemented with Devito.
+
+
 
 ## Get in touch
+(KEEP IT?)
 
 If you're using Devito, we would like to hear from you. Whether you
 are facing issues or just trying it out, join the
 [conversation](https://join.slack.com/t/devitocodes/shared_invite/zt-2hgp6891e-jQDcepOWPQwxL5JJegYKSA).
 
 ## Interactive jupyter notebooks
+(KEEP IT?)
 The tutorial jupyter notebook are available interactively at the public [binder](https://mybinder.org/v2/gh/devitocodes/devito/master) jupyterhub. 

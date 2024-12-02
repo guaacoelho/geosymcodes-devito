@@ -7,4 +7,5 @@ from .linearization import *  # noqa
 from .asynchrony import *  # noqa
 from .instrument import *  # noqa
 from .languages import *  # noqa
+from .dswap import *
 from .errors import *  # noqa

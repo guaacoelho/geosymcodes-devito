@@ -677,6 +677,20 @@ class CGen(Visitor):
         return [self._gen_value(i) for i in v]
 
     def visit_Operator(self, o, mode='all'):
+        # Create conditional definitions using cgen
+        def _create_conditional_definition(def_block):
+            lines = []
+            for line in def_block:
+               if line[0] == "ifndef" or line[0] == "ifdef":
+                   lines.append(c.Line(f"#{line[0]} {line[1]}"))
+               elif line[0] == "else":
+                   lines.append(c.Line(f"#{line[0]}"))
+               else:
+                   lines.append(c.Define(line[0], line[1]))
+            
+            lines.extend([c.Line("#endif"), c.Line()])
+            return c.Collection(lines)
+        
         # Kernel signature and body
         body = flatten(self._visit(i) for i in o.children)
         signature = self._gen_signature(o)
@@ -698,7 +712,8 @@ class CGen(Visitor):
             efuncs.extend([self._visit(i), blankline])
 
         # Definitions
-        headers = [c.Define(*i) for i in o._headers] + [blankline]
+        headers = [c.Define(*i) if not isinstance(i[0], tuple) else _create_conditional_definition(i) for i in o._headers]
+        headers = headers + [blankline]
 
         # Header files
         includes = self._operator_includes(o) + [blankline]

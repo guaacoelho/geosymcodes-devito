@@ -195,6 +195,11 @@ class Operator(Callable):
         # Python- (i.e., compile-) and C-level (i.e., run-time) performance
         profiler = create_profile('timers')
 
+        disk_swap = kwargs['options']['disk-swap']
+        if disk_swap: is_compression = disk_swap.compression 
+        else: is_compression = False
+        is_mpi = kwargs['options']['mpi']
+
         # Lower the input expressions into an IET
         irs, byproduct = cls._lower(expressions, profiler=profiler, **kwargs)
 
@@ -444,7 +449,7 @@ class Operator(Callable):
         (i.e., no definition placed yet).
         """
         # Build an unbounded IET from a ScheduleTree
-        uiet = iet_build(stree)
+        uiet = iet_build(stree, profiler=profiler, **kwargs)
 
         # Analyze the IET Sections for C-level profiling
         try:
@@ -559,7 +564,6 @@ class Operator(Callable):
         edges = [(i, i.parent) for i in self.dimensions
                  if i.is_Derived and i.parent in set(nodes)]
         toposort = DAG(nodes, edges).topological_sort()
-
         futures = {}
         for d in reversed(toposort):
             if set(d._arg_names).intersection(kwargs):
@@ -582,7 +586,6 @@ class Operator(Callable):
             except ValueError:
                 raise ValueError("Override `%s` is incompatible with overrides `%s`" %
                                  (p, [i for i in overrides if i.name in args]))
-
         # Process data-carrier defaults
         for p in defaults:
             if p.name in args:
@@ -605,7 +608,6 @@ class Operator(Callable):
                                      "`%s=%s`, while `%s=%s` is expected. Perhaps you "
                                      "forgot to override `%s`?" %
                                      (p, k, v, k, args[k], p))
-
         args = kwargs['args'] = args.reduce_all()
 
         # DiscreteFunctions may be created from CartesianDiscretizations, which in
@@ -1101,6 +1103,7 @@ class Operator(Callable):
 # dangerous as some of them (the minority) might break in some circumstances
 # if applied in cascade (e.g., `linearization` on top of `linearization`)
 rcompile_registry = {
+    'disk-swap': False,
     'avoid_denormals': False,
     'linearize': False,
     'place-transfers': False
@@ -1364,14 +1367,16 @@ def parse_kwargs(**kwargs):
             raise InvalidOperator("Illegal `compiler=%s`" % str(compiler))
         kwargs['compiler'] = compiler_registry[compiler](platform=kwargs['platform'],
                                                          language=kwargs['language'],
-                                                         mpi=configuration['mpi'])
+                                                         mpi=configuration['mpi'],
+                                                         opt_options=kwargs['options'])
     elif any([platform, language]):
         kwargs['compiler'] =\
             configuration['compiler'].__new_with__(platform=kwargs['platform'],
                                                    language=kwargs['language'],
-                                                   mpi=configuration['mpi'])
+                                                   mpi=configuration['mpi'],
+                                                   opt_options=kwargs['options'])
     else:
-        kwargs['compiler'] = configuration['compiler'].__new_with__()
+        kwargs['compiler'] = configuration['compiler'].__new_with__(opt_options=kwargs['options'])
 
     # `allocator`
     kwargs['allocator'] = default_allocator(
