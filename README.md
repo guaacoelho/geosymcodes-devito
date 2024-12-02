@@ -21,14 +21,10 @@ thereof.
 
 - [About Devito](#about-devito)
 - [Disk Swap](#disk-swap)
-- [CIMATEC Alocator](#cimatec-alocator)
-- [CIMATEC Seismic API](#cimatec-seismic-api)
 - [Installation](#installation)
 - [Resources](#resources)
 - [FAQs](https://github.com/devitocodes/devito/blob/master/FAQ.md)
 - [Performance](#performance)
-- [Get in touch](#get-in-touch)
-- [Interactive jupyter notebooks](#interactive-jupyter-notebooks)
 
 ## About Devito
 
@@ -107,12 +103,6 @@ The configuration, for example, for an operator that stores the wavefield to dis
 can be done intuitively and without increasing the code complexity for the user, as demonstrated above.
 
 
-## CIMATEC Alocator
-(KEEP IT?)
-
-## CIMATEC SEISMIC API
-(KEEP IT?)
-
 ## Installation
 The use of virtual environments is recommended to isolate package dependencies, ensuring that the installation of DEVITO does not interfere with other projects or system configurations.
 
@@ -180,14 +170,3 @@ then you should take a look at this
 
 
 
-
-## Get in touch
-(KEEP IT?)
-
-If you're using Devito, we would like to hear from you. Whether you
-are facing issues or just trying it out, join the
-[conversation](https://join.slack.com/t/devitocodes/shared_invite/zt-2hgp6891e-jQDcepOWPQwxL5JJegYKSA).
-
-## Interactive jupyter notebooks
-(KEEP IT?)
-The tutorial jupyter notebook are available interactively at the public [binder](https://mybinder.org/v2/gh/devitocodes/devito/master) jupyterhub. 
