@@ -100,9 +100,11 @@ class AcousticWaveSolver:
         # Create a new receiver object to store the result
         rec = rec or self.geometry.rec
 
+        disk_swap = True if self._kwargs.get("disk_swap") is True else False
+
         # Create the forward wavefield if not provided
         u = u or TimeFunction(name='u', grid=self.model.grid,
-                              save=self.geometry.nt if save else None,
+                              save=self.geometry.nt if save and not disk_swap else None,
                               time_order=2, space_order=self.space_order)
 
         model = model or self.model

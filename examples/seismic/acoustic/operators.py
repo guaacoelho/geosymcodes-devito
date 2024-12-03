@@ -1,5 +1,6 @@
 from devito import Eq, Operator, Function, TimeFunction, Inc, solve, sign
 from devito.symbolics import retrieve_functions, INT, retrieve_derivatives
+from examples.seismic.utils import get_ooc_config
 
 
 def freesurface(model, eq):
@@ -128,13 +129,17 @@ def ForwardOperator(model, geometry, space_order=4,
         Type of discretization, 'OT2' or 'OT4'.
     """
     m = model.m
+    disk_swap = True if kwargs.get("disk_swap") is True else False
 
     # Create symbols for forward wavefield, source and receivers
     u = TimeFunction(name='u', grid=model.grid,
-                     save=geometry.nt if save else None,
+                     save=geometry.nt if save and not disk_swap else None,
                      time_order=2, space_order=space_order)
     src = geometry.src
     rec = geometry.rec
+    
+    if save and disk_swap:
+        kwargs.update(get_ooc_config(u, "write", **kwargs))
 
     s = model.grid.stepping_dim.spacing
     eqn = iso_stencil(u, model, kernel)
@@ -208,14 +213,18 @@ def GradientOperator(model, geometry, space_order=4, save=True,
         Type of discretization, centered or shifted.
     """
     m = model.m
+    disk_swap = True if kwargs.get("disk_swap") is True else False
 
     # Gradient symbol and wavefield symbols
     grad = Function(name='grad', grid=model.grid)
     u = TimeFunction(name='u', grid=model.grid, save=geometry.nt if save
-                     else None, time_order=2, space_order=space_order)
+                      and not disk_swap else None, time_order=2, space_order=space_order)
     v = TimeFunction(name='v', grid=model.grid, save=None,
                      time_order=2, space_order=space_order)
     rec = geometry.rec
+    
+    if save and disk_swap:
+        kwargs.update(get_ooc_config(u, "read", **kwargs))
 
     s = model.grid.stepping_dim.spacing
     eqn = iso_stencil(v, model, kernel, forward=False)
