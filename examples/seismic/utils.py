@@ -1,7 +1,7 @@
 import numpy as np
 from argparse import Action, ArgumentError, ArgumentParser
 
-from devito import error, configuration, warning, DiskSwapConfig, create_ds_path
+from devito import error, configuration, warning, DiskSwapConfig, CompressionConfig, create_ds_path
 from devito.tools import Pickable
 from devito.types.sparse import _default_radius
 
@@ -267,7 +267,7 @@ def seismic_args(description):
     return parser
 
 def get_ooc_config(func, mode, **kwargs):
-    cc = False
+    cc = CompressionConfig(method="lossless", value=None)
     if not kwargs.get("ds_path"):
         ds_path = create_ds_path(kwargs["ooc_folder"], kwargs["ooc_folder_path"])
         kwargs["ds_path"] = ds_path
