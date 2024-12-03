@@ -129,7 +129,7 @@ def ForwardOperator(model, geometry, space_order=4,
         Type of discretization, 'OT2' or 'OT4'.
     """
     m = model.m
-    dswap = kwargs.get("disk_swap", False)
+    dswap = kwargs.get("dswap", False)
 
     # Create symbols for forward wavefield, source and receivers
     u = TimeFunction(name='u', grid=model.grid,
@@ -213,7 +213,7 @@ def GradientOperator(model, geometry, space_order=4, save=True,
         Type of discretization, centered or shifted.
     """
     m = model.m
-    dswap = kwargs.get("disk_swap", False)
+    dswap = kwargs.get("dswap", False)
     if dswap:
         save = False
 

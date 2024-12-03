@@ -267,9 +267,24 @@ def seismic_args(description):
     return parser
 
 def get_ooc_config(func, mode, **kwargs):
-    cc = CompressionConfig(method="lossless", value=None)
+    compression_method = kwargs.get("dswap_compression", False)
+    rate = None
+    value = None
+    if compression_method:
+        match compression_method:
+            case "rate":
+                rate = kwargs.get("dswap_compression_value", None)
+            case "accuracy":
+                value = kwargs.get("dswap_compression_value", None)
+            case "precision":
+                value = kwargs.get("dswap_compression_value", None)
+            
+        cc = CompressionConfig(method=compression_method, RATE=rate, value=value)
+    else:
+        cc = False
+    
     if not kwargs.get("ds_path"):
-        ds_path = create_ds_path(kwargs["ooc_folder"], kwargs["ooc_folder_path"])
+        ds_path = create_ds_path(kwargs["dswap_folder"], kwargs["dswap_folder_path"])
         kwargs["ds_path"] = ds_path
     
     dskswap_config = DiskSwapConfig(functions=func, mode=mode, compression=cc, path=kwargs.get("ds_path"))
