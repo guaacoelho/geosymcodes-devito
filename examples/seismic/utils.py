@@ -1,7 +1,7 @@
 import numpy as np
 from argparse import Action, ArgumentError, ArgumentParser
 
-from devito import error, configuration, warning
+from devito import error, configuration, warning, DiskSwapConfig, CompressionConfig, create_ds_path
 from devito.tools import Pickable
 from devito.types.sparse import _default_radius
 
@@ -265,3 +265,28 @@ def seismic_args(description):
     parser.add_argument("-interp", dest="interp", default="linear",
                         choices=['linear', 'sinc'])
     return parser
+
+def get_ooc_config(func, mode, **kwargs):
+    compression_method = kwargs.get("dswap_compression", False)
+    rate = None
+    value = None
+    if compression_method:
+        match compression_method:
+            case "rate":
+                rate = kwargs.get("dswap_compression_value", None)
+            case "accuracy":
+                value = kwargs.get("dswap_compression_value", None)
+            case "precision":
+                value = kwargs.get("dswap_compression_value", None)
+            
+        cc = CompressionConfig(method=compression_method, RATE=rate, value=value)
+    else:
+        cc = False
+    
+    if not kwargs.get("ds_path"):
+        ds_path = create_ds_path(kwargs["dswap_folder"], kwargs["dswap_folder_path"])
+        kwargs["ds_path"] = ds_path
+    
+    dskswap_config = DiskSwapConfig(functions=func, mode=mode, compression=cc, path=kwargs.get("ds_path"))
+    
+    return {'opt': ('advanced', {'disk-swap': dskswap_config})}
