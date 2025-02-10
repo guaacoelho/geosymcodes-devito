@@ -3,6 +3,7 @@ from devito import (Eq, Operator, VectorTimeFunction, TensorTimeFunction,
 from devito import solve
 from examples.seismic import PointSource, Receiver
 from examples.seismic.stiffness.utils import D, S, vec, C_Matrix, gather
+from examples.seismic.utils import get_ooc_config
 
 
 def src_rec(v, tau, model, geometry, forward=True):
@@ -195,11 +196,16 @@ def ForwardOperator(model, geometry, space_order=4, save=False, par='lam-mu', **
         indices (last three time steps). Defaults to False.
     """
 
+    dswap = kwargs.get("dswap", False)
+
     v = VectorTimeFunction(name='v', grid=model.grid,
                            save=geometry.nt if save else None,
                            space_order=space_order, time_order=1)
     tau = TensorTimeFunction(name='tau', grid=model.grid,
                              space_order=space_order, time_order=1)
+
+    if dswap:
+        kwargs.update(get_ooc_config(v, "write", **kwargs))
 
     eqn = elastic_stencil(model, v, tau, par=par)
 
@@ -253,6 +259,11 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
     save : int or Buffer, optional
         Option to store the entire (unrolled) wavefield.
     """
+    
+    dswap = kwargs.get("dswap", False)
+    if dswap:
+        save = False
+    
     # Gradient symbol and wavefield symbols
     grad1 = Function(name='grad1', grid=model.grid)
     grad2 = Function(name='grad2', grid=model.grid)
@@ -275,6 +286,9 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
 
     s = model.grid.time_dim.spacing
     rho = model.rho
+    
+    if dswap:
+        kwargs.update(get_ooc_config(v, "read", **kwargs))
 
     C = C_Matrix(model, par)
 
