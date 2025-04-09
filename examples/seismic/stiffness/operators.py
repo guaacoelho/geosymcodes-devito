@@ -199,7 +199,7 @@ def ForwardOperator(model, geometry, space_order=4, save=False, par='lam-mu', **
     dswap = kwargs.get("dswap", False)
 
     v = VectorTimeFunction(name='v', grid=model.grid,
-                           save=geometry.nt if save else None,
+                           save=geometry.nt if save and not dswap else None,
                            space_order=space_order, time_order=1)
     tau = TensorTimeFunction(name='tau', grid=model.grid,
                              space_order=space_order, time_order=1)
@@ -261,8 +261,6 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
     """
     
     dswap = kwargs.get("dswap", False)
-    if dswap:
-        save = False
     
     # Gradient symbol and wavefield symbols
     grad1 = Function(name='grad1', grid=model.grid)
@@ -270,7 +268,7 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
     grad3 = Function(name='grad3', grid=model.grid)
 
     v = VectorTimeFunction(name='v', grid=model.grid,
-                           save=geometry.nt if save else None,
+                           save=geometry.nt if save and not dswap else None,
                            space_order=space_order, time_order=1)
     u = VectorTimeFunction(name='u', grid=model.grid, space_order=space_order,
                            time_order=1)
