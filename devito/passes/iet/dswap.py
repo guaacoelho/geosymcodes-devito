@@ -32,7 +32,7 @@ from devito.ir.support import (Interval, IntervalGroup, IterationSpace, Backward
 __all__ = ['disk_swap_build', 'disk_swap_efuncs']
 
 
-def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_write, is_mpi, is_compression, io_path, io_folder):
+def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_dim, name_array, is_write, is_mpi, is_compression, io_path, io_folder, verbose):
     """
     This method generates the function open_thread_files according to the operator used.
 
@@ -111,27 +111,27 @@ def open_threads_build(nthreads, files_array, metas_array, i_symbol, nthreads_di
     s_flags = String("S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH")        
     
     if is_write and is_compression:
-        it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
+        if verbose: it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
         it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{exec_id_path}/%s_vec_%d.meta\""), stencil_name_array, i_symbol]))
-        it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
+        if verbose: it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_write, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
     elif is_write and not is_compression:
-        it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
+        if verbose: it_nodes.append(Call(name="printf", arguments=[String("\"Creating file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, op_flags, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
     elif not is_write and is_compression:
-        it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
+        if verbose: it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=files_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))
         it_nodes.append(Call(name="sprintf", arguments=[name_array, String(f"\"{exec_id_path}/%s_vec_%d.meta\""), stencil_name_array, i_symbol]))
-        it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
+        if verbose: it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, o_flags_comp_read, s_flags], retobj=metas_array[i_symbol]))
         it_nodes.append(Conditional(CondEq(metas_array[i_symbol], -1), if_nodes))
     elif not is_write and not is_compression:
-        it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
+        if verbose: it_nodes.append(Call(name="printf", arguments=[String("\"Reading file %s\\n\""), name_array]))
         it_nodes.append(Call(name="open", arguments=[name_array, op_flags, s_flags], retobj=files_array[i_symbol]))   
         it_nodes.append(Conditional(CondEq(files_array[i_symbol], -1), if_nodes))    
     
@@ -284,8 +284,8 @@ def disk_swap_efuncs(iet, **kwargs):
                 mapper[call] = new_get_slices_call
 
     open_threads_callable = open_threads_build(nthreads, files_array, metas_array, i_symbol,
-                                             nthreads_dim, name_array, is_write, 
-                                             is_mpi, is_compression, dswap_config.path, dswap_config.folder)
+                                             nthreads_dim, name_array, is_write, is_mpi,
+                                             is_compression, dswap_config.path, dswap_config.folder, dswap_config.verbose)
     efuncs.append(open_threads_callable)   
     for call in calls:
         if call.name == 'open_thread_files_temp':

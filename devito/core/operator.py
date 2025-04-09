@@ -541,6 +541,9 @@ class DiskSwapConfig(OptOption):
     def _validade_odirect(odirect):
         return bool(odirect)
     
+    def _validate_verbose(verbose):
+        return True if verbose == True else False
+    
     def _get_env_vars():
         #DiskSwapConfig parameters
         env_mode = os.environ.get('DEVITO_DSWAP_MODE')
@@ -591,5 +594,6 @@ class DiskSwapConfig(OptOption):
         obj.compression = cls._validate_compression(comp)
         obj.path = cls._validate_path(kwargs.get('path') or env_path)
         obj.folder = cls._validate_folder(kwargs.get('folder') or env_folder)
-        obj.odirect = cls._validade_odirect(odirect)         
+        obj.odirect = cls._validade_odirect(odirect)
+        obj.verbose = cls._validate_verbose(kwargs.get('verbose'))
         return obj
