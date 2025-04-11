@@ -1,6 +1,6 @@
 import numpy as np
 
-from examples.seismic.stiffness.model import ISOSeismicModel
+from examples.seismic.stiffness.model import ElasticModel
 
 __all__ = ['demo_model']
 
@@ -31,9 +31,9 @@ def demo_model(preset, **kwargs):
         vs = 0.5 * vp
         rho = 1.0
 
-        return ISOSeismicModel(space_order=space_order, vp=vp, vs=vs, rho=rho,
-                               origin=origin, shape=shape, dtype=dtype, spacing=spacing,
-                               nbl=nbl, **kwargs)
+        return ElasticModel(space_order=space_order, vp=vp, vs=vs, rho=rho,
+                            origin=origin, shape=shape, dtype=dtype, spacing=spacing,
+                            nbl=nbl, **kwargs)
 
     elif preset.lower() in ['layers-elastic']:
         # A n-layers model in a 2D or 3D domain with two different
@@ -55,9 +55,9 @@ def demo_model(preset, **kwargs):
         rho[v < 1.51] = 1.0
         vs[v < 1.51] = 0.0
 
-        return ISOSeismicModel(space_order=space_order, vp=v, vs=vs, rho=rho,
-                               origin=origin, shape=shape,
-                               dtype=dtype, spacing=spacing, nbl=nbl, **kwargs)
+        return ElasticModel(space_order=space_order, vp=v, vs=vs, rho=rho,
+                            origin=origin, shape=shape,
+                            dtype=dtype, spacing=spacing, nbl=nbl, **kwargs)
 
     else:
         raise ValueError("Unknown model preset name")
