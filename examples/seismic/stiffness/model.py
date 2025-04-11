@@ -1,7 +1,8 @@
 from examples.seismic import SeismicModel
 
 
-class ISOSeismicModel(SeismicModel):
+class ElasticModel(SeismicModel):
+    _known_parameters = SeismicModel._known_parameters + ['gamma']
 
     def _initialize_physics(self, vp, space_order, **kwargs):
 
@@ -14,7 +15,7 @@ class ISOSeismicModel(SeismicModel):
         try:
             vs = kwargs.pop('vs')
         except:
-            raise Exception("ISOSeismicModel must receive 'vs' as an argument")
+            raise Exception("ElasticModel must receive 'vs' as an argument")
 
         self.lam = self._gen_phys_param((vp**2 - 2. * vs**2)*rho, 'lam', space_order,
                                         is_param=True)

@@ -259,9 +259,9 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
     save : int or Buffer, optional
         Option to store the entire (unrolled) wavefield.
     """
-    
+
     dswap = kwargs.get("dswap", False)
-    
+
     # Gradient symbol and wavefield symbols
     grad1 = Function(name='grad1', grid=model.grid)
     grad2 = Function(name='grad2', grid=model.grid)
@@ -284,7 +284,7 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
 
     s = model.grid.time_dim.spacing
     rho = model.rho
-    
+
     if dswap:
         kwargs.update(get_ooc_config(v, "read", **kwargs))
 
