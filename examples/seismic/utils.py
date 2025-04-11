@@ -7,7 +7,7 @@ from devito.types.sparse import _default_radius
 
 from .source import *
 
-__all__ = ['AcquisitionGeometry', 'setup_geometry', 'seismic_args']
+__all__ = ['AcquisitionGeometry', 'setup_geometry', 'seismic_args', 'get_ooc_config']
 
 
 def setup_geometry(model, tn, f0=0.010, interpolation='linear', **kwargs):
@@ -283,10 +283,10 @@ def get_ooc_config(func, mode, **kwargs):
     else:
         cc = False
     
-    if not kwargs.get("ds_path"):
-        ds_path = create_ds_path(kwargs["dswap_folder"], kwargs["dswap_folder_path"])
-        kwargs["ds_path"] = ds_path
+    if not kwargs.get("dswap_path"):
+        dswap_path = create_ds_path(kwargs["dswap_folder"], kwargs["dswap_folder_path"])
+        kwargs["dswap_path"] = dswap_path
     
-    dskswap_config = DiskSwapConfig(functions=func, mode=mode, compression=cc, path=kwargs.get("ds_path"))
+    dskswap_config = DiskSwapConfig(functions=func, mode=mode, compression=cc, path=kwargs.get("dswap_path"), verbose=kwargs.get("dswap_verbose"))
     
     return {'opt': ('advanced', {'disk-swap': dskswap_config})}

@@ -133,7 +133,7 @@ def ForwardOperator(model, geometry, space_order=4,
 
     # Create symbols for forward wavefield, source and receivers
     u = TimeFunction(name='u', grid=model.grid,
-                     save=geometry.nt if save else None,
+                     save=geometry.nt if save and not dswap else None,
                      time_order=2, space_order=space_order)
     src = geometry.src
     rec = geometry.rec
@@ -214,12 +214,10 @@ def GradientOperator(model, geometry, space_order=4, save=True,
     """
     m = model.m
     dswap = kwargs.get("dswap", False)
-    if dswap:
-        save = False
 
     # Gradient symbol and wavefield symbols
     grad = Function(name='grad', grid=model.grid)
-    u = TimeFunction(name='u', grid=model.grid, save=geometry.nt if save
+    u = TimeFunction(name='u', grid=model.grid, save=geometry.nt if save and not dswap
                       else None, time_order=2, space_order=space_order)
     v = TimeFunction(name='v', grid=model.grid, save=None,
                      time_order=2, space_order=space_order)
