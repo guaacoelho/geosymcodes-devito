@@ -1,4 +1,5 @@
 from examples.seismic import SeismicModel
+from examples.seismic.stiffness.utils import C_Matrix
 
 
 class ElasticModel(SeismicModel):
@@ -32,3 +33,17 @@ class ElasticModel(SeismicModel):
                 field = self._gen_phys_param(kwargs.get(name), name, space_order)
                 setattr(self, name, field)
                 params.append(name)
+
+        self._initialize_C_arguments(space_order, **kwargs)
+
+    def _initialize_C_arguments(self, space_order, **kwargs):
+        symbs_C = C_Matrix.symbolic_matrix(self.dim).free_symbols
+        for s in symbs_C:
+            if s.name in kwargs:
+                new_parameter = self._gen_phys_param(kwargs.get(s.name), s.name,
+                                                     space_order, is_param=True)
+                setattr(self, s.name, new_parameter)
+
+                # Mark if the C_Matrix parameters have been initialized
+                if not hasattr(self, "has_C_params"):
+                    self.has_C_params = True
