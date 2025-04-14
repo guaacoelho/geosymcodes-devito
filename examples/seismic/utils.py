@@ -271,22 +271,21 @@ def get_ooc_config(func, mode, **kwargs):
     rate = None
     value = None
     if compression_method:
-        match compression_method:
-            case "rate":
+        if compression_method == "rate":
                 rate = kwargs.get("dswap_compression_value", None)
-            case "accuracy":
+        elif compression_method == "accuracy":
                 value = kwargs.get("dswap_compression_value", None)
-            case "precision":
+        elif compression_method == "precision":
                 value = kwargs.get("dswap_compression_value", None)
-            
+
         cc = CompressionConfig(method=compression_method, RATE=rate, value=value)
     else:
         cc = False
-    
+
     if not kwargs.get("dswap_path"):
         dswap_path = create_ds_path(kwargs["dswap_folder"], kwargs["dswap_folder_path"])
         kwargs["dswap_path"] = dswap_path
-    
+
     dskswap_config = DiskSwapConfig(functions=func, mode=mode, compression=cc, path=kwargs.get("dswap_path"), verbose=kwargs.get("dswap_verbose"))
-    
+
     return {'opt': ('advanced', {'disk-swap': dskswap_config})}
