@@ -11,6 +11,8 @@ class C_Matrix():
                            'Ip-Is-rho': 'C_Ip_Is_rho'}
 
     def __new__(cls, model, parameters):
+        if getattr(model, "has_C_params", None):
+            return cls.C_from_model(model)
         c_m_gen = cls.C_matrix_gen(parameters)
         return c_m_gen(model)
 
@@ -28,6 +30,32 @@ class C_Matrix():
         d = dim*2 + dim-2
         Cij = [[cij(i, j) for i in range(1, d)] for j in range(1, d)]
         return Matrix(Cij)
+
+    @classmethod
+    def C_from_model(cls, model):
+        def subsC():
+            dict_C = {'C11': getattr(model, 'C11', 0),
+                      'C22': getattr(model, 'C22', 0),
+                      'C33': getattr(model, 'C33', 0),
+                      'C12': getattr(model, 'C12', 0)}
+            if model.dim == 3:
+                dict_C['C44'] = getattr(model, 'C44', 0)
+                dict_C['C55'] = getattr(model, 'C55', 0)
+                dict_C['C66'] = getattr(model, 'C66', 0)
+                dict_C['C13'] = getattr(model, 'C13', 0)
+                dict_C['C23'] = getattr(model, 'C23', 0)
+
+            return dict_C
+
+        matriz = C_Matrix._matrix_init(model.dim)
+        subs = subsC()
+
+        M = matriz.subs(subs)
+        return M
+
+    @classmethod
+    def symbolic_matrix(cls, dim):
+        return cls._matrix_init(dim)
 
     @classmethod
     def C_lambda_mu(cls, model):
