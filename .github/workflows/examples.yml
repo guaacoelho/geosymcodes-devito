@@ -71,6 +71,7 @@ jobs:
       run: |
         python examples/seismic/elastic/elastic_example.py
         python examples/seismic/viscoelastic/viscoelastic_example.py
+        python examples/seismic/stiffness/iso_elastic_example.py
 
     - name: Linear algebra example
       run: |
