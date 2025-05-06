@@ -8,11 +8,9 @@ from sympy import symbols, Matrix, ones
 class C_Matrix():
 
     C_matrix_dependency = {'lam-mu': 'C_lambda_mu', 'vp-vs-rho': 'C_vp_vs_rho',
-                           'Ip-Is-rho': 'C_Ip_Is_rho'}
+                           'Ip-Is-rho': 'C_Ip_Is_rho', 'C-elements': 'C_from_model'}
 
     def __new__(cls, model, parameters):
-        if getattr(model, "has_C_params", None):
-            return cls.C_from_model(model)
         c_m_gen = cls.C_matrix_gen(parameters)
         return c_m_gen(model)
 
@@ -20,9 +18,12 @@ class C_Matrix():
     def C_matrix_gen(cls, parameters):
         return getattr(cls, cls.C_matrix_dependency[parameters])
 
-    def _matrix_init(dim):
-        def cij(i, j):
-            ii, jj = min(i, j), max(i, j)
+    def _matrix_init(dim, asymmetrical=False):
+        def cij(ii, jj):
+            if not asymmetrical:
+                # It reorders the indices so that the smaller one comes first
+                # (e.g., C₂₁ becomes C₁₂), thereby enforcing matrix symmetry
+                ii, jj = min(ii, jj), max(ii, jj)
             if (ii == jj or (ii <= dim and jj <= dim)):
                 return symbols('C%s%s' % (ii, jj))
             return 0
@@ -37,25 +38,28 @@ class C_Matrix():
             dict_C = {'C11': getattr(model, 'C11', 0),
                       'C22': getattr(model, 'C22', 0),
                       'C33': getattr(model, 'C33', 0),
-                      'C12': getattr(model, 'C12', 0)}
+                      'C12': getattr(model, 'C12', 0),
+                      'C21': getattr(model, 'C21', 0)}
             if model.dim == 3:
                 dict_C['C44'] = getattr(model, 'C44', 0)
                 dict_C['C55'] = getattr(model, 'C55', 0)
                 dict_C['C66'] = getattr(model, 'C66', 0)
                 dict_C['C13'] = getattr(model, 'C13', 0)
                 dict_C['C23'] = getattr(model, 'C23', 0)
+                dict_C['C31'] = getattr(model, 'C31', 0)
+                dict_C['C32'] = getattr(model, 'C32', 0)
 
             return dict_C
 
-        matriz = C_Matrix._matrix_init(model.dim)
+        matriz = C_Matrix._matrix_init(model.dim, asymmetrical=True)
         subs = subsC()
 
         M = matriz.subs(subs)
         return M
 
     @classmethod
-    def symbolic_matrix(cls, dim):
-        return cls._matrix_init(dim)
+    def symbolic_matrix(cls, dim, asymmetrical=False):
+        return cls._matrix_init(dim, asymmetrical=asymmetrical)
 
     @classmethod
     def C_lambda_mu(cls, model):

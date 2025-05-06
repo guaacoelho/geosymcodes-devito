@@ -37,13 +37,16 @@ class ElasticModel(SeismicModel):
         self._initialize_C_arguments(space_order, **kwargs)
 
     def _initialize_C_arguments(self, space_order, **kwargs):
-        symbs_C = C_Matrix.symbolic_matrix(self.dim).free_symbols
-        for s in symbs_C:
-            if s.name in kwargs:
+        symbs_C = C_Matrix.symbolic_matrix(self.dim, asymmetrical=True).free_symbols
+
+        missing_params = [s.name for s in symbs_C if s.name not in kwargs]
+        if missing_params and len(missing_params) != len(symbs_C):
+            raise ValueError(f"If you define a value for matrix C, you must define values \
+                               for all its elements. \
+                               Missing: {', '.join(missing_params)}")
+
+        if not missing_params:
+            for s in symbs_C:
                 new_parameter = self._gen_phys_param(kwargs.get(s.name), s.name,
                                                      space_order, is_param=True)
                 setattr(self, s.name, new_parameter)
-
-                # Mark if the C_Matrix parameters have been initialized
-                if not hasattr(self, "has_C_params"):
-                    self.has_C_params = True
