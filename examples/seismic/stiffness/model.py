@@ -41,9 +41,10 @@ class ElasticModel(SeismicModel):
 
         missing_params = [s.name for s in symbs_C if s.name not in kwargs]
         if missing_params and len(missing_params) != len(symbs_C):
-            raise ValueError(f"If you define a value for matrix C, you must define values \
-                               for all its elements. \
-                               Missing: {', '.join(missing_params)}")
+            raise ValueError(
+                f"If you define a value for matrix C, you must define values "
+                f"for all its elements. Missing: {', '.join(missing_params)}"
+            )
 
         if not missing_params:
             for s in symbs_C:
