@@ -15,7 +15,7 @@ class ElasticModel(SeismicModel):
         missing_args = [arg for arg in mandatory_args if arg not in kwargs]
         if missing_args:
             raise Exception(f"ElasticModel must receive {', '.join(missing_args)} as argument(s)")
-    
+
         vs = kwargs.pop('vs')
         rho = kwargs.get('rho')
 
