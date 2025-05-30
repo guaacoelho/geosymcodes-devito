@@ -6,18 +6,20 @@ class ElasticModel(SeismicModel):
     _known_parameters = SeismicModel._known_parameters + ['gamma']
 
     def _initialize_physics(self, vp, space_order, **kwargs):
+        # list o physical parameters there are mandatory for ElasticModel initialization
+        mandatory_args = ('vs', 'rho')
 
         params = []
-        # Buoyancy
-        rho = kwargs.get('rho', 1)
+
+        # Check for the mandatory presence of physical attributes
+        missing_args = [arg for arg in mandatory_args if arg not in kwargs]
+        if missing_args:
+            raise Exception(f"ElasticModel must receive {', '.join(missing_args)} as argument(s)")
+    
+        vs = kwargs.pop('vs')
+        rho = kwargs.get('rho')
+
         self.rho = self._gen_phys_param(rho, 'rho', space_order)
-
-        # Initialize elastic with Lame parametrization
-        try:
-            vs = kwargs.pop('vs')
-        except:
-            raise Exception("ElasticModel must receive 'vs' as an argument")
-
         self.lam = self._gen_phys_param((vp**2 - 2. * vs**2)*rho, 'lam', space_order,
                                         is_param=True)
         self.mu = self._gen_phys_param((vs**2) * rho, 'mu', space_order, is_param=True)
