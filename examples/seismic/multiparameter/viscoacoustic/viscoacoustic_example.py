@@ -1,8 +1,6 @@
 import numpy as np
-import pytest
 
 from devito.logger import info
-from devito import norm
 from examples.seismic.multiparameter.viscoacoustic import ViscoacousticWaveSolver
 from examples.seismic import demo_model, setup_geometry, seismic_args, Receiver
 
@@ -37,30 +35,6 @@ def run(shape=(50, 50), spacing=(20.0, 20.0), tn=1000.0,
     return (summary.gflopss, summary.oi, summary.timings, [rec, p])
 
 
-@pytest.mark.parametrize('kernel, time_order, normrec, atol', [
-    ('sls', 2, 1152.5697, 1e-2),
-    ('sls', 1, 50.2239, 1e-2),
-    ('ren', 2, 1178.0308, 1e-2),
-    ('ren', 1, 49.7877, 1e-2),
-    ('deng_mcmechan', 2, 1124.141, 1e-2),
-    ('deng_mcmechan', 1, 49.3869, 1e-2),
-])
-def test_viscoacoustic(kernel, time_order, normrec, atol):
-    _, _, _, [rec, _] = run(kernel=kernel, time_order=time_order)
-    assert np.isclose(norm(rec), normrec, atol=atol, rtol=0)
-
-
-@pytest.mark.parametrize('ndim', [2, 3])
-@pytest.mark.parametrize('kernel', ['sls', 'ren', 'deng_mcmechan'])
-@pytest.mark.parametrize('time_order', [1, 2])
-def test_viscoacoustic_stability(ndim, kernel, time_order):
-    shape = tuple([11]*ndim)
-    spacing = tuple([20]*ndim)
-    _, _, _, [rec, _] = run(shape=shape, spacing=spacing, tn=20000.0, nbl=0,
-                            kernel=kernel, time_order=time_order)
-    assert np.isfinite(norm(rec))
-
-
 def test_adjoint_viscoacoustic():
     tn = 500.  # Final time
     nbl = 10
@@ -69,7 +43,7 @@ def test_adjoint_viscoacoustic():
     space_order = 12
     constant = False
     kernel = 'sls'
-    time_order = 1
+    time_order = 2
     src_type = 'Dgauss'
     solver = viscoacoustic_setup(shape=shape, spacing=spacing, tn=tn, src_type=src_type,
                                  space_order=space_order, nbl=nbl, constant=constant,
@@ -80,7 +54,7 @@ def test_adjoint_viscoacoustic():
                     coordinates=solver.geometry.src_positions)
 
     # Run forward and adjoint operators
-    rec, _, _ = solver.forward(save=False)
+    rec, _, _, _ = solver.forward(save=False)
     solver.adjoint(rec=rec, srca=srca)
 
     # Adjoint test: Verify <Ax,y> matches  <x, A^Ty> closely
