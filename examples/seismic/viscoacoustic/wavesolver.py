@@ -307,13 +307,17 @@ class ViscoacousticWaveSolver:
                 kwargs.update({k.name: k for k in va})
                 kwargs['time_m'] = 0
 
-            # Memory variable:
-            r = r or TimeFunction(name="r", grid=self.model.grid,
-                                  time_order=self.time_order,
-                                  space_order=self.space_order, staggered=NODE)
+            if self.kernel == 'sls':
+                # Memory variable:
+                r = r or TimeFunction(name="r", grid=self.model.grid,
+                                    time_order=self.time_order,
+                                    space_order=self.space_order, staggered=NODE)
 
-            summary = self.op_grad().apply(rec=rec, grad=grad, pa=pa, p=p, r=r, dt=dt,
-                                           **kwargs)
+                summary = self.op_grad().apply(rec=rec, grad=grad, pa=pa, p=p, r=r, dt=dt,
+                                            **kwargs)
+            else:
+                summary = self.op_grad().apply(rec=rec, grad=grad, pa=pa, p=p, dt=dt,
+                                            **kwargs)
 
         return grad, summary
 
