@@ -7,7 +7,7 @@ from examples.seismic import demo_model
 from examples.seismic.acoustic import acoustic_setup
 from examples.seismic.tti import tti_setup
 from examples.seismic.viscoacoustic import viscoacoustic_setup
-from examples.seismic.stiffness import iso_elastic_setup
+from examples.seismic.stiffness import generic_elastic_setup
 
 presets = {
     'constant': {'preset': 'constant-isotropic'},
@@ -86,15 +86,15 @@ class TestAdjoint:
         ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 4, 2, viscoacoustic_setup),
         ('layers-viscoacoustic', (20, 25, 20), 'maxwell', 2, 2, viscoacoustic_setup),
         # 2D elastic tests with varying space orders
-        ('layers-elastic', (20, 25), None, 2, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25), None, 4, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25), None, 8, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25), None, 12, 1, iso_elastic_setup),
+        ('layers-elastic', (20, 25), None, 2, 1, generic_elastic_setup),
+        ('layers-elastic', (20, 25), None, 4, 1, generic_elastic_setup),
+        ('layers-elastic', (20, 25), None, 8, 1, generic_elastic_setup),
+        ('layers-elastic', (20, 25), None, 12, 1, generic_elastic_setup),
         # 3D elastic tests with varying space orders
-        ('layers-elastic', (20, 25, 20), None, 2, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25, 20), None, 4, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25, 20), None, 8, 1, iso_elastic_setup),
-        ('layers-elastic', (20, 25, 20), None, 12, 1, iso_elastic_setup),
+        ('layers-elastic', (20, 25, 20), None, 2, 1, generic_elastic_setup),
+        ('layers-elastic', (20, 25, 20), None, 4, 1, generic_elastic_setup),
+        ('layers-elastic', (20, 25, 20), None, 8, 1, generic_elastic_setup),
+        ('layers-elastic', (20, 25, 20), None, 12, 1, generic_elastic_setup),
     ])
     def test_adjoint_F(self, mkey, shape, kernel, space_order, time_order, setup_func):
         """
