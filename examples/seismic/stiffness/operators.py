@@ -213,7 +213,7 @@ def ForwardOperator(model, geometry, space_order=4, save=False, par='lam-mu', **
 
     # Substitute spacing terms to reduce flops
     return Operator(eqn + src_expr + rec_expr, subs=model.spacing_map,
-                    name="ForwardIsoElastic", **kwargs)
+                    name="ForwardGenericElastic", **kwargs)
 
 
 def AdjointOperator(model, geometry, space_order=4, par='lam-mu', **kwargs):
@@ -241,7 +241,7 @@ def AdjointOperator(model, geometry, space_order=4, par='lam-mu', **kwargs):
 
     # Substitute spacing terms to reduce flops
     return Operator(eqn + src_expr + rec_expr, subs=model.spacing_map,
-                    name='AdjointIsoElastic', **kwargs)
+                    name='AdjointGenericElastic', **kwargs)
 
 
 def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **kwargs):
