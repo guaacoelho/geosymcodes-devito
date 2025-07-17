@@ -1,7 +1,7 @@
 from devito.types.tensor import (TensorFunction, TensorTimeFunction,
                                  VectorFunction, VectorTimeFunction, tens_func)
 import numpy as np
-
+from math import ceil
 from sympy import symbols, Matrix, ones
 
 
@@ -30,7 +30,7 @@ class C_Matrix():
 
         d = dim*2 + dim-2
         Cij = [[cij(i, j) for i in range(1, d)] for j in range(1, d)]
-        return Matrix(Cij)
+        return AuxiliaryMatrix(Cij)
 
     @classmethod
     def C_from_model(cls, model):
@@ -56,6 +56,21 @@ class C_Matrix():
 
         M = matriz.subs(subs)
         return M
+
+    def _generate_Dc(derivative, dims):
+        # Gets the name of the element being used to calculate 
+        # the derivative (removing the 'd' from the beginning)
+        element = derivative[1:]
+        matrix = C_Matrix._matrix_init(dims, asymmetrical=True)
+        # Iterates through all positions of the 2D matrix
+        for i in range(matrix.shape[0]):
+            for j in range(matrix.shape[1]):
+                c = matrix[i, j]
+                if getattr(c, 'name', None) == element:
+                    matrix[i, j] = 1
+                else:
+                    matrix[i, j] = 0
+        return matrix
 
     @classmethod
     def symbolic_matrix(cls, dim, asymmetrical=False):
@@ -339,6 +354,23 @@ class C_Matrix():
         subs = subs3D() if model.dim == 3 else subs2D()
         return D_Is.subs(subs)
 
+class AuxiliaryMatrix(Matrix):
+
+    def __getattr__(self, name):
+        dims = ceil(self.cols/2)
+        dc_list = self._build_Clist(dims)
+
+        # if the desired attribute is in the list of derivative symbols (dc_list),
+        # generate its respective derivative matrix
+        if name in dc_list:
+            return C_Matrix._generate_Dc(name, dims)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    
+    def _build_Clist(self, dims):
+        # generates the list of acceptable names indicating which derivative matrix should be constructed
+        symbs_C = C_Matrix.symbolic_matrix(dims, asymmetrical=True).free_symbols
+        dc_list = ['d'+ c.name for c in symbs_C]
+        return dc_list
 
 def D(self, shift=None):
     """
