@@ -58,7 +58,7 @@ class C_Matrix():
         return M
 
     def _generate_Dc(derivative, dims):
-        # Gets the name of the element being used to calculate 
+        # Gets the name of the element being used to calculate
         # the derivative (removing the 'd' from the beginning)
         element = derivative[1:]
         matrix = C_Matrix._matrix_init(dims, asymmetrical=True)
@@ -354,6 +354,7 @@ class C_Matrix():
         subs = subs3D() if model.dim == 3 else subs2D()
         return D_Is.subs(subs)
 
+
 class AuxiliaryMatrix(Matrix):
 
     def __getattr__(self, name):
@@ -365,12 +366,14 @@ class AuxiliaryMatrix(Matrix):
         if name in dc_list:
             return C_Matrix._generate_Dc(name, dims)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-    
+
     def _build_Clist(self, dims):
-        # generates the list of acceptable names indicating which derivative matrix should be constructed
+        # generates the list of acceptable names indicating which derivative
+        # matrix should be constructed
         symbs_C = C_Matrix.symbolic_matrix(dims, asymmetrical=True).free_symbols
-        dc_list = ['d'+ c.name for c in symbs_C]
+        dc_list = ['d' + c.name for c in symbs_C]
         return dc_list
+
 
 def D(self, shift=None):
     """

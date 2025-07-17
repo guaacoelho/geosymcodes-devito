@@ -180,28 +180,30 @@ def EqsIpIs(model, sig, u, v, grad_Ip, grad_Is, grad_rho, C, space_order=8):
 
 def EqsC11C12C33(model, sig, u, v, grad_C11, grad_C12, grad_C33, C, space_order=8):
     hC11 = TimeFunction(name='hC11', grid=model.grid, space_order=space_order,
-                       time_order=1)
+                        time_order=1)
     hC12 = TimeFunction(name='hC12', grid=model.grid, space_order=space_order,
-                       time_order=1)
+                        time_order=1)
     hC33 = TimeFunction(name='hC33', grid=model.grid, space_order=space_order,
-                      time_order=1)
- 
+                        time_order=1)
+
     WC11 = gather(0, -C.dC11 * S(v))
     WC12 = gather(0, -C.dC12 * S(v))
     WC33 = gather(0, - C.dC33 * S(v))
- 
+
     W2 = gather(u, sig)
- 
+
     wC11_update = Eq(hC11, WC11.T * W2)
     gradient_C11 = Eq(grad_C11, grad_C11 - hC11)
- 
+
     wC12_update = Eq(hC12, WC12.T * W2)
     gradient_C12 = Eq(grad_C12, grad_C12 - hC12)
- 
+
     wC33_update = Eq(hC33, WC33.T * W2)
     gradient_C33 = Eq(grad_C33, grad_C33 - hC33)
- 
-    return [wC11_update, gradient_C11, wC12_update, gradient_C12, wC33_update, gradient_C33]
+
+    return [wC11_update, gradient_C11, wC12_update,
+            gradient_C12, wC33_update, gradient_C33]
+
 
 def ForwardOperator(model, geometry, space_order=4, save=False, par='lam-mu', **kwargs):
     """
@@ -343,4 +345,5 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
                     name='GradientElastic', **kwargs)
 
 
-kernels = {'lam-mu': EqsLamMu, 'vp-vs-rho': EqsVpVsRho, 'Ip-Is-rho': EqsIpIs, 'C-elements':EqsC11C12C33}
+kernels = {'lam-mu': EqsLamMu, 'vp-vs-rho': EqsVpVsRho, 'Ip-Is-rho': EqsIpIs,
+           'C-elements': EqsC11C12C33}
