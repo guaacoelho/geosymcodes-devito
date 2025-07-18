@@ -181,7 +181,7 @@ class GenericElasticWaveSolver(object):
         return srca, u, sig, summary
 
     def jacobian_adjoint(self, rec_vx, rec_vz, v, u=None, sig=None, rec_vy=None,
-                         grad1=None, grad2=None, grad3=None, model=None,
+                         grad1=None, grad2=None, grad3=None, grad4=None, model=None,
                          checkpointing=False, par='lam-mu', **kwargs):
         """
         Gradient modelling function for computing the adjoint of the
@@ -219,6 +219,7 @@ class GenericElasticWaveSolver(object):
         grad1 = grad1 or Function(name='grad1', grid=self.model.grid)
         grad2 = grad2 or Function(name='grad2', grid=self.model.grid)
         grad3 = grad3 or Function(name='grad3', grid=self.model.grid)
+        grad4 = grad4 or Function(name='grad4', grid=self.model.grid)
 
         u = u or VectorTimeFunction(name="u", grid=self.model.grid,
                                     time_order=1, space_order=self.space_order)
@@ -241,9 +242,15 @@ class GenericElasticWaveSolver(object):
 
         has_rec_p = True if kwargs.get('rec_p', None) else None
         op = self.op_grad(par=par, has_rec_p=has_rec_p)
-        summary = op.apply(rec_vx=rec_vx, rec_vz=rec_vz, grad1=grad1,
-                           grad2=grad2, grad3=grad3,
+        if par == 'Iso-C11C12C33':
+            summary = op.apply(rec_vx=rec_vx, rec_vz=rec_vz, grad1=grad1,
+                           grad2=grad2, grad3=grad3, grad4=grad4,
                            dt=kwargs.pop('dt', self.dt), **kwargs)
+            return grad1, grad2, grad3, grad4, summary
+        else:
+            summary = op.apply(rec_vx=rec_vx, rec_vz=rec_vz, grad1=grad1,
+                            grad2=grad2, grad3=grad3,
+                            dt=kwargs.pop('dt', self.dt), **kwargs)
 
         return grad1, grad2, grad3, summary
 
