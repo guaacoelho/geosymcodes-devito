@@ -9,7 +9,8 @@ from sympy import symbols, Matrix, ones
 class C_Matrix():
 
     C_matrix_dependency = {'lam-mu': 'C_lambda_mu', 'vp-vs-rho': 'C_vp_vs_rho',
-                           'Ip-Is-rho': 'C_Ip_Is_rho', 'C-elements': 'C_from_model'}
+                           'Ip-Is-rho': 'C_Ip_Is_rho', 'C-elements': 'C_from_model',
+                           'Iso-C11C12C33':'CISO_from_model'}
 
     def __new__(cls, model, parameters):
         c_m_gen = cls.C_matrix_gen(parameters)
@@ -84,12 +85,10 @@ class C_Matrix():
         subs = subsC()
 
         M = matriz.subs(subs)
-        # Geração da matriz simbólica no formato Iso-C11C12C33
-        M.IsoC = C_Matrix._generate_ISO_C(model)
         return M
 
     @staticmethod
-    def _generate_ISO_C(model):
+    def CISO_from_model(model):
         def subsC():
             # Geração da matriz simbólica no formato Iso-C11C12C33
             dict_C = {'C11': getattr(model, 'C11', 0),
