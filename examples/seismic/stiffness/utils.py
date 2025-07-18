@@ -48,7 +48,7 @@ class C_Matrix():
                       'C12': getattr(model, 'C12'),
                       'C21': getattr(model, 'C21'),
                       'C13': getattr(model, 'C13'),
-                      'C31': getattr(model, 'C31'),}
+                      'C31': getattr(model, 'C31')}
             if model.dim == 3:
                 dict_C['C14'] = getattr(model, 'C14')
                 dict_C['C15'] = getattr(model, 'C15')
@@ -95,7 +95,7 @@ class C_Matrix():
             dict_C = {'C11': getattr(model, 'C11', 0),
                       'C22': getattr(model, 'C11', 0),
                       'C33': getattr(model, 'C33', 0),
-                      'C12': getattr(model, 'C12', 0),}
+                      'C12': getattr(model, 'C12', 0)}
             if model.dim == 3:
                 dict_C['C44'] = getattr(model, 'C44', 0)
                 dict_C['C55'] = getattr(model, 'C55', 0)
@@ -116,7 +116,8 @@ class C_Matrix():
         # the derivative (removing the 'd' from the beginning)
         element = derivative[1:]
 
-        # Makes a copy to avoid impacting future results due to Python's reference assignment
+        # Makes a copy to avoid impacting future results due to Python's
+        # reference assignment
         matrix = copy.deepcopy(symbolic_matrix)
         # Iterates through all positions of the 2D matrix
         for i in range(matrix.shape[0]):
