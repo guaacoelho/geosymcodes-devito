@@ -40,7 +40,7 @@ class C_Matrix():
     @classmethod
     def C_from_model(cls, model):
         def subsC():
-            # Geração da matriz simbólica completa
+            # Generation of the complete symbolic matrix
             dict_C = {'C11': getattr(model, 'C11'),
                       'C22': getattr(model, 'C22'),
                       'C33': getattr(model, 'C33'),
@@ -90,7 +90,7 @@ class C_Matrix():
     @staticmethod
     def CISO_from_model(model):
         def subsC():
-            # Geração da matriz simbólica no formato Iso-C11C12C33
+            # Generation of the symbolic matrix in the Iso-C11C12C33 format
             dict_C = {'C11': getattr(model, 'C11', 0),
                       'C22': getattr(model, 'C11', 0),
                       'C33': getattr(model, 'C33', 0),
