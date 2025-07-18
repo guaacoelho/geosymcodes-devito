@@ -1,6 +1,7 @@
 from devito.types.tensor import (TensorFunction, TensorTimeFunction,
                                  VectorFunction, VectorTimeFunction, tens_func)
 import numpy as np
+import copy
 from math import ceil
 from sympy import symbols, Matrix, ones
 
@@ -18,14 +19,17 @@ class C_Matrix():
     def C_matrix_gen(cls, parameters):
         return getattr(cls, cls.C_matrix_dependency[parameters])
 
-    def _matrix_init(dim, asymmetrical=False):
+    def _matrix_init(dim, asymmetrical=False, full_matrix=False):
         def cij(ii, jj):
+            if full_matrix:
+                # If you want the matrix to be fully populated with symbolic elements
+                return symbols('C%s%s' % (jj, ii))
             if not asymmetrical:
                 # It reorders the indices so that the smaller one comes first
                 # (e.g., C₂₁ becomes C₁₂), thereby enforcing matrix symmetry
-                ii, jj = min(ii, jj), max(ii, jj)
+                jj, ii = min(ii, jj), max(ii, jj)
             if (ii == jj or (ii <= dim and jj <= dim)):
-                return symbols('C%s%s' % (ii, jj))
+                return symbols('C%s%s' % (jj, ii))
             return 0
 
         d = dim*2 + dim-2
@@ -35,33 +39,86 @@ class C_Matrix():
     @classmethod
     def C_from_model(cls, model):
         def subsC():
+            # Geração da matriz simbólica completa
+            dict_C = {'C11': getattr(model, 'C11'),
+                      'C22': getattr(model, 'C22'),
+                      'C33': getattr(model, 'C33'),
+                      'C32': getattr(model, 'C32'),
+                      'C23': getattr(model, 'C23'),
+                      'C12': getattr(model, 'C12'),
+                      'C21': getattr(model, 'C21'),
+                      'C13': getattr(model, 'C13'),
+                      'C31': getattr(model, 'C31')}
+            if model.dim == 3:
+                dict_C['C14'] = getattr(model, 'C14')
+                dict_C['C15'] = getattr(model, 'C15')
+                dict_C['C16'] = getattr(model, 'C16')
+                dict_C['C24'] = getattr(model, 'C24')
+                dict_C['C25'] = getattr(model, 'C25')
+                dict_C['C26'] = getattr(model, 'C26')
+                dict_C['C34'] = getattr(model, 'C34')
+                dict_C['C35'] = getattr(model, 'C35')
+                dict_C['C36'] = getattr(model, 'C36')
+                dict_C['C41'] = getattr(model, 'C41')
+                dict_C['C42'] = getattr(model, 'C42')
+                dict_C['C43'] = getattr(model, 'C43')
+                dict_C['C44'] = getattr(model, 'C44')
+                dict_C['C45'] = getattr(model, 'C45')
+                dict_C['C46'] = getattr(model, 'C46')
+                dict_C['C51'] = getattr(model, 'C51')
+                dict_C['C52'] = getattr(model, 'C52')
+                dict_C['C53'] = getattr(model, 'C53')
+                dict_C['C54'] = getattr(model, 'C54')
+                dict_C['C55'] = getattr(model, 'C55')
+                dict_C['C56'] = getattr(model, 'C56')
+                dict_C['C61'] = getattr(model, 'C61')
+                dict_C['C62'] = getattr(model, 'C62')
+                dict_C['C63'] = getattr(model, 'C63')
+                dict_C['C64'] = getattr(model, 'C64')
+                dict_C['C65'] = getattr(model, 'C65')
+                dict_C['C66'] = getattr(model, 'C66')
+
+            return dict_C
+
+        matriz = C_Matrix._matrix_init(model.dim, asymmetrical=True, full_matrix=True)
+        subs = subsC()
+
+        M = matriz.subs(subs)
+        # Geração da matriz simbólica no formato Iso-C11C12C33
+        M.IsoC = C_Matrix._generate_ISO_C(model)
+        return M
+
+    @staticmethod
+    def _generate_ISO_C(model):
+        def subsC():
+            # Geração da matriz simbólica no formato Iso-C11C12C33
             dict_C = {'C11': getattr(model, 'C11', 0),
-                      'C22': getattr(model, 'C22', 0),
+                      'C22': getattr(model, 'C11', 0),
                       'C33': getattr(model, 'C33', 0),
-                      'C12': getattr(model, 'C12', 0),
-                      'C21': getattr(model, 'C21', 0)}
+                      'C12': getattr(model, 'C12', 0)}
             if model.dim == 3:
                 dict_C['C44'] = getattr(model, 'C44', 0)
                 dict_C['C55'] = getattr(model, 'C55', 0)
                 dict_C['C66'] = getattr(model, 'C66', 0)
                 dict_C['C13'] = getattr(model, 'C13', 0)
                 dict_C['C23'] = getattr(model, 'C23', 0)
-                dict_C['C31'] = getattr(model, 'C31', 0)
-                dict_C['C32'] = getattr(model, 'C32', 0)
-
             return dict_C
 
-        matriz = C_Matrix._matrix_init(model.dim, asymmetrical=True)
+        matrix = C_Matrix._matrix_init(model.dim)
         subs = subsC()
 
-        M = matriz.subs(subs)
+        M = matrix.subs(subs)
         return M
 
-    def _generate_Dc(derivative, dims):
+    @staticmethod
+    def _generate_Dc(derivative, symbolic_matrix):
         # Gets the name of the element being used to calculate
         # the derivative (removing the 'd' from the beginning)
         element = derivative[1:]
-        matrix = C_Matrix._matrix_init(dims, asymmetrical=True)
+
+        # Makes a copy to avoid impacting future results due to Python's
+        # reference assignment
+        matrix = copy.deepcopy(symbolic_matrix)
         # Iterates through all positions of the 2D matrix
         for i in range(matrix.shape[0]):
             for j in range(matrix.shape[1]):
@@ -73,8 +130,8 @@ class C_Matrix():
         return matrix
 
     @classmethod
-    def symbolic_matrix(cls, dim, asymmetrical=False):
-        return cls._matrix_init(dim, asymmetrical=asymmetrical)
+    def symbolic_matrix(cls, dim, asymmetrical=False, full_matrix=False):
+        return cls._matrix_init(dim, asymmetrical=asymmetrical, full_matrix=full_matrix)
 
     @classmethod
     def C_lambda_mu(cls, model):
@@ -358,18 +415,18 @@ class C_Matrix():
 class AuxiliaryMatrix(Matrix):
 
     def __getattr__(self, name):
-        dims = ceil(self.cols/2)
-        dc_list = self._build_Clist(dims)
+        dc_list = self._build_Clist()
 
         # if the desired attribute is in the list of derivative symbols (dc_list),
         # generate its respective derivative matrix
         if name in dc_list:
-            return C_Matrix._generate_Dc(name, dims)
+            return C_Matrix._generate_Dc(name, self)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-    def _build_Clist(self, dims):
+    def _build_Clist(self):
         # generates the list of acceptable names indicating which derivative
         # matrix should be constructed
+        dims = ceil(self.cols/2)
         symbs_C = C_Matrix.symbolic_matrix(dims, asymmetrical=True).free_symbols
         dc_list = ['d' + c.name for c in symbs_C]
         return dc_list

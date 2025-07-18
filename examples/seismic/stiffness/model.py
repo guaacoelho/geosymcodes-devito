@@ -39,7 +39,7 @@ class ElasticModel(SeismicModel):
         self._initialize_C_arguments(space_order, **kwargs)
 
     def _initialize_C_arguments(self, space_order, **kwargs):
-        symbs_C = C_Matrix.symbolic_matrix(self.dim, asymmetrical=True).free_symbols
+        symbs_C = C_Matrix.symbolic_matrix(self.dim, asymmetrical=True, full_matrix=True).free_symbols
 
         missing_params = [s.name for s in symbs_C if s.name not in kwargs]
         if missing_params and len(missing_params) != len(symbs_C):
