@@ -97,7 +97,7 @@ def elastic_stencil(model, v, tau, forward=True, par='lam-mu'):
         return [u_v, u_t]
 
 
-def EqsLamMu(model, sig, u, v, grad_lam, grad_mu, grad_rho, C, space_order=8):
+def EqsLamMu(model, sig, u, v, grad_lam, grad_mu, grad_rho, C, space_order=8, **kwargs):
     hl = TimeFunction(name='hl', grid=model.grid, space_order=space_order,
                       time_order=1)
     hm = TimeFunction(name='hm', grid=model.grid, space_order=space_order,
@@ -123,7 +123,7 @@ def EqsLamMu(model, sig, u, v, grad_lam, grad_mu, grad_rho, C, space_order=8):
     return [wl_update, gradient_lam, wm_update, gradient_mu, wr_update, gradient_rho]
 
 
-def EqsVpVsRho(model, sig, u, v, grad_vp, grad_vs, grad_rho, C, space_order=8):
+def EqsVpVsRho(model, sig, u, v, grad_vp, grad_vs, grad_rho, C, space_order=8, **kwargs):
     hvp = TimeFunction(name='hvp', grid=model.grid, space_order=space_order,
                        time_order=1)
     hvs = TimeFunction(name='hvs', grid=model.grid, space_order=space_order,
@@ -149,7 +149,7 @@ def EqsVpVsRho(model, sig, u, v, grad_vp, grad_vs, grad_rho, C, space_order=8):
     return [wvp_update, gradient_lam, wvs_update, gradient_mu, wr_update, gradient_rho]
 
 
-def EqsIpIs(model, sig, u, v, grad_Ip, grad_Is, grad_rho, C, space_order=8):
+def EqsIpIs(model, sig, u, v, grad_Ip, grad_Is, grad_rho, C, space_order=8, **kwargs):
 
     hIp = TimeFunction(name='hIp', grid=model.grid, space_order=space_order,
                        time_order=1)
@@ -178,31 +178,40 @@ def EqsIpIs(model, sig, u, v, grad_Ip, grad_Is, grad_rho, C, space_order=8):
     return [wIp_update, gradient_Ip, wIs_update, gradient_Is, wr_update, gradient_rho]
 
 
-def EqsC11C12C33(model, sig, u, v, grad_C11, grad_C12, grad_C33, C, space_order=8):
+def EqsC11C12C33(model, sig, u, v, grad_C11, grad_C12, grad_C33, C, space_order=8, **kwargs):
     hC11 = TimeFunction(name='hC11', grid=model.grid, space_order=space_order,
                         time_order=1)
     hC12 = TimeFunction(name='hC12', grid=model.grid, space_order=space_order,
                         time_order=1)
     hC33 = TimeFunction(name='hC33', grid=model.grid, space_order=space_order,
                         time_order=1)
+ 
+    hr = TimeFunction(name='hr', grid=model.grid, space_order=space_order,
+                      time_order=1)
+ 
+    grad_rho = kwargs["grad4"]
 
     WC11 = gather(0, -C.dC11 * S(v))
     WC12 = gather(0, -C.dC12 * S(v))
     WC33 = gather(0, - C.dC33 * S(v))
-
+    Wr = gather(v.dt, 0)
+ 
     W2 = gather(u, sig)
-
+ 
     wC11_update = Eq(hC11, WC11.T * W2)
     gradient_C11 = Eq(grad_C11, grad_C11 - hC11)
-
+ 
     wC12_update = Eq(hC12, WC12.T * W2)
     gradient_C12 = Eq(grad_C12, grad_C12 - hC12)
-
+ 
     wC33_update = Eq(hC33, WC33.T * W2)
     gradient_C33 = Eq(grad_C33, grad_C33 - hC33)
-
+ 
+    wr_update = Eq(hr, Wr.T * W2)
+    gradient_rho = Eq(grad_rho, grad_rho - hr)
+ 
     return [wC11_update, gradient_C11, wC12_update,
-            gradient_C12, wC33_update, gradient_C33]
+            gradient_C12, wC33_update, gradient_C33, wr_update, gradient_rho]
 
 
 def ForwardOperator(model, geometry, space_order=4, save=False, par='lam-mu', **kwargs):
@@ -293,6 +302,7 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
     grad1 = Function(name='grad1', grid=model.grid)
     grad2 = Function(name='grad2', grid=model.grid)
     grad3 = Function(name='grad3', grid=model.grid)
+    grad4 = Function(name='grad4', grid=model.grid)
 
     v = VectorTimeFunction(name='v', grid=model.grid,
                            save=geometry.nt if save and not dswap else None,
@@ -322,7 +332,7 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
 
     kernel = kernels[par]
     gradient_update = kernel(model, sig, u, v, grad1, grad2,
-                             grad3, C, space_order=space_order)
+                             grad3, C, space_order=space_order, grad4=grad4)
 
     # Construct expression to inject receiver values
     rec_term_vx = rec_vx.inject(field=u[0].backward, expr=s*rec_vx/rho)
