@@ -9,7 +9,8 @@ from sympy import symbols, Matrix, ones
 class C_Matrix():
 
     C_matrix_dependency = {'lam-mu': 'C_lambda_mu', 'vp-vs-rho': 'C_vp_vs_rho',
-                           'Ip-Is-rho': 'C_Ip_Is_rho', 'C-elements': 'C_from_model'}
+                           'Ip-Is-rho': 'C_Ip_Is_rho', 'C-elements': 'C_from_model',
+                           'Iso-C11C12C33':'CISO_from_model'}
 
     def __new__(cls, model, parameters):
         c_m_gen = cls.C_matrix_gen(parameters)
@@ -39,7 +40,7 @@ class C_Matrix():
     @classmethod
     def C_from_model(cls, model):
         def subsC():
-            # Geração da matriz simbólica completa
+            # Generation of the complete symbolic matrix
             dict_C = {'C11': getattr(model, 'C11'),
                       'C22': getattr(model, 'C22'),
                       'C33': getattr(model, 'C33'),
@@ -84,14 +85,12 @@ class C_Matrix():
         subs = subsC()
 
         M = matriz.subs(subs)
-        # Geração da matriz simbólica no formato Iso-C11C12C33
-        M.IsoC = C_Matrix._generate_ISO_C(model)
         return M
 
     @staticmethod
-    def _generate_ISO_C(model):
+    def CISO_from_model(model):
         def subsC():
-            # Geração da matriz simbólica no formato Iso-C11C12C33
+            # Generation of the symbolic matrix in the Iso-C11C12C33 format
             dict_C = {'C11': getattr(model, 'C11', 0),
                       'C22': getattr(model, 'C11', 0),
                       'C33': getattr(model, 'C33', 0),

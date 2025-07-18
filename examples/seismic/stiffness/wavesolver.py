@@ -249,4 +249,5 @@ class GenericElasticWaveSolver(object):
 
 
 remove_par = {'lam-mu': ['vp', 'vs', 'Ip', 'Is'], 'vp-vs-rho': ['lam', 'mu', 'Ip', 'Is'],
-              'Ip-Is-rho': ['lam', 'mu']}
+              'Ip-Is-rho': ['lam', 'mu'], 'Iso-C11C12C33':['lam', 'mu', 'vp', 'vs', 'Ip', 'Is', 'C21',
+                                                            'C22', 'C23', 'C32', 'C13','C31']}
