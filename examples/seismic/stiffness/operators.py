@@ -346,4 +346,4 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
 
 
 kernels = {'lam-mu': EqsLamMu, 'vp-vs-rho': EqsVpVsRho, 'Ip-Is-rho': EqsIpIs,
-           'C-elements': EqsC11C12C33}
+           'Iso-C11C12C33': EqsC11C12C33}
