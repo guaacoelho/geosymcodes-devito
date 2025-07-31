@@ -126,8 +126,8 @@ class C_Matrix():
                 if  isinstance(symbolic_matrix[i,j], numbers.Number):
                     matrix[i,j] = 0
                 else:
-                    matrix[i,j] = differentiate_finite(symbolic_matrix[i,j], symbol)
-        return simplify(matrix)
+                    matrix[i,j] = simplify(differentiate_finite(symbolic_matrix[i,j], symbol))
+        return matrix
 
     @classmethod
     def symbolic_matrix(cls, dim, asymmetrical=False, full_matrix=False):
