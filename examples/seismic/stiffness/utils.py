@@ -12,7 +12,7 @@ class C_Matrix():
 
     C_matrix_dependency = {'lam-mu': 'C_lambda_mu', 'vp-vs-rho': 'C_vp_vs_rho',
                            'Ip-Is-rho': 'C_Ip_Is_rho', 'C-elements': 'C_from_model',
-                           'Iso-C11C12C33':'CISO_from_model'}
+                           'Iso-C11C12C33':'CISO_from_model', 'E-nu': 'C_E_nu'}
 
     def __new__(cls, model, parameters):
         cls.model = model # TODO: verify another way to make model available to derivative calculation
@@ -275,6 +275,33 @@ class C_Matrix():
 
         return M
 
+    @classmethod
+    def C_E_nu(cls, model):
+        def subs3D():
+            return {'C11': (E*(1-nu))/((1+nu)*(1-2*nu)),
+                    'C22': (E*(1-nu))/((1+nu)*(1-2*nu)),
+                    'C33': (E*(1-nu))/((1+nu)*(1-2*nu)),
+                    'C44': E/(2*(1+nu)),
+                    'C55': E/(2*(1+nu)),
+                    'C66': E/(2*(1+nu)),
+                    'C12': (E*nu)/((1+nu)*(1-2*nu)),
+                    'C13': (E*nu)/((1+nu)*(1-2*nu)),
+                    'C23': (E*nu)/((1+nu)*(1-2*nu))}
+
+        def subs2D():
+            return {'C11': (E*(1-nu))/((1+nu)*(1-2*nu)),
+                    'C22': (E*(1-nu))/((1+nu)*(1-2*nu)),
+                    'C33': E/(2*(1+nu)),
+                    'C12': (E*nu)/((1+nu)*(1-2*nu))}
+
+        matrix = C_Matrix._matrix_init(model.dim)
+        E = model.E
+        nu = model.nu
+
+        subs = subs3D() if model.dim == 3 else subs2D()
+        M = matrix.subs(subs)
+
+        return M
 
 class AuxiliaryMatrix(Matrix):
 
