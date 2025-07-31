@@ -3,7 +3,9 @@ from devito.types.tensor import (TensorFunction, TensorTimeFunction,
 import numpy as np
 import copy
 from math import ceil
-from sympy import symbols, Matrix, ones
+from sympy import symbols, Matrix, ones, zeros, simplify
+from sympy.calculus.finite_diff import differentiate_finite
+import numbers
 
 
 class C_Matrix():
@@ -13,6 +15,7 @@ class C_Matrix():
                            'Iso-C11C12C33':'CISO_from_model'}
 
     def __new__(cls, model, parameters):
+        cls.model = model # TODO: verify another way to make model available to derivative calculation
         c_m_gen = cls.C_matrix_gen(parameters)
         return c_m_gen(model)
 
@@ -83,7 +86,6 @@ class C_Matrix():
 
         matriz = C_Matrix._matrix_init(model.dim, asymmetrical=True, full_matrix=True)
         subs = subsC()
-
         M = matriz.subs(subs)
         return M
 
@@ -105,28 +107,27 @@ class C_Matrix():
 
         matrix = C_Matrix._matrix_init(model.dim)
         subs = subsC()
-
         M = matrix.subs(subs)
         return M
 
     @staticmethod
-    def _generate_Dc(derivative, symbolic_matrix):
+    def _generate_derivative(derivative, symbolic_matrix):
         # Gets the name of the element being used to calculate
         # the derivative (removing the 'd' from the beginning)
         element = derivative[1:]
 
-        # Makes a copy to avoid impacting future results due to Python's
-        # reference assignment
-        matrix = copy.deepcopy(symbolic_matrix)
+        matrix = zeros(*symbolic_matrix.shape)
+        symbol = getattr(C_Matrix.model, element)
+
         # Iterates through all positions of the 2D matrix
         for i in range(matrix.shape[0]):
             for j in range(matrix.shape[1]):
-                c = matrix[i, j]
-                if getattr(c, 'name', None) == element:
-                    matrix[i, j] = 1
+                # if is a scalar it will raise an error when applying differentiate_finite
+                if  isinstance(symbolic_matrix[i,j], numbers.Number):
+                    matrix[i,j] = 0
                 else:
-                    matrix[i, j] = 0
-        return matrix
+                    matrix[i,j] = differentiate_finite(symbolic_matrix[i,j], symbol)
+        return simplify(matrix)
 
     @classmethod
     def symbolic_matrix(cls, dim, asymmetrical=False, full_matrix=False):
@@ -158,8 +159,6 @@ class C_Matrix():
         subs = subs3D() if model.dim == 3 else subs2D()
         M = matriz.subs(subs)
 
-        M.dlam = cls._generate_Dlam(model)
-        M.dmu = cls._generate_Dmu(model)
         M.inv = cls._inverse_C_lam(model)
         return M
 
@@ -189,33 +188,6 @@ class C_Matrix():
         subs = subs3D() if model.dim == 3 else subs2D()
         return matrix.subs(subs)
 
-    @staticmethod
-    def _generate_Dlam(model):
-        def d_lam(i, j):
-            ii, jj = min(i, j), max(i, j)
-            if (ii <= model.dim and jj <= model.dim):
-                return 1
-            return 0
-
-        d = model.dim*2 + model.dim-2
-        Dlam = [[d_lam(i, j) for i in range(1, d)] for j in range(1, d)]
-        return Matrix(Dlam)
-
-    @staticmethod
-    def _generate_Dmu(model):
-        def d_mu(i, j):
-            ii, jj = min(i, j), max(i, j)
-            if (ii == jj):
-                if ii <= model.dim:
-                    return 2
-                else:
-                    return 1
-            return 0
-
-        d = model.dim*2 + model.dim-2
-        Dmu = [[d_mu(i, j) for i in range(1, d)] for j in range(1, d)]
-        return Matrix(Dmu)
-
     @classmethod
     def C_vp_vs_rho(cls, model):
         def subs3D():
@@ -243,9 +215,6 @@ class C_Matrix():
         subs = subs3D() if model.dim == 3 else subs2D()
         M = matrix.subs(subs)
 
-        M.dvp = cls._generate_Dvp(model)
-        M.dvs = cls._generate_Dvs(model)
-        M.drho = cls._generate_Drho(model)
         M.inv = cls._inverse_C_vp_vs(model)
         return M
 
@@ -276,70 +245,6 @@ class C_Matrix():
         subs = subs3D() if model.dim == 3 else subs2D()
         return matrix.subs(subs)
 
-    @staticmethod
-    def _generate_Dvp(model):
-        def d_vp(i, j):
-            ii, jj = min(i, j), max(i, j)
-            if (ii <= model.dim and jj <= model.dim):
-                return 2*model.rho*model.vp
-            return 0
-
-        d = model.dim*2 + model.dim-2
-        Dvp = [[d_vp(i, j) for i in range(1, d)] for j in range(1, d)]
-        return Matrix(Dvp)
-
-    @staticmethod
-    def _generate_Dvs(model):
-        def subs3D():
-            return {'C11': 0,
-                    'C22': 0,
-                    'C33': 0,
-                    'C44': 2*rho*vs,
-                    'C55': 2*rho*vs,
-                    'C66': 2*rho*vs,
-                    'C12': -4*rho*vs,
-                    'C13': -4*rho*vs,
-                    'C23': -4*rho*vs}
-
-        def subs2D():
-            return {'C11': 0,
-                    'C22': 0,
-                    'C33': 2*rho*vs,
-                    'C12': -4*rho*vs}
-
-        Dvs = C_Matrix._matrix_init(model.dim)
-        rho = model.rho
-        vs = model.vs
-
-        subs = subs3D() if model.dim == 3 else subs2D()
-        return Dvs.subs(subs)
-
-    @staticmethod
-    def _generate_Drho(model):
-        def subs3D():
-            return {'C11': vp*vp,
-                    'C22': vp*vp,
-                    'C33': vp*vp,
-                    'C44': vs*vs,
-                    'C55': vs*vs,
-                    'C66': vs*vs,
-                    'C12': vp*vp - 2*vs*vs,
-                    'C13': vp*vp - 2*vs*vs,
-                    'C23': vp*vp - 2*vs*vs}
-
-        def subs2D():
-            return {'C11': vp*vp,
-                    'C22': vp*vp,
-                    'C33': vs*vs,
-                    'C12': vp*vp - 2*vs*vs}
-
-        Dvs = C_Matrix._matrix_init(model.dim)
-        vp = model.vp
-        vs = model.vs
-
-        subs = subs3D() if model.dim == 3 else subs2D()
-        return Dvs.subs(subs)
-
     @classmethod
     def C_Ip_Is_rho(cls, model):
         def subs3D():
@@ -368,68 +273,27 @@ class C_Matrix():
         subs = subs3D() if model.dim == 3 else subs2D()
         M = matrix.subs(subs)
 
-        M.dIs = cls._generate_DIs(model)
-        M.dIp = cls._generate_DIp(model)
-
         return M
-
-    @staticmethod
-    def _generate_DIp(model):
-        def d_Ip(i, j):
-            ii, jj = min(i, j), max(i, j)
-            if (ii <= model.dim and jj <= model.dim):
-                return model.vp
-            return 0
-
-        d = model.dim*2 + model.dim-2
-        D_Ip = [[d_Ip(i, j) for i in range(1, d)] for j in range(1, d)]
-        return Matrix(D_Ip)
-
-    @staticmethod
-    def _generate_DIs(model):
-        def subs3D():
-            return {'C11': 0,
-                    'C22': 0,
-                    'C33': 0,
-                    'C44': vs,
-                    'C55': vs,
-                    'C66': vs,
-                    'C12': -2*vs,
-                    'C13': -2*vs,
-                    'C23': -2*vs}
-
-        def subs2D():
-            return {'C11': 0,
-                    'C22': 0,
-                    'C33': vs,
-                    'C12': -2*vs}
-
-        D_Is = C_Matrix._matrix_init(model.dim)
-        vs = model.vs
-
-        subs = subs3D() if model.dim == 3 else subs2D()
-        return D_Is.subs(subs)
 
 
 class AuxiliaryMatrix(Matrix):
 
     def __getattr__(self, name):
-        dc_list = self._build_Clist()
+        derivative_symbols = self._build_derivative_symbols()
 
-        # if the desired attribute is in the list of derivative symbols (dc_list),
+        # if the desired attribute is in the list of derivative symbols,
         # generate its respective derivative matrix
-        if name in dc_list:
-            return C_Matrix._generate_Dc(name, self)
+        if name in derivative_symbols:
+            return C_Matrix._generate_derivative(name, self)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-    def _build_Clist(self):
+    def _build_derivative_symbols(self):
         # generates the list of acceptable names indicating which derivative
         # matrix should be constructed
-        dims = ceil(self.cols/2)
-        symbs_C = C_Matrix.symbolic_matrix(dims, asymmetrical=True).free_symbols
-        dc_list = ['d' + c.name for c in symbs_C]
-        return dc_list
-
+        parameters = C_Matrix.model.physical_parameters
+        d_symb = ['d' + p for p in parameters]
+        return d_symb
+    
 
 def D(self, shift=None):
     """
