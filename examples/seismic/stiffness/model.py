@@ -29,6 +29,11 @@ class ElasticModel(SeismicModel):
         self.Ip = self._gen_phys_param(vp*rho, 'Ip', space_order, is_param=True)
         self.Is = self._gen_phys_param(vs*rho, 'Is', space_order, is_param=True)
 
+        E = (rho*vs**2)*((3*vp**2 - 4*vs**2)/(vp**2 - vs**2))
+        nu = (vp**2 - 2*vs**2)/(2*(vp**2 - vs**2))
+        self.E = self._gen_phys_param(E, 'E', space_order, is_param=True)
+        self.nu = self._gen_phys_param(nu, 'nu', space_order, is_param=True)
+
         # Initialize rest of the input physical parameters
         for name in self._known_parameters:
             if kwargs.get(name) is not None:
