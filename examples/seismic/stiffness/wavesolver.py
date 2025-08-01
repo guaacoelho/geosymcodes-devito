@@ -114,7 +114,7 @@ class GenericElasticWaveSolver(object):
         parameters = model.physical_params(**kwargs)
 
         # Pick specifics physical parameters from model unless explicitly provided
-        new_p = {k: v for k, v in parameters.items() if k not in remove_par[par]}
+        new_p = {k: v for k, v in parameters.items() if k in needed_par[par]}
         kwargs.update(new_p)
 
         # Execute operator and return wavefield and receiver data
@@ -172,7 +172,7 @@ class GenericElasticWaveSolver(object):
         parameters = model.physical_params(**kwargs)
 
         # Pick specifics physical parameters from model unless explicitly provided
-        new_p = {k: v for k, v in parameters.items() if k not in remove_par[par]}
+        new_p = {k: v for k, v in parameters.items() if k in needed_par[par]}
         kwargs.update(new_p)
 
         # Execute operator and return wavefield and receiver data
@@ -237,7 +237,7 @@ class GenericElasticWaveSolver(object):
         parameters = model.physical_params(**kwargs)
 
         # Pick specifics physical parameters from model unless explicitly provided
-        new_p = {k: v for k, v in parameters.items() if k not in remove_par[par]}
+        new_p = {k: v for k, v in parameters.items() if k in needed_par[par]}
         kwargs.update(new_p)
 
         has_rec_p = True if kwargs.get('rec_p', None) else None
@@ -255,6 +255,9 @@ class GenericElasticWaveSolver(object):
         return grad1, grad2, grad3, summary
 
 
-remove_par = {'lam-mu': ['vp', 'vs', 'Ip', 'Is'], 'vp-vs-rho': ['lam', 'mu', 'Ip', 'Is'],
-              'Ip-Is-rho': ['lam', 'mu'], 'Iso-C11C12C33':['lam', 'mu', 'vp', 'vs', 'Ip', 'Is', 'C21',
-                                                            'C22', 'C23', 'C32', 'C13','C31']}
+needed_par = {'lam-mu': ['lam', 'mu', 'rho', 'damp'], 'vp-vs-rho': ['vp', 'vs', 'rho', 'damp'],
+              'Ip-Is-rho': ['Ip', 'Is', 'rho', 'damp'], 'Iso-C11C12C33':['C11', 'C12', 'C33', 'rho', 'damp'], 
+              'E-nu':['E', 'nu', 'rho', 'damp'], 'VTI':['vp', 'vs', 'rho', 'damp', 'epsilon', 'gamma', 'delta'],
+              'HTI':['vp', 'vs', 'rho', 'damp', 'epsilon', 'gamma', 'delta'],
+              'rho-phi-CC':['phi', 'CC', 'rho', 'damp', 'a1', 'a2', 'a3', 'b1', 'b2', 'b3'], 
+              'rho-phi-CC':['phi', 'CC', 'rho', 'damp', 'a1', 'a2', 'a3', 'b1', 'b2', 'b3', 'c1', 'c2', 'c3']}

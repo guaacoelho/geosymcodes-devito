@@ -1,9 +1,10 @@
 from examples.seismic import SeismicModel
 from examples.seismic.stiffness.utils import C_Matrix
+from devito import Constant
 
 
 class ElasticModel(SeismicModel):
-    _known_parameters = SeismicModel._known_parameters + ['gamma']
+    _known_parameters = SeismicModel._known_parameters + ['gamma', 'CC', 'Sw']
 
     def _initialize_physics(self, vp, space_order, **kwargs):
         # list o physical parameters there are mandatory for ElasticModel initialization

@@ -3,7 +3,7 @@ from devito.types.tensor import (TensorFunction, TensorTimeFunction,
 import numpy as np
 import copy
 from math import ceil
-from sympy import symbols, Matrix, ones, zeros, simplify
+from sympy import symbols, Matrix, ones, zeros, simplify, sqrt
 from sympy.calculus.finite_diff import differentiate_finite
 import numbers
 
@@ -12,7 +12,9 @@ class C_Matrix():
 
     C_matrix_dependency = {'lam-mu': 'C_lambda_mu', 'vp-vs-rho': 'C_vp_vs_rho',
                            'Ip-Is-rho': 'C_Ip_Is_rho', 'C-elements': 'C_from_model',
-                           'Iso-C11C12C33':'CISO_from_model', 'E-nu': 'C_E_nu'}
+                           'Iso-C11C12C33':'CISO_from_model', 'E-nu': 'C_E_nu',
+                           'VTI':'C_VTI', 'HTI': 'C_HTI', 'rho-phi-CC':'C_rho_phi_CC',
+                           'phi-CC':'C_phi_CC'}
 
     def __new__(cls, model, parameters):
         cls.model = model # TODO: verify another way to make model available to derivative calculation
@@ -301,6 +303,142 @@ class C_Matrix():
         subs = subs3D() if model.dim == 3 else subs2D()
         M = matrix.subs(subs)
 
+        return M
+
+    @classmethod
+    def C_VTI(cls, model):
+        def subs3D():
+            return {'C11': rho*vp**2*(1+2*epsilon),
+                    'C22': rho*vp**2*(1+2*epsilon),
+                    'C33': rho*vp**2,
+                    'C44': rho*vs**2,
+                    'C55': rho*vp**2,
+                    'C66': rho*vp**2*(1+2*gamma),
+                    'C12': A,
+                    'C13': B,
+                    'C23': B}
+
+        def subs2D():
+            return {'C11': rho*vp**2*(1+2*epsilon),
+                    'C22': rho*vp**2,
+                    'C33': rho*vs**2,
+                    'C12': B}
+
+        matrix = C_Matrix._matrix_init(model.dim)
+
+        vp = model.vp
+        vs = model.vs
+        rho = model.rho
+        epsilon = model.epsilon
+        delta = model.delta
+        gamma = model.gamma
+        
+        A = rho*vp**2*(1+2*epsilon) - 2*rho*vs**2*(1+2*gamma)
+        B = sqrt((rho*vp**2*(1+2*delta) - rho*vs**2)*rho*vp**2) - rho*vs**2
+
+        subs = subs3D() if model.dim == 3 else subs2D()
+        M = matrix.subs(subs)
+
+        return M
+
+    @classmethod
+    def C_HTI(cls, model):
+        def subs3D():
+            return {'C11': rho*vp**2,
+                    'C22': rho*vp**2*(1+2*epsilon),
+                    'C33': rho*vp**2*(1+2*epsilon),
+                    'C44': rho*vs**2,
+                    'C55': rho*vp**2*(1+2*gamma),
+                    'C66': rho*vs**2,   
+                    'C12': B,
+                    'C13': A,
+                    'C23': B}
+
+        def subs2D():
+            return {'C11': rho*vp**2,
+                    'C22': rho*vp**2*(1+2*epsilon),
+                    'C33': rho*vs**2,
+                    'C12': B}
+
+        matrix = C_Matrix._matrix_init(model.dim)
+
+        vp = model.vp
+        vs = model.vs
+        rho = model.rho
+        epsilon = model.epsilon
+        delta = model.delta
+        gamma = model.gamma
+        
+        A = rho*vp**2*(1+2*epsilon) - 2*rho*vs**2*(1+2*gamma)
+        B = sqrt((rho*vp**2*(1+2*delta) - rho*vs**2)*rho*vp**2) - rho*vs**2
+
+        subs = subs3D() if model.dim == 3 else subs2D()
+        M = matrix.subs(subs)
+
+        return M
+
+    @classmethod
+    def C_rho_phi_CC(cls, model):
+        def subs3D():
+            return {'C11': rho*f*f,
+                    'C22': rho*f*f,
+                    'C33': rho*f*f,
+                    'C44': rho*g*g,
+                    'C55': rho*g*g,
+                    'C66': rho*g*g,
+                    'C12': rho*f*f - 2*rho*g*g,
+                    'C13': rho*f*f - 2*rho*g*g,
+                    'C23': rho*f*f - 2*rho*g*g}
+        def subs2D():
+            return {'C11': rho*f*f,
+                    'C22': rho*f*f,
+                    'C33': rho*g*g,
+                    'C12': rho*f*f - 2*rho*g*g}
+
+        matrix = C_Matrix._matrix_init(model.dim)
+    
+        phi = model.phi
+        cc = model.CC
+        f = model.a1*phi + model.a2*cc + model.a3
+        g = model.b1*phi + model.b2*cc + model.b3
+        rho = model.rho
+
+        subs = subs3D() if model.dim == 3 else subs2D()
+        M = matrix.subs(subs)
+
+        M.inv = cls._inverse_C_vp_vs(model)
+        return M
+
+    @classmethod
+    def C_phi_CC(cls, model):
+        def subs3D():
+            return {'C11': h*f*f,
+                    'C22': h*f*f,
+                    'C33': h*f*f,
+                    'C44': h*g*g,
+                    'C55': h*g*g,
+                    'C66': h*g*g,
+                    'C12': h*f*f - 2*h*g*g,
+                    'C13': h*f*f - 2*h*g*g,
+                    'C23': h*f*f - 2*h*g*g}
+        def subs2D():
+            return {'C11': h*f*f,
+                    'C22': h*f*f,
+                    'C33': h*g*g,
+                    'C12': h*f*f - 2*h*g*g}
+
+        matrix = C_Matrix._matrix_init(model.dim)
+    
+        phi = model.phi
+        cc = model.CC
+        f = model.a1*phi + model.a2*cc + model.a3
+        g = model.b1*phi + model.b2*cc + model.b3
+        h = model.c1*phi + model.c2*cc + model.c3
+
+        subs = subs3D() if model.dim == 3 else subs2D()
+        M = matrix.subs(subs)
+
+        M.inv = cls._inverse_C_vp_vs(model)
         return M
 
 class AuxiliaryMatrix(Matrix):
