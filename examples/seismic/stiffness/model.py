@@ -43,6 +43,7 @@ class ElasticModel(SeismicModel):
                 params.append(name)
 
         self._initialize_C_arguments(space_order, **kwargs)
+        self._initialize_constants(**kwargs)
 
     def _initialize_C_arguments(self, space_order, **kwargs):
         symbs_C = C_Matrix.symbolic_matrix(self.dim, asymmetrical=True, full_matrix=True).free_symbols
@@ -59,3 +60,12 @@ class ElasticModel(SeismicModel):
                 new_parameter = self._gen_phys_param(kwargs.get(s.name), s.name,
                                                      space_order, is_param=True)
                 setattr(self, s.name, new_parameter)
+
+    def _initialize_constants(self, **kwargs):
+        _constants = ['a1', 'a2', 'a3', 'b1', 'b2', 'b3', 'c1', 'c2', 'c3']
+        # Initialize rest of the input physical parameters
+        for name in _constants:
+            if kwargs.get(name) is not None:
+                const = Constant(name=name, value=kwargs.get(name))
+                setattr(self, name, const)
+                self._physical_parameters.update([name])
