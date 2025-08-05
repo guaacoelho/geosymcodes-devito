@@ -123,6 +123,32 @@ def EqsLamMu(model, sig, u, v, grad_lam, grad_mu, grad_rho, C, space_order=8, **
     return [wl_update, gradient_lam, wm_update, gradient_mu, wr_update, gradient_rho]
 
 
+def EqsPhiCC(model, sig, u, v, grad_phi, grad_CC, grad_rho, C, space_order=8, **kwargs):
+    hphi = TimeFunction(name='hphi', grid=model.grid, space_order=space_order,
+                      time_order=1)
+    hCC = TimeFunction(name='hCC', grid=model.grid, space_order=space_order,
+                      time_order=1)
+    hr = TimeFunction(name='hr', grid=model.grid, space_order=space_order,
+                      time_order=1)
+
+    Wphi = gather(0, -C.dphi * S(v))
+    WCC = gather(0, -C.dCC * S(v))
+    Wr = gather(v.dt, 0)
+
+    W2 = gather(u, sig)
+
+    wphi_update = Eq(hphi, Wphi.T * W2)
+    gradient_phi = Eq(grad_phi, grad_phi - hphi)
+
+    wCC_update = Eq(hCC, WCC.T * W2)
+    gradient_CC = Eq(grad_CC, grad_CC - hCC)
+
+    wr_update = Eq(hr, Wr.T * W2)
+    gradient_rho = Eq(grad_rho, grad_rho - hr)
+
+    return [wphi_update, gradient_phi, wCC_update, gradient_CC, wr_update, gradient_rho]
+
+
 def EqsVpVsRho(model, sig, u, v, grad_vp, grad_vs, grad_rho, C, space_order=8, **kwargs):
     hvp = TimeFunction(name='hvp', grid=model.grid, space_order=space_order,
                        time_order=1)
@@ -356,4 +382,4 @@ def GradientOperator(model, geometry, space_order=4, save=True, par='lam-mu', **
 
 
 kernels = {'lam-mu': EqsLamMu, 'vp-vs-rho': EqsVpVsRho, 'Ip-Is-rho': EqsIpIs,
-           'Iso-C11C12C33': EqsC11C12C33}
+           'Iso-C11C12C33': EqsC11C12C33, 'rho-phi-CC':EqsPhiCC}
