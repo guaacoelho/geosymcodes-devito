@@ -1,2 +1,2 @@
-mpi4py<4.0.2
-ipyparallel<9.1
+mpi4py==4.0.2         # conforme .yml
+ipyparallel==9.0.0    # versão do .yml
